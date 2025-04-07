@@ -105,11 +105,6 @@ h1, h2, h3 {
 .media-container:hover .video-playback {
     display: block;
 }
-/* Optionally hide the image when video is meant to play */
-/* .media-container:hover .keyframe-thumb {
-    opacity: 0;
-} */
-
 
 .similarity-score {
     margin-top: 8px;
