@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Snowboard Clip Similarity</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+    <h1>Snowboard Clip Similarity Browser</h1>
+
+    <div class="query-section">
+        <h2>Query Clip: {{ query.title }}</h2>
+        <div class="media-container query-container"
+             data-video-src="{{ query.video_url }}">
+            <img src="{{ query.keyframe_url }}" alt="Query Keyframe: {{ query.title }}" class="keyframe-thumb">
+            <video class="video-playback" loop muted playsinline preload="metadata"></video>
+             <!-- playsinline helps on mobile, preload=metadata is usually good -->
+        </div>
+    </div>
+
+    <div class="results-section">
+        <h3>Similar Clips:</h3>
+        <div class="results-grid">
+            {% if results %}
+                {% for result in results %}
+                <div class="result-item">
+                    <a href="{{ url_for('query_clip', clip_id=result.clip_id) }}" class="result-link">
+                        <div class="media-container result-container"
+                             data-video-src="{{ result.video_url }}">
+                             <img src="{{ result.keyframe_url }}" alt="Result Keyframe {{ loop.index }}" class="keyframe-thumb">
+                             <video class="video-playback" loop muted playsinline preload="metadata"></video>
+                        </div>
+                    </a>
+                     <p class="similarity-score">Score: {{ "%.3f"|format(result.score) }}</p>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p>No similar clips found.</p>
+            {% endif %}
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+
+</body>
+</html>

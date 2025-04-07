@@ -3,7 +3,11 @@ import numpy as np
 import os
 import argparse
 from tqdm import tqdm
+import subprocess # <-- Import subprocess
+import tempfile # <-- For creating temporary files safely
+import shutil # <-- For finding ffmpeg executable
 
+# --- (calculate_histogram and detect_scenes remain the same) ---
 def calculate_histogram(frame, bins=256, ranges=[0, 256]):
     """Calculates the BGR color histogram for a frame."""
     # Split channels
@@ -20,21 +24,7 @@ def calculate_histogram(frame, bins=256, ranges=[0, 256]):
 def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
     """
     Detects scene cuts in a video based on histogram comparison.
-
-    Args:
-        video_path (str): Path to the input video file.
-        threshold (float): Threshold for scene change detection.
-                           - For HISTCMP_CORREL/HISTCMP_INTERSECT: Lower value means more cuts.
-                           - For HISTCMP_CHISQR/HISTCMP_BHATTACHARYYA: Higher value means more cuts.
-                           Default is 0.6 for HISTCMP_CORREL.
-        hist_method (int): OpenCV histogram comparison method (e.g., cv2.HISTCMP_CORREL).
-
-    Returns:
-        list: A list of tuples, where each tuple contains the (start_frame, end_frame)
-              indices for a detected scene.
-        float: The frames per second (FPS) of the input video.
-        tuple: The (width, height) of the video frames.
-        int: The total number of frames in the video.
+    (Code is identical to your original version - keeping it for context)
     """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -50,7 +40,7 @@ def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
 
     prev_frame = None
     prev_hist = None
-    cut_frames = [0]  # Start with the first frame as the beginning of the first scene
+    cut_frames = [0]
     frame_number = 0
 
     print("Detecting scenes...")
@@ -58,41 +48,22 @@ def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
         while True:
             ret, frame = cap.read()
             if not ret:
-                break # End of video
-
-            # --- Preprocessing (Optional but can help) ---
-            # Convert to grayscale if color is not important or causing issues
-            # gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            # Or apply some blur to reduce noise
-            # frame = cv2.GaussianBlur(frame, (5, 5), 0)
-            # ---------------------------------------------
+                break
 
             current_hist = calculate_histogram(frame)
 
             if prev_hist is not None:
-                # Compare histograms
                 score = cv2.compareHist(prev_hist, current_hist, hist_method)
-
-                # --- Determine Cut based on Method and Threshold ---
-                # Correlation (HISTCMP_CORREL) or Intersection (HISTCMP_INTERSECT):
-                # High score = similar. Low score = different. Cut if score < threshold.
                 is_cut = False
                 if hist_method in [cv2.HISTCMP_CORREL, cv2.HISTCMP_INTERSECT]:
-                    if score < threshold:
-                        is_cut = True
-                # Chi-Squared (HISTCMP_CHISQR) or Bhattacharyya (HISTCMP_BHATTACHARYYA):
-                # Low score = similar. High score = different. Cut if score > threshold.
+                    if score < threshold: is_cut = True
                 elif hist_method in [cv2.HISTCMP_CHISQR, cv2.HISTCMP_BHATTACHARYYA]:
-                     if score > threshold:
-                         is_cut = True
+                     if score > threshold: is_cut = True
                 else:
                      print(f"Warning: Unsupported histogram comparison method: {hist_method}")
-                     # Defaulting to Correlation logic
-                     if score < threshold:
-                         is_cut = True
+                     if score < threshold: is_cut = True # Defaulting
 
                 if is_cut:
-                    # print(f"Cut detected between frame {frame_number-1} and {frame_number} (Score: {score:.4f})")
                     cut_frames.append(frame_number)
 
             prev_frame = frame
@@ -100,40 +71,44 @@ def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
             frame_number += 1
             pbar.update(1)
 
-    # Add the very last frame index to mark the end of the last scene
     if cut_frames[-1] != total_frames:
-         cut_frames.append(total_frames) # Use total_frames as the exclusive end
+         cut_frames.append(total_frames)
 
     cap.release()
 
-    # Create scene list (start_frame, end_frame)
     scenes = []
     if len(cut_frames) > 1:
         for i in range(len(cut_frames) - 1):
             start_frame = cut_frames[i]
-            # End frame is exclusive for range, but inclusive for cv2 reading loop later
-            # So the last frame *in* the scene is cut_frames[i+1] - 1
             end_frame_exclusive = cut_frames[i+1]
-            # Ensure start frame is strictly less than end frame
             if start_frame < end_frame_exclusive:
-                 # Store as (inclusive_start, exclusive_end) for consistency
                 scenes.append((start_frame, end_frame_exclusive))
 
     print(f"Detected {len(scenes)} potential scenes.")
     return scenes, fps, (width, height), total_frames
 
-def extract_clips(video_path, scenes, output_dir, fps, frame_size, total_frames, output_format="mp4"):
+# --- MODIFIED extract_clips ---
+def extract_clips(video_path, scenes, output_dir, fps, frame_size, total_frames,
+                  ffmpeg_path="ffmpeg", # Allow specifying ffmpeg path
+                  crf=23, preset="medium", audio_bitrate="128k",
+                  use_temp_dir=False): # Option for temp file location
     """
-    Extracts detected scenes into separate video files.
+    Extracts detected scenes using cv2.VideoWriter for frame gathering
+    and then re-encodes using ffmpeg for web-compatible H.264/AAC output.
 
     Args:
         video_path (str): Path to the input video file.
         scenes (list): List of (start_frame, end_frame_exclusive) tuples.
-        output_dir (str): Directory to save the output clips.
+        output_dir (str): Directory to save the final output clips.
         fps (float): Frames per second for the output videos.
         frame_size (tuple): (width, height) for the output videos.
-        total_frames (int): Total frames in the original video (for progress bar).
-        output_format (str): Output video format ('mp4', 'avi', etc.).
+        total_frames (int): Total frames in the original video.
+        ffmpeg_path (str): Path to the ffmpeg executable.
+        crf (int): Constant Rate Factor for H.264 (lower=better quality, larger file).
+        preset (str): H.264 encoding preset (e.g., 'medium', 'slow', 'fast').
+        audio_bitrate (str): Target audio bitrate (e.g., '128k'). Use '0' or None for no audio.
+        use_temp_dir (bool): If True, create intermediate files in the system temp dir,
+                             otherwise create them alongside final output before moving.
     """
     if not scenes:
         print("No scenes detected or provided to extract.")
@@ -143,19 +118,19 @@ def extract_clips(video_path, scenes, output_dir, fps, frame_size, total_frames,
         print(f"Creating output directory: {output_dir}")
         os.makedirs(output_dir)
 
-    # Choose a FourCC code based on the output format
-    if output_format.lower() == 'mp4':
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v') # Common for .mp4
-    elif output_format.lower() == 'avi':
-        fourcc = cv2.VideoWriter_fourcc(*'XVID') # Common for .avi
-    else:
-        print(f"Warning: Unsupported output format '{output_format}'. Defaulting to mp4v.")
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-        output_format = 'mp4' # Ensure correct extension
+    # Check if ffmpeg is accessible
+    if shutil.which(ffmpeg_path) is None:
+        print(f"Error: ffmpeg executable not found at '{ffmpeg_path}' or in system PATH.")
+        print("Please install ffmpeg or provide the correct path via --ffmpeg_path.")
+        return
 
-    print(f"\nExtracting {len(scenes)} clips...")
+    # Use 'mp4v' for the intermediate OpenCV write step, as it's generally reliable *for writing*.
+    # The crucial step is the ffmpeg re-encode afterwards.
+    intermediate_fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    intermediate_ext = '.mp4' # Keep extension consistent for intermediate step
 
-    # We need to iterate through the *original* video's frames
+    print(f"\nExtracting {len(scenes)} clips (Intermediate -> FFmpeg H.264)...")
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error: Could not re-open video file for extraction: {video_path}")
@@ -163,64 +138,144 @@ def extract_clips(video_path, scenes, output_dir, fps, frame_size, total_frames,
 
     current_scene_index = 0
     output_writer = None
+    temp_clip_path = None
     frame_number = 0
 
+    # Use a context manager for the progress bar
     with tqdm(total=total_frames, desc="Extracting Clips") as pbar:
         while True:
+            # Check if we can stop early
+            if current_scene_index >= len(scenes):
+                print("All target scenes extracted.")
+                break # Exit outer loop
+
             ret, frame = cap.read()
             if not ret:
+                print("End of input video reached.")
                 break # End of video
 
-            # Check if the current frame belongs to a scene we need to write
+            # Logic for handling the current frame based on scenes
             if current_scene_index < len(scenes):
                 start_frame, end_frame_exclusive = scenes[current_scene_index]
 
-                # If this frame is the start of the *current* target scene
+                # --- Start of a new scene ---
                 if frame_number == start_frame:
-                    clip_filename = f"scene_{current_scene_index + 1:03d}.{output_format}"
-                    clip_path = os.path.join(output_dir, clip_filename)
-                    print(f"Starting scene {current_scene_index + 1} ({start_frame}-{end_frame_exclusive-1}) -> {clip_path}")
-                    output_writer = cv2.VideoWriter(clip_path, fourcc, fps, frame_size)
+                    base_filename = f"scene_{current_scene_index + 1:03d}"
+                    final_clip_path = os.path.join(output_dir, f"{base_filename}.mp4") # Final is always .mp4
+
+                    # Define temporary path
+                    if use_temp_dir:
+                        # Create in system temp directory
+                        temp_dir = tempfile.gettempdir()
+                        temp_clip_path = os.path.join(temp_dir, f"{base_filename}_temp{intermediate_ext}")
+                    else:
+                         # Create alongside final output
+                        temp_clip_path = os.path.join(output_dir, f"{base_filename}_temp{intermediate_ext}")
+
+                    print(f"\nStarting scene {current_scene_index + 1} ({start_frame}-{end_frame_exclusive-1})")
+                    print(f"  Intermediate: {temp_clip_path}")
+                    print(f"  Final Output: {final_clip_path}")
+
+                    output_writer = cv2.VideoWriter(temp_clip_path, intermediate_fourcc, fps, frame_size)
                     if not output_writer.isOpened():
-                        print(f"Error: Could not open VideoWriter for {clip_path}")
-                        # Attempt to continue to the next scene if possible
+                        print(f"Error: Could not open intermediate VideoWriter for {temp_clip_path}")
                         output_writer = None
+                        temp_clip_path = None # Ensure we don't try to process it
                         current_scene_index += 1 # Skip this scene
                         continue # Move to next frame
 
-
-                # If we are currently writing a scene and haven't reached its end
+                # --- Write frame to current scene (if writer is open) ---
                 if output_writer is not None and frame_number < end_frame_exclusive:
                     output_writer.write(frame)
 
-                # If this frame is the *end* of the current scene (exclusive index)
+                # --- End of the current scene ---
                 if output_writer is not None and frame_number == end_frame_exclusive - 1:
-                    print(f"Finished scene {current_scene_index + 1}")
+                    print(f"  Finished writing intermediate frames for scene {current_scene_index + 1}.")
                     output_writer.release()
                     output_writer = None
-                    current_scene_index += 1 # Move to the next scene
 
+                    # --- FFmpeg Re-encoding Step ---
+                    if temp_clip_path and os.path.exists(temp_clip_path):
+                        print(f"  Re-encoding to H.264/AAC using ffmpeg...")
+                        ffmpeg_cmd = [
+                            ffmpeg_path,
+                            '-i', temp_clip_path,       # Input: temporary file
+                            '-c:v', 'libx264',          # Video Codec: H.264
+                            '-preset', preset,          # Encoding speed/compression preset
+                            '-crf', str(crf),           # Quality factor
+                            '-pix_fmt', 'yuv420p',      # Pixel format for compatibility
+                        ]
+
+                        # Add audio flags if needed
+                        if audio_bitrate and audio_bitrate != '0':
+                            ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate])
+                        else:
+                            # Explicitly disable audio if bitrate is 0 or None
+                            ffmpeg_cmd.extend(['-an'])
+
+                        # Add faststart flag and output path
+                        ffmpeg_cmd.extend(['-movflags', '+faststart', final_clip_path])
+
+                        try:
+                            # Run ffmpeg, capture output, check for errors
+                            process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+                            # print("FFmpeg stdout:\n", process.stdout) # Uncomment for detailed FFmpeg output
+                            # print("FFmpeg stderr:\n", process.stderr) # Uncomment for detailed FFmpeg output (often has progress info)
+                            print(f"  Successfully encoded: {final_clip_path}")
+                        except subprocess.CalledProcessError as e:
+                            print(f"Error during ffmpeg re-encoding for scene {current_scene_index + 1}:")
+                            print(f"  Command: {' '.join(e.cmd)}") # Show command executed
+                            print(f"  Return Code: {e.returncode}")
+                            print(f"  FFmpeg Stderr:\n{e.stderr}") # Show error output from ffmpeg
+                            # Keep the problematic temp file for inspection? Optional.
+                            print(f"  Problematic intermediate file kept at: {temp_clip_path}")
+                            temp_clip_path = None # Signal that deletion should be skipped
+                        except FileNotFoundError:
+                             print(f"Error: '{ffmpeg_path}' command not found. Make sure ffmpeg is installed and in PATH.")
+                             # No point continuing if ffmpeg isn't found
+                             cap.release()
+                             return
+                        finally:
+                            # --- Cleanup Temporary File ---
+                            if temp_clip_path and os.path.exists(temp_clip_path):
+                                try:
+                                    os.remove(temp_clip_path)
+                                    # print(f"  Removed temporary file: {temp_clip_path}")
+                                except OSError as e:
+                                    print(f"Warning: Could not remove temporary file {temp_clip_path}: {e}")
+
+                    # Move to the next scene regardless of ffmpeg success for this one
+                    current_scene_index += 1
+                    temp_clip_path = None # Reset temp path for next scene
+
+
+            # Increment frame number and update progress bar
             frame_number += 1
             pbar.update(1)
 
-            # Optimization: If we've finished all scenes, we can stop reading
-            if current_scene_index >= len(scenes):
-                 print("All target scenes extracted.")
-                 break
+            # Optimization moved to the top of the loop
 
-
-    # Release resources
-    if output_writer is not None: # Handle case where video ends mid-scene
-        print(f"Warning: Video ended before finishing scene {current_scene_index + 1}. Closing clip.")
+    # Final cleanup
+    if output_writer is not None: # Handle case where video ends mid-scene writing
+        print(f"Warning: Video ended while writing intermediate scene {current_scene_index + 1}. Releasing writer.")
         output_writer.release()
-    cap.release()
-    cv2.destroyAllWindows() # Clean up any OpenCV windows if they were used
+        # Optionally try to re-encode the partial intermediate file here if temp_clip_path is valid?
+        # For simplicity, we'll just discard it for now. Add ffmpeg call here if needed.
+        if temp_clip_path and os.path.exists(temp_clip_path):
+             print(f"  Discarding incomplete intermediate file: {temp_clip_path}")
+             try:
+                  os.remove(temp_clip_path)
+             except OSError as e:
+                  print(f"Warning: Could not remove incomplete intermediate file {temp_clip_path}: {e}")
 
-    print("\nExtraction complete.")
+    cap.release()
+    # cv2.destroyAllWindows() # Usually not needed unless cv2.imshow was used
+
+    print("\nExtraction process complete.")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Detect scenes in a video and extract them as clips.")
+    parser = argparse.ArgumentParser(description="Detect scenes in a video and extract them as clips (H.264/AAC via ffmpeg).")
     parser.add_argument("input_video", help="Path to the input video file.")
     parser.add_argument("-o", "--output_dir", default="output_clips",
                         help="Directory to save the extracted clips (default: output_clips).")
@@ -231,8 +286,23 @@ def main():
     parser.add_argument("-m", "--method", type=str, default="CORREL",
                         choices=["CORREL", "CHISQR", "INTERSECT", "BHATTACHARYYA"],
                         help="Histogram comparison method (default: CORREL).")
-    parser.add_argument("-f", "--format", type=str, default="mp4", choices=["mp4", "avi"],
-                        help="Output video format for clips (default: mp4).")
+    # Removed --format, output is now always MP4 H.264
+    # parser.add_argument("-f", "--format", type=str, default="mp4", choices=["mp4", "avi"],
+    #                     help="Output video format for clips (default: mp4).")
+
+    # --- FFmpeg Specific Arguments ---
+    parser.add_argument("--ffmpeg_path", type=str, default="ffmpeg",
+                        help="Path to the ffmpeg executable (if not in system PATH).")
+    parser.add_argument("--crf", type=int, default=23,
+                        help="H.264 Constant Rate Factor (quality, lower=better). Default: 23.")
+    parser.add_argument("--preset", type=str, default="medium",
+                        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
+                        help="H.264 encoding preset (speed vs compression). Default: medium.")
+    parser.add_argument("--audio_bitrate", type=str, default="128k",
+                        help="Target AAC audio bitrate (e.g., '128k', '192k', '0' for no audio). Default: 128k.")
+    parser.add_argument("--use_temp_dir", action='store_true',
+                        help="Store intermediate video files in the system's temporary directory instead of the output directory.")
+
 
     args = parser.parse_args()
 
@@ -251,9 +321,22 @@ def main():
     # 1. Detect Scenes
     scenes, fps, frame_size, total_frames = detect_scenes(args.input_video, args.threshold, hist_method_cv)
 
-    # 2. Extract Clips
+    # 2. Extract Clips (using the modified function)
     if scenes is not None and fps is not None and frame_size is not None:
-        extract_clips(args.input_video, scenes, args.output_dir, fps, frame_size, total_frames, args.format)
+        extract_clips(
+            video_path=args.input_video,
+            scenes=scenes,
+            output_dir=args.output_dir,
+            fps=fps,
+            frame_size=frame_size,
+            total_frames=total_frames,
+            # Pass ffmpeg related args:
+            ffmpeg_path=args.ffmpeg_path,
+            crf=args.crf,
+            preset=args.preset,
+            audio_bitrate=args.audio_bitrate,
+            use_temp_dir=args.use_temp_dir
+        )
     else:
         print("Scene detection failed. Cannot extract clips.")
 

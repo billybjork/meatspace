@@ -1,0 +1,119 @@
+body {
+    font-family: sans-serif;
+    margin: 20px;
+    background-color: #f4f4f4;
+}
+
+h1, h2, h3 {
+    color: #333;
+    text-align: center;
+    margin-bottom: 20px;
+}
+
+.query-section {
+    margin-bottom: 40px;
+    padding: 20px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+}
+
+.query-section h2 {
+    margin-top: 0;
+    margin-bottom: 15px;
+}
+
+.results-section {
+    padding: 20px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); /* Responsive grid */
+    gap: 20px;
+}
+
+.result-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background-color: #eee;
+    padding: 10px;
+    border-radius: 5px;
+    transition: transform 0.2s ease-in-out;
+}
+/* Don't make the whole item grow, just indicate interactivity */
+/* .result-item:hover {
+    transform: scale(1.03);
+} */
+
+.result-link {
+    text-decoration: none;
+    color: inherit;
+    display: block; /* Make link fill its container space */
+    width: 100%;
+}
+
+.media-container {
+    position: relative; /* Needed for absolute positioning of video */
+    width: 100%;
+    /* Maintain aspect ratio, e.g., 16:9. Adjust if needed */
+    padding-bottom: 56.25%;
+    background-color: #ccc; /* Placeholder background */
+    overflow: hidden; /* Hide parts of video that might overflow */
+    border-radius: 4px;
+    cursor: pointer;
+     border: 2px solid transparent; /* Reserve space for hover border */
+     transition: border-color 0.2s ease;
+}
+
+/* Add border on hover to the container */
+.result-item:hover .media-container {
+    border-color: #007bff;
+}
+
+
+.keyframe-thumb {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover; /* Cover the area, might crop */
+    display: block;
+    z-index: 1; /* Image initially on top */
+}
+
+.video-playback {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: none; /* Initially hidden */
+    z-index: 2; /* Video plays on top when visible */
+}
+
+/* When the container is hovered, show the video inside it */
+.media-container:hover .video-playback {
+    display: block;
+}
+/* Optionally hide the image when video is meant to play */
+/* .media-container:hover .keyframe-thumb {
+    opacity: 0;
+} */
+
+
+.similarity-score {
+    margin-top: 8px;
+    font-size: 0.9em;
+    color: #555;
+    text-align: center;
+}
