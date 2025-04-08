@@ -32,9 +32,6 @@ document.addEventListener('DOMContentLoaded', () => {
             // Clear any previous timeout to prevent queueing plays
             clearTimeout(playTimeout);
 
-            // Ensure video is visible (redundant if CSS works, but good for debugging)
-            // video.style.display = 'block'; // You could uncomment this to FORCE display via JS
-
             playTimeout = setTimeout(() => {
                 console.log(`Container ${index}: Timeout finished. Attempting to play ${videoSrc}`);
                 video.currentTime = 0; // Start from beginning
@@ -44,10 +41,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     playPromise.then(() => {
                         console.log(`Container ${index}: Playback started successfully for ${videoSrc}`);
                     }).catch(error => {
-                        // Important: Catch and log potential play errors
+                        // CCatch and log potential play errors
                         console.error(`Container ${index}: Playback failed for ${videoSrc}:`, error);
-                        // Maybe hide video again if play fails and it was shown by JS
-                        // video.style.display = 'none';
                     });
                 } else {
                     console.warn(`Container ${index}: video.play() did not return a promise for ${videoSrc}.`);
@@ -60,8 +55,6 @@ document.addEventListener('DOMContentLoaded', () => {
             clearTimeout(playTimeout); // Clear the play timeout if mouse leaves quickly
             video.pause();
             console.log(`Container ${index}: Paused ${videoSrc}`);
-            // Ensure video is hidden (redundant if CSS works)
-            // video.style.display = 'none'; // You could uncomment this to FORCE hide via JS
         });
     });
 });

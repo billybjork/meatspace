@@ -48,10 +48,6 @@ h1, h2, h3 {
     border-radius: 5px;
     transition: transform 0.2s ease-in-out;
 }
-/* Don't make the whole item grow, just indicate interactivity */
-/* .result-item:hover {
-    transform: scale(1.03);
-} */
 
 .result-link {
     text-decoration: none;
@@ -63,7 +59,7 @@ h1, h2, h3 {
 .media-container {
     position: relative; /* Needed for absolute positioning of video */
     width: 100%;
-    /* Maintain aspect ratio, e.g., 16:9. Adjust if needed */
+    /* Maintain aspect ratio of 16:9 */
     padding-bottom: 56.25%;
     background-color: #ccc; /* Placeholder background */
     overflow: hidden; /* Hide parts of video that might overflow */
@@ -73,7 +69,6 @@ h1, h2, h3 {
      transition: border-color 0.2s ease;
 }
 
-/* Add border on hover to the container */
 .result-item:hover .media-container {
     border-color: #007bff;
 }
@@ -101,7 +96,6 @@ h1, h2, h3 {
     z-index: 2; /* Video plays on top when visible */
 }
 
-/* When the container is hovered, show the video inside it */
 .media-container:hover .video-playback {
     display: block;
 }

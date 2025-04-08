@@ -3,12 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Snowboard Clip Similarity</title>
+    <title>Meatspace</title>
     <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 <body>
 
-    <h1>Snowboard Clip Similarity Browser</h1>
+    <h1>Similarity Browser</h1>
 
     <div class="query-section">
         <h2>Query Clip: {{ query.title }}</h2>
@@ -16,7 +16,6 @@
              data-video-src="{{ query.video_url }}">
             <img src="{{ query.keyframe_url }}" alt="Query Keyframe: {{ query.title }}" class="keyframe-thumb">
             <video class="video-playback" loop muted playsinline preload="metadata"></video>
-             <!-- playsinline helps on mobile, preload=metadata is usually good -->
         </div>
     </div>
 
