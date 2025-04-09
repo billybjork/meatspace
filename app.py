@@ -1,22 +1,21 @@
 import os
 import random
-import asyncpg
 import ast
-from fastapi import FastAPI, Request, HTTPException, Query, Depends
+from fastapi import FastAPI, Request, HTTPException, Query, Depends, APIRouter
 from fastapi.responses import RedirectResponse, FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
-import numpy as np
+import asyncpg
 
 load_dotenv()
 
 # --- Configuration ---
 DATABASE_URL = os.getenv("DATABASE_URL")
 MEDIA_BASE_DIR = os.getenv("MEDIA_BASE_DIR")
-DEFAULT_MODEL_NAME = os.getenv("DEFAULT_MODEL_NAME", "openai/clip-vit-base-patch32") # Set default model
-DEFAULT_GENERATION_STRATEGY = os.getenv("DEFAULT_GENERATION_STRATEGY", "keyframe_midpoint") # Set default strategy
-NUM_RESULTS = int(os.getenv("NUM_RESULTS", 10)) # Number of similar clips to show
+DEFAULT_MODEL_NAME = os.getenv("DEFAULT_MODEL_NAME", "openai/clip-vit-base-patch32")
+DEFAULT_GENERATION_STRATEGY = os.getenv("DEFAULT_GENERATION_STRATEGY", "keyframe_midpoint")
+NUM_RESULTS = int(os.getenv("NUM_RESULTS", 10))
 
 # --- Input Validation ---
 if not DATABASE_URL:
@@ -26,52 +25,34 @@ if not MEDIA_BASE_DIR:
 if not os.path.isdir(MEDIA_BASE_DIR):
     raise ValueError(f"MEDIA_BASE_DIR '{MEDIA_BASE_DIR}' does not exist or is not a directory.")
 
+print("--- app.py Configuration ---")
 print(f"Using Database URL (partially hidden): {DATABASE_URL[:15]}...")
 print(f"Using Media Base Directory: {MEDIA_BASE_DIR}")
 print(f"Default Model: {DEFAULT_MODEL_NAME}")
 print(f"Default Strategy: {DEFAULT_GENERATION_STRATEGY}")
+print("-----------------------------")
 
-# --- Database Connection Pool ---
-db_pool = None
-
-async def get_db_connection():
-    """FastAPI dependency to get a connection from the pool."""
-    if db_pool is None:
-         raise RuntimeError("Database connection pool is not initialized.")
-    async with db_pool.acquire() as connection:
+# --- Database Connection Dependency ---
+# The actual pool is managed in main.py's lifespan and stored in app.state
+async def get_db_connection(request: Request) -> asyncpg.Connection:
+    """FastAPI dependency to get a connection from the pool stored in app.state."""
+    pool = getattr(request.app.state, 'db_pool', None)
+    if pool is None:
+         # This indicates a programming error (lifespan didn't run or failed)
+         raise RuntimeError("Database connection pool is not available in app.state.")
+    async with pool.acquire() as connection:
         yield connection
 
-# --- FastAPI App Setup ---
-app = FastAPI(title="Snowboard Similarity Search")
-
-@app.on_event("startup")
-async def startup_db_client():
-    """Create database connection pool on startup."""
-    global db_pool
-    try:
-        async def init(conn):
-             pass # Keep pool creation simple unless specific codec issues arise
-
-        db_pool = await asyncpg.create_pool(DATABASE_URL, init=init)
-        # Try a simple query to confirm connection
-        async with db_pool.acquire() as connection:
-             version = await connection.fetchval("SELECT version();")
-             print(f"Database connection pool created successfully. PostgreSQL version: {version[:15]}...")
-    except Exception as e:
-        print(f"FATAL: Could not create database connection pool: {e}")
-        # Optionally exit or prevent app startup
-        raise RuntimeError(f"Database connection failed: {e}")
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    """Close database connection pool on shutdown."""
-    if db_pool:
-        await db_pool.close()
-        print("Database connection pool closed.")
+# --- FastAPI Application Instance ---
+app = FastAPI(title="Meatspace")
 
 # --- Static Files and Templates ---
-app.mount("/static", StaticFiles(directory="static"), name="static")
-templates = Jinja2Templates(directory="templates")
+script_dir = os.path.dirname(__file__)
+app.mount("/static", StaticFiles(directory=os.path.join(script_dir, "static")), name="static")
+templates = Jinja2Templates(directory=os.path.join(script_dir, "templates"))
+
+# --- API Router ---
+router = APIRouter()
 
 # --- Helper Functions ---
 def format_clip_data(record, request: Request):
@@ -85,11 +66,12 @@ def format_clip_data(record, request: Request):
         "title": title,
         "keyframe_url": request.url_for('serve_media', filepath=record['keyframe_filepath']) if record['keyframe_filepath'] else None,
         "video_url": request.url_for('serve_media', filepath=record['clip_filepath']) if record['clip_filepath'] else None,
+        # Score is added dynamically in the route
     }
 
-# --- FastAPI Routes ---
+# --- API Routes (defined on the router) ---
 
-@app.get("/", response_class=HTMLResponse, name="index")
+@router.get("/", response_class=HTMLResponse, name="index")
 async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_connection)):
     """Redirects to a random clip's query page."""
     try:
@@ -113,7 +95,8 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         print(f"Error fetching random clip: {e}")
         raise HTTPException(status_code=500, detail="Error retrieving data from database.")
 
-@app.get("/query/{clip_id}", response_class=HTMLResponse, name="query_clip")
+
+@router.get("/query/{clip_id}", response_class=HTMLResponse, name="query_clip")
 async def query_clip(
     clip_id: str,
     request: Request,
@@ -130,7 +113,6 @@ async def query_clip(
 
     try:
         # 1. Fetch Query Clip Info (including its embedding and file paths)
-        # Note: asyncpg returns pgvector 'vector' type often as string '[...]' by default
         query_clip_record = await conn.fetchrow(
             """
             SELECT c.id, c.clip_identifier, c.clip_filepath, c.keyframe_filepath, e.embedding
@@ -144,9 +126,7 @@ async def query_clip(
         )
 
         if not query_clip_record:
-            # If clip_id doesn't exist at all
             print(f"Clip identifier '{clip_id}' not found in database.")
-            # Redirect to a random clip as a fallback
             try:
                 random_clip_record = await conn.fetchrow("SELECT clip_identifier FROM clips ORDER BY RANDOM() LIMIT 1")
                 if random_clip_record:
@@ -158,59 +138,44 @@ async def query_clip(
             except Exception as rand_e:
                  raise HTTPException(status_code=500, detail=f"Requested clip not found, error finding alternative: {rand_e}")
 
-        # Format basic clip info first
         query_info = format_clip_data(query_clip_record, request)
 
         if not query_info or query_info.get("video_url") is None:
              print(f"Warning: Missing file path data for query clip {clip_id}.")
-             # Allow showing the clip info we have, but signal potential issue
-             if not error_message: # Don't overwrite existing error
+             if not error_message:
                 error_message = f"Missing file path information for clip '{clip_id}'."
 
-        # Get the embedding data fetched from the DB (likely a string)
         query_embedding_data = query_clip_record['embedding']
 
         if not query_embedding_data:
              print(f"Warning: Embedding not found for query clip {clip_id} with model='{model_name}', strategy='{strategy}'. Cannot perform similarity search.")
              error_message = f"Embedding not found for clip '{clip_id}' (Model: {model_name}, Strategy: {strategy}). Cannot find similar clips."
-             # Render template without results, but *with* query info if available
              return templates.TemplateResponse("index.html", {"request": request, "query": query_info, "results": [], "error": error_message, "model_name": model_name, "strategy": strategy})
 
-        # --- PARSE THE EMBEDDING STRING ---
         try:
-            # Use ast.literal_eval for safe parsing of the list-like string '[0.1, 0.2,...]'
             query_embedding_vector = ast.literal_eval(query_embedding_data)
-
-            # Basic check if parsing resulted in a list
             if not isinstance(query_embedding_vector, list):
                 raise ValueError("Parsed embedding is not a list.")
-
         except (ValueError, SyntaxError, TypeError) as parse_error:
             print(f"ERROR parsing embedding string for clip {clip_id}: {parse_error}")
-            print(f"Received embedding data type: {type(query_embedding_data)}, value (partial): {str(query_embedding_data)[:100]}...") # Log type and partial value
+            print(f"Received embedding data type: {type(query_embedding_data)}, value (partial): {str(query_embedding_data)[:100]}...")
             error_message = f"Failed to parse embedding data from database for query clip '{clip_id}'. Check database integrity or format."
-            # Stop processing and show the error
             return templates.TemplateResponse("index.html", {"request": request, "query": query_info, "results": [], "error": error_message, "model_name": model_name, "strategy": strategy})
 
-        # 2. Find Similar Clips using pgvector
-        # Use <=> for cosine distance (lower is better, 0=identical, 2=opposite)
-        # Calculate similarity score as 1 - distance (assumes normalized vectors like CLIP)
         similarity_query = """
             SELECT
                 c.clip_identifier,
                 c.clip_filepath,
                 c.keyframe_filepath,
-                1 - (e.embedding <=> $1::vector) AS similarity_score -- Calculate cosine similarity
+                1 - (e.embedding <=> $1::vector) AS similarity_score
             FROM embeddings e
             JOIN clips c ON e.clip_id = c.id
             WHERE e.model_name = $2
               AND e.generation_strategy = $3
-              AND c.clip_identifier != $4 -- Exclude the query clip itself
-            ORDER BY e.embedding <=> $1::vector -- Order by cosine distance ASC (most similar first)
+              AND c.clip_identifier != $4
+            ORDER BY e.embedding <=> $1::vector
             LIMIT $5;
         """
-
-        # Convert the Python list back to its string representation for asyncpg query parameter $1
         query_embedding_string = str(query_embedding_vector)
 
         similar_records = await conn.fetch(
@@ -218,54 +183,48 @@ async def query_clip(
             query_embedding_string,
             model_name,
             strategy,
-            clip_id, # Query clip identifier to exclude
+            clip_id,
             NUM_RESULTS
         )
 
-        # 3. Format Results
         for record in similar_records:
             formatted = format_clip_data(record, request)
             if formatted:
                 formatted["score"] = record['similarity_score']
                 results.append(formatted)
 
-        if not results and not error_message: # Check if no results found AND no previous error occurred
+        if not results and not error_message:
             print(f"No similar clips found for {clip_id} with model='{model_name}', strategy='{strategy}'.")
 
     except asyncpg.exceptions.UndefinedFunctionError as e:
          print(f"DATABASE ERROR: pgvector function error. Is the pgvector extension installed and enabled? Error: {e}")
          error_message = "Database error: Vector operations not available. Ensure pgvector extension is installed and enabled."
-         # Attempt to render template with error, showing query clip if possible
     except Exception as e:
         print(f"Error during query for clip {clip_id}: {e}")
         import traceback
-        traceback.print_exc() # Print full traceback for unexpected errors
-        # Don't crash, try to return template with error
+        traceback.print_exc()
         error_message = f"An unexpected error occurred: {e}"
 
-    # Render the template
     return templates.TemplateResponse(
         "index.html",
         {
             "request": request,
-            "query": query_info, # Will be None if initial fetch failed severely
+            "query": query_info,
             "results": results,
             "error": error_message,
-            "model_name": model_name, # Pass these back for display or forms
+            "model_name": model_name,
             "strategy": strategy
         }
     )
 
-@app.get("/media/{filepath:path}", name="serve_media")
+# Separate route for media serving, still makes sense to be defined here
+# near the other routes, but doesn't need DB access.
+@router.get("/media/{filepath:path}", name="serve_media")
 async def serve_media(filepath: str):
     """Serves media files (videos, images) safely from the MEDIA_BASE_DIR."""
-    # Use the configured MEDIA_BASE_DIR
     safe_base_path = os.path.abspath(MEDIA_BASE_DIR)
-    # Construct the full path requested
     requested_path = os.path.abspath(os.path.join(safe_base_path, filepath))
 
-    # --- Security Check: Ensure path is within MEDIA_BASE_DIR ---
-    # Use os.path.commonpath (Python 3.5+) or check prefix after resolving paths
     if os.path.commonpath([safe_base_path]) != os.path.commonpath([safe_base_path, requested_path]):
         print(f"Warning: Attempted directory traversal: {filepath}")
         raise HTTPException(status_code=404, detail="File not found (Invalid Path)")
@@ -276,8 +235,5 @@ async def serve_media(filepath: str):
 
     return FileResponse(requested_path)
 
-# --- Main Execution ---
-if __name__ == '__main__':
-    import uvicorn
-    print("Starting FastAPI server...")
-    uvicorn.run("app:app", host="127.0.0.1", port=5001, reload=True)
+# Include the router in the main app instance
+app.include_router(router)
