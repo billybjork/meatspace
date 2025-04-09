@@ -3,29 +3,25 @@ import numpy as np
 import os
 import argparse
 from tqdm import tqdm
-import subprocess # <-- Import subprocess
-import tempfile # <-- For creating temporary files safely
-import shutil # <-- For finding ffmpeg executable
+import subprocess
+import tempfile
+import shutil
+import psycopg2
+from psycopg2 import sql
+from datetime import date
 
-# --- (calculate_histogram and detect_scenes remain the same) ---
+from db_utils import get_db_connection, get_media_base_dir
+
 def calculate_histogram(frame, bins=256, ranges=[0, 256]):
-    """Calculates the BGR color histogram for a frame."""
-    # Split channels
     b, g, r = cv2.split(frame)
-    # Calculate histogram for each channel
     hist_b = cv2.calcHist([b], [0], None, [bins], ranges)
     hist_g = cv2.calcHist([g], [0], None, [bins], ranges)
     hist_r = cv2.calcHist([r], [0], None, [bins], ranges)
-    # Concatenate histograms and normalize
     hist = np.concatenate((hist_b, hist_g, hist_r))
-    cv2.normalize(hist, hist) # Normalize for better comparison
+    cv2.normalize(hist, hist)
     return hist
 
 def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
-    """
-    Detects scene cuts in a video based on histogram comparison.
-    (Code is identical to your original version - keeping it for context)
-    """
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         print(f"Error: Could not open video file: {video_path}")
@@ -47,11 +43,8 @@ def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
     with tqdm(total=total_frames, desc="Analyzing Frames") as pbar:
         while True:
             ret, frame = cap.read()
-            if not ret:
-                break
-
+            if not ret: break
             current_hist = calculate_histogram(frame)
-
             if prev_hist is not None:
                 score = cv2.compareHist(prev_hist, current_hist, hist_method)
                 is_cut = False
@@ -59,19 +52,14 @@ def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
                     if score < threshold: is_cut = True
                 elif hist_method in [cv2.HISTCMP_CHISQR, cv2.HISTCMP_BHATTACHARYYA]:
                      if score > threshold: is_cut = True
-                else:
-                     print(f"Warning: Unsupported histogram comparison method: {hist_method}")
-                     if score < threshold: is_cut = True # Defaulting
-
-                if is_cut:
-                    cut_frames.append(frame_number)
-
-            prev_frame = frame
+                else: # Defaulting
+                     if score < threshold: is_cut = True
+                if is_cut: cut_frames.append(frame_number)
             prev_hist = current_hist
             frame_number += 1
             pbar.update(1)
 
-    if cut_frames[-1] != total_frames:
+    if total_frames > 0 and cut_frames[-1] != total_frames: # Add final frame only if video has frames
          cut_frames.append(total_frames)
 
     cap.release()
@@ -87,53 +75,70 @@ def detect_scenes(video_path, threshold=0.6, hist_method=cv2.HISTCMP_CORREL):
     print(f"Detected {len(scenes)} potential scenes.")
     return scenes, fps, (width, height), total_frames
 
-# --- MODIFIED extract_clips ---
-def extract_clips(video_path, scenes, output_dir, fps, frame_size, total_frames,
-                  ffmpeg_path="ffmpeg", # Allow specifying ffmpeg path
-                  crf=23, preset="medium", audio_bitrate="128k",
-                  use_temp_dir=False): # Option for temp file location
-    """
-    Extracts detected scenes using cv2.VideoWriter for frame gathering
-    and then re-encodes using ffmpeg for web-compatible H.264/AAC output.
+def get_or_create_source_video(conn, abs_video_path, filename, fps, width, height, total_frames):
+    """Finds or creates a source_video record and returns its ID."""
+    duration_seconds = total_frames / fps if fps > 0 else 0
+    rel_video_path = os.path.relpath(abs_video_path, get_media_base_dir())
 
-    Args:
-        video_path (str): Path to the input video file.
-        scenes (list): List of (start_frame, end_frame_exclusive) tuples.
-        output_dir (str): Directory to save the final output clips.
-        fps (float): Frames per second for the output videos.
-        frame_size (tuple): (width, height) for the output videos.
-        total_frames (int): Total frames in the original video.
-        ffmpeg_path (str): Path to the ffmpeg executable.
-        crf (int): Constant Rate Factor for H.264 (lower=better quality, larger file).
-        preset (str): H.264 encoding preset (e.g., 'medium', 'slow', 'fast').
-        audio_bitrate (str): Target audio bitrate (e.g., '128k'). Use '0' or None for no audio.
-        use_temp_dir (bool): If True, create intermediate files in the system temp dir,
-                             otherwise create them alongside final output before moving.
+    with conn.cursor() as cur:
+        # Try to find existing record by absolute path
+        cur.execute("SELECT id FROM source_videos WHERE filepath = %s", (rel_video_path,))
+        result = cur.fetchone()
+        if result:
+            print(f"Found existing source video record (ID: {result[0]}) for {filename}")
+            return result[0]
+        else:
+            # Insert new record
+            print(f"Creating new source video record for {filename}")
+            try:
+                cur.execute(
+                    """
+                    INSERT INTO source_videos (filepath, filename, duration_seconds, fps, width, height, published_date, web_scraped)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                    RETURNING id;
+                    """,
+                    (rel_video_path, filename, duration_seconds, fps, width, height, None, False) # Add logic for published_date/web_scraped if available
+                )
+                source_video_id = cur.fetchone()[0]
+                conn.commit() # Commit after successful insert
+                print(f"Created source video record with ID: {source_video_id}")
+                return source_video_id
+            except psycopg2.Error as e:
+                conn.rollback() # Rollback on error
+                print(f"Error inserting source video record for {filename}: {e}")
+                raise
+
+def extract_clips(db_conn, source_video_id, abs_video_path, source_filename_base, scenes,
+                  output_subdir, # Relative subdir for clips (e.g., "LANDLINE_scenes")
+                  fps, frame_size, total_frames,
+                  ffmpeg_path="ffmpeg", crf=23, preset="medium", audio_bitrate="128k",
+                  use_temp_dir=False):
+    """
+    Extracts clips, saves them, and inserts records into the 'clips' table.
     """
     if not scenes:
         print("No scenes detected or provided to extract.")
         return
 
-    if not os.path.exists(output_dir):
-        print(f"Creating output directory: {output_dir}")
-        os.makedirs(output_dir)
+    media_base_dir = get_media_base_dir()
+    # Ensure the absolute output directory exists
+    abs_output_dir = os.path.join(media_base_dir, output_subdir)
+    if not os.path.exists(abs_output_dir):
+        print(f"Creating output directory: {abs_output_dir}")
+        os.makedirs(abs_output_dir)
 
-    # Check if ffmpeg is accessible
     if shutil.which(ffmpeg_path) is None:
-        print(f"Error: ffmpeg executable not found at '{ffmpeg_path}' or in system PATH.")
-        print("Please install ffmpeg or provide the correct path via --ffmpeg_path.")
+        print(f"Error: ffmpeg not found at '{ffmpeg_path}' or in PATH.")
         return
 
-    # Use 'mp4v' for the intermediate OpenCV write step, as it's generally reliable *for writing*.
-    # The crucial step is the ffmpeg re-encode afterwards.
     intermediate_fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    intermediate_ext = '.mp4' # Keep extension consistent for intermediate step
+    intermediate_ext = '.mp4'
 
     print(f"\nExtracting {len(scenes)} clips (Intermediate -> FFmpeg H.264)...")
 
-    cap = cv2.VideoCapture(video_path)
+    cap = cv2.VideoCapture(abs_video_path)
     if not cap.isOpened():
-        print(f"Error: Could not re-open video file for extraction: {video_path}")
+        print(f"Error: Could not re-open video file for extraction: {abs_video_path}")
         return
 
     current_scene_index = 0
@@ -141,204 +146,203 @@ def extract_clips(video_path, scenes, output_dir, fps, frame_size, total_frames,
     temp_clip_path = None
     frame_number = 0
 
-    # Use a context manager for the progress bar
     with tqdm(total=total_frames, desc="Extracting Clips") as pbar:
         while True:
-            # Check if we can stop early
-            if current_scene_index >= len(scenes):
-                print("All target scenes extracted.")
-                break # Exit outer loop
-
+            if current_scene_index >= len(scenes): break
             ret, frame = cap.read()
-            if not ret:
-                print("End of input video reached.")
-                break # End of video
+            if not ret: break
 
-            # Logic for handling the current frame based on scenes
             if current_scene_index < len(scenes):
                 start_frame, end_frame_exclusive = scenes[current_scene_index]
 
-                # --- Start of a new scene ---
                 if frame_number == start_frame:
-                    base_filename = f"scene_{current_scene_index + 1:03d}"
-                    final_clip_path = os.path.join(output_dir, f"{base_filename}.mp4") # Final is always .mp4
+                    # --- Generate Clip Identifier and Paths ---
+                    # Use source filename base + scene index for identifier
+                    clip_identifier = f"{source_filename_base}_scene_{current_scene_index + 1:03d}"
+                    final_clip_filename = f"{clip_identifier}.mp4"
+                    abs_final_clip_path = os.path.join(abs_output_dir, final_clip_filename)
+                    rel_final_clip_path = os.path.join(output_subdir, final_clip_filename) # Relative path for DB
 
                     # Define temporary path
                     if use_temp_dir:
-                        # Create in system temp directory
                         temp_dir = tempfile.gettempdir()
-                        temp_clip_path = os.path.join(temp_dir, f"{base_filename}_temp{intermediate_ext}")
+                        temp_clip_path = os.path.join(temp_dir, f"{clip_identifier}_temp{intermediate_ext}")
                     else:
-                         # Create alongside final output
-                        temp_clip_path = os.path.join(output_dir, f"{base_filename}_temp{intermediate_ext}")
+                        temp_clip_path = os.path.join(abs_output_dir, f"{clip_identifier}_temp{intermediate_ext}")
 
-                    print(f"\nStarting scene {current_scene_index + 1} ({start_frame}-{end_frame_exclusive-1})")
-                    print(f"  Intermediate: {temp_clip_path}")
-                    print(f"  Final Output: {final_clip_path}")
+                    print(f"\nStarting {clip_identifier} ({start_frame}-{end_frame_exclusive-1})")
+                    print(f"  Final Output: {abs_final_clip_path}")
 
                     output_writer = cv2.VideoWriter(temp_clip_path, intermediate_fourcc, fps, frame_size)
                     if not output_writer.isOpened():
                         print(f"Error: Could not open intermediate VideoWriter for {temp_clip_path}")
-                        output_writer = None
-                        temp_clip_path = None # Ensure we don't try to process it
-                        current_scene_index += 1 # Skip this scene
-                        continue # Move to next frame
+                        output_writer = None; temp_clip_path = None
+                        current_scene_index += 1; continue
 
-                # --- Write frame to current scene (if writer is open) ---
                 if output_writer is not None and frame_number < end_frame_exclusive:
                     output_writer.write(frame)
 
-                # --- End of the current scene ---
                 if output_writer is not None and frame_number == end_frame_exclusive - 1:
-                    print(f"  Finished writing intermediate frames for scene {current_scene_index + 1}.")
-                    output_writer.release()
-                    output_writer = None
+                    print(f"  Finished writing intermediate frames for {clip_identifier}.")
+                    output_writer.release(); output_writer = None
+                    ffmpeg_success = False
 
-                    # --- FFmpeg Re-encoding Step ---
                     if temp_clip_path and os.path.exists(temp_clip_path):
                         print(f"  Re-encoding to H.264/AAC using ffmpeg...")
                         ffmpeg_cmd = [
-                            ffmpeg_path,
-                            '-i', temp_clip_path,       # Input: temporary file
-                            '-c:v', 'libx264',          # Video Codec: H.264
-                            '-preset', preset,          # Encoding speed/compression preset
-                            '-crf', str(crf),           # Quality factor
-                            '-pix_fmt', 'yuv420p',      # Pixel format for compatibility
+                            ffmpeg_path, '-y', # Overwrite output without asking
+                            '-i', temp_clip_path, '-c:v', 'libx264', '-preset', preset,
+                            '-crf', str(crf), '-pix_fmt', 'yuv420p'
                         ]
-
-                        # Add audio flags if needed
                         if audio_bitrate and audio_bitrate != '0':
                             ffmpeg_cmd.extend(['-c:a', 'aac', '-b:a', audio_bitrate])
                         else:
-                            # Explicitly disable audio if bitrate is 0 or None
                             ffmpeg_cmd.extend(['-an'])
-
-                        # Add faststart flag and output path
-                        ffmpeg_cmd.extend(['-movflags', '+faststart', final_clip_path])
+                        ffmpeg_cmd.extend(['-movflags', '+faststart', abs_final_clip_path])
 
                         try:
-                            # Run ffmpeg, capture output, check for errors
-                            process = subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
-                            # print("FFmpeg stdout:\n", process.stdout) # Uncomment for detailed FFmpeg output
-                            # print("FFmpeg stderr:\n", process.stderr) # Uncomment for detailed FFmpeg output (often has progress info)
-                            print(f"  Successfully encoded: {final_clip_path}")
+                            subprocess.run(ffmpeg_cmd, check=True, capture_output=True, text=True)
+                            print(f"  Successfully encoded: {abs_final_clip_path}")
+                            ffmpeg_success = True
                         except subprocess.CalledProcessError as e:
-                            print(f"Error during ffmpeg re-encoding for scene {current_scene_index + 1}:")
-                            print(f"  Command: {' '.join(e.cmd)}") # Show command executed
-                            print(f"  Return Code: {e.returncode}")
-                            print(f"  FFmpeg Stderr:\n{e.stderr}") # Show error output from ffmpeg
-                            # Keep the problematic temp file for inspection? Optional.
-                            print(f"  Problematic intermediate file kept at: {temp_clip_path}")
-                            temp_clip_path = None # Signal that deletion should be skipped
+                            print(f"Error during ffmpeg re-encoding for {clip_identifier}:")
+                            print(f"  Command: {' '.join(e.cmd)}")
+                            print(f"  FFmpeg Stderr:\n{e.stderr}")
+                            temp_clip_path = None # Keep intermediate file
                         except FileNotFoundError:
-                             print(f"Error: '{ffmpeg_path}' command not found. Make sure ffmpeg is installed and in PATH.")
-                             # No point continuing if ffmpeg isn't found
-                             cap.release()
-                             return
+                             print(f"Error: '{ffmpeg_path}' command not found.")
+                             cap.release(); return # Exit if ffmpeg is missing
                         finally:
-                            # --- Cleanup Temporary File ---
                             if temp_clip_path and os.path.exists(temp_clip_path):
-                                try:
-                                    os.remove(temp_clip_path)
-                                    # print(f"  Removed temporary file: {temp_clip_path}")
-                                except OSError as e:
-                                    print(f"Warning: Could not remove temporary file {temp_clip_path}: {e}")
+                                try: os.remove(temp_clip_path)
+                                except OSError as e: print(f"Warning: Could not remove temp file {temp_clip_path}: {e}")
 
-                    # Move to the next scene regardless of ffmpeg success for this one
+                    # --- Insert into Database if FFmpeg was successful ---
+                    if ffmpeg_success:
+                        start_time_seconds = start_frame / fps if fps > 0 else 0
+                        end_time_seconds = end_frame_exclusive / fps if fps > 0 else 0
+                        try:
+                            with db_conn.cursor() as cur:
+                                cur.execute(
+                                    """
+                                    INSERT INTO clips (source_video_id, clip_filepath, clip_identifier,
+                                                     start_frame, end_frame, start_time_seconds, end_time_seconds)
+                                    VALUES (%s, %s, %s, %s, %s, %s, %s)
+                                    ON CONFLICT (clip_identifier) DO UPDATE SET -- Or DO NOTHING if you prefer
+                                        source_video_id = EXCLUDED.source_video_id,
+                                        clip_filepath = EXCLUDED.clip_filepath,
+                                        start_frame = EXCLUDED.start_frame,
+                                        end_frame = EXCLUDED.end_frame,
+                                        start_time_seconds = EXCLUDED.start_time_seconds,
+                                        end_time_seconds = EXCLUDED.end_time_seconds;
+                                    """,
+                                    (source_video_id, rel_final_clip_path, clip_identifier,
+                                     start_frame, end_frame_exclusive, start_time_seconds, end_time_seconds)
+                                )
+                            db_conn.commit()
+                            print(f"  Successfully inserted/updated clip record for {clip_identifier}")
+                        except psycopg2.Error as e:
+                            db_conn.rollback()
+                            print(f"Error inserting clip record for {clip_identifier}: {e}")
+                            # Decide how to handle: maybe delete the generated file?
+                            if os.path.exists(abs_final_clip_path):
+                                print(f"  Deleting potentially orphaned file: {abs_final_clip_path}")
+                                try: os.remove(abs_final_clip_path)
+                                except OSError as del_e: print(f"  Warning: Failed to delete orphaned file: {del_e}")
+
+                    # Move to the next scene
                     current_scene_index += 1
-                    temp_clip_path = None # Reset temp path for next scene
+                    temp_clip_path = None
 
-
-            # Increment frame number and update progress bar
             frame_number += 1
             pbar.update(1)
 
-            # Optimization moved to the top of the loop
-
     # Final cleanup
-    if output_writer is not None: # Handle case where video ends mid-scene writing
-        print(f"Warning: Video ended while writing intermediate scene {current_scene_index + 1}. Releasing writer.")
+    if output_writer is not None:
+        print(f"Warning: Video ended mid-scene. Releasing writer.")
         output_writer.release()
-        # Optionally try to re-encode the partial intermediate file here if temp_clip_path is valid?
-        # For simplicity, we'll just discard it for now. Add ffmpeg call here if needed.
         if temp_clip_path and os.path.exists(temp_clip_path):
              print(f"  Discarding incomplete intermediate file: {temp_clip_path}")
-             try:
-                  os.remove(temp_clip_path)
-             except OSError as e:
-                  print(f"Warning: Could not remove incomplete intermediate file {temp_clip_path}: {e}")
+             try: os.remove(temp_clip_path)
+             except OSError as e: print(f"Warning: Could not remove incomplete file {temp_clip_path}: {e}")
 
     cap.release()
-    # cv2.destroyAllWindows() # Usually not needed unless cv2.imshow was used
-
     print("\nExtraction process complete.")
 
-
 def main():
-    parser = argparse.ArgumentParser(description="Detect scenes in a video and extract them as clips (H.264/AAC via ffmpeg).")
+    parser = argparse.ArgumentParser(description="Detect scenes, extract clips, and record in database.")
     parser.add_argument("input_video", help="Path to the input video file.")
-    parser.add_argument("-o", "--output_dir", default="output_clips",
-                        help="Directory to save the extracted clips (default: output_clips).")
-    parser.add_argument("-t", "--threshold", type=float, default=0.6,
-                        help="Scene detection threshold (default: 0.6 for Correlation). "
-                             "Lower for CORREL/INTERSECT means more sensitive (more cuts). "
-                             "Higher for CHISQR/BHATTACHARYYA means more sensitive.")
-    parser.add_argument("-m", "--method", type=str, default="CORREL",
-                        choices=["CORREL", "CHISQR", "INTERSECT", "BHATTACHARYYA"],
-                        help="Histogram comparison method (default: CORREL).")
-    # Removed --format, output is now always MP4 H.264
-    # parser.add_argument("-f", "--format", type=str, default="mp4", choices=["mp4", "avi"],
-    #                     help="Output video format for clips (default: mp4).")
-
-    # --- FFmpeg Specific Arguments ---
-    parser.add_argument("--ffmpeg_path", type=str, default="ffmpeg",
-                        help="Path to the ffmpeg executable (if not in system PATH).")
-    parser.add_argument("--crf", type=int, default=23,
-                        help="H.264 Constant Rate Factor (quality, lower=better). Default: 23.")
-    parser.add_argument("--preset", type=str, default="medium",
-                        choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'],
-                        help="H.264 encoding preset (speed vs compression). Default: medium.")
-    parser.add_argument("--audio_bitrate", type=str, default="128k",
-                        help="Target AAC audio bitrate (e.g., '128k', '192k', '0' for no audio). Default: 128k.")
-    parser.add_argument("--use_temp_dir", action='store_true',
-                        help="Store intermediate video files in the system's temporary directory instead of the output directory.")
-
+    parser.add_argument("-o", "--output_subdir", default="extracted_clips",
+                        help="Relative subdirectory under MEDIA_BASE_DIR to save clips (default: extracted_clips).")
+    # Scene detection args
+    parser.add_argument("-t", "--threshold", type=float, default=0.6, help="Scene detection threshold (default: 0.6).")
+    parser.add_argument("-m", "--method", type=str, default="CORREL", choices=["CORREL", "CHISQR", "INTERSECT", "BHATTACHARYYA"], help="Histogram comparison method (default: CORREL).")
+    # FFmpeg args
+    parser.add_argument("--ffmpeg_path", type=str, default="ffmpeg", help="Path to the ffmpeg executable.")
+    parser.add_argument("--crf", type=int, default=23, help="H.264 CRF (default: 23).")
+    parser.add_argument("--preset", type=str, default="medium", choices=['ultrafast', 'superfast', 'veryfast', 'faster', 'fast', 'medium', 'slow', 'slower', 'veryslow'], help="H.264 preset (default: medium).")
+    parser.add_argument("--audio_bitrate", type=str, default="128k", help="AAC audio bitrate (default: 128k, '0' for none).")
+    parser.add_argument("--use_temp_dir", action='store_true', help="Use system temp dir for intermediate files.")
 
     args = parser.parse_args()
 
-    # Map method string to OpenCV constant
-    hist_methods = {
-        "CORREL": cv2.HISTCMP_CORREL,
-        "CHISQR": cv2.HISTCMP_CHISQR,
-        "INTERSECT": cv2.HISTCMP_INTERSECT,
-        "BHATTACHARYYA": cv2.HISTCMP_BHATTACHARYYA
-    }
-    hist_method_cv = hist_methods.get(args.method.upper())
-    if hist_method_cv is None:
-        print(f"Error: Invalid histogram comparison method '{args.method}'")
+    # Validate input video path
+    abs_input_video = os.path.abspath(args.input_video)
+    if not os.path.isfile(abs_input_video):
+        print(f"Error: Input video file not found: {abs_input_video}")
         return
 
-    # 1. Detect Scenes
-    scenes, fps, frame_size, total_frames = detect_scenes(args.input_video, args.threshold, hist_method_cv)
+    source_filename = os.path.basename(abs_input_video)
+    source_filename_base = os.path.splitext(source_filename)[0] # Filename without extension
 
-    # 2. Extract Clips (using the modified function)
-    if scenes is not None and fps is not None and frame_size is not None:
-        extract_clips(
-            video_path=args.input_video,
-            scenes=scenes,
-            output_dir=args.output_dir,
-            fps=fps,
-            frame_size=frame_size,
-            total_frames=total_frames,
-            # Pass ffmpeg related args:
-            ffmpeg_path=args.ffmpeg_path,
-            crf=args.crf,
-            preset=args.preset,
-            audio_bitrate=args.audio_bitrate,
-            use_temp_dir=args.use_temp_dir
-        )
-    else:
-        print("Scene detection failed. Cannot extract clips.")
+    # Map method string to OpenCV constant
+    hist_methods = { "CORREL": cv2.HISTCMP_CORREL, "CHISQR": cv2.HISTCMP_CHISQR, "INTERSECT": cv2.HISTCMP_INTERSECT, "BHATTACHARYYA": cv2.HISTCMP_BHATTACHARYYA }
+    hist_method_cv = hist_methods.get(args.method.upper())
+    if hist_method_cv is None:
+        print(f"Error: Invalid histogram comparison method '{args.method}'"); return
+
+    # --- Database Connection ---
+    conn = None
+    try:
+        conn = get_db_connection()
+
+        # 1. Detect Scenes
+        scenes, fps, frame_size, total_frames = detect_scenes(abs_input_video, args.threshold, hist_method_cv)
+
+        if scenes is not None and fps is not None and frame_size is not None:
+            # 2. Get or Create Source Video Record
+            source_video_id = get_or_create_source_video(
+                conn, abs_input_video, source_filename, fps, frame_size[0], frame_size[1], total_frames
+            )
+
+            # 3. Extract Clips and Insert Records
+            extract_clips(
+                db_conn=conn,
+                source_video_id=source_video_id,
+                abs_video_path=abs_input_video,
+                source_filename_base=source_filename_base, # Pass base filename for identifier
+                scenes=scenes,
+                output_subdir=args.output_subdir, # Pass relative subdir
+                fps=fps,
+                frame_size=frame_size,
+                total_frames=total_frames,
+                ffmpeg_path=args.ffmpeg_path,
+                crf=args.crf,
+                preset=args.preset,
+                audio_bitrate=args.audio_bitrate,
+                use_temp_dir=args.use_temp_dir
+            )
+        else:
+            print("Scene detection failed. Cannot extract clips.")
+
+    except (ValueError, psycopg2.Error) as e:
+        print(f"A critical error occurred: {e}")
+        # No db actions needed if connection failed initially
+        if conn: conn.rollback() # Rollback any potential partial transaction
+    finally:
+        if conn:
+            conn.close()
+            print("Database connection closed.")
 
 if __name__ == "__main__":
     main()
