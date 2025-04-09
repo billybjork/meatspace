@@ -2,6 +2,7 @@ import torch
 from PIL import Image
 import os
 import argparse
+import asyncio
 import numpy as np
 from tqdm import tqdm
 import psycopg2
@@ -186,7 +187,7 @@ def find_sibling_keyframes(representative_rel_path, media_base_dir):
 
 
 # --- Core Embedding Generation Logic ---
-def generate_embeddings_batch(model, processor, model_type, batch_data, device, generation_strategy, media_base_dir):
+async def generate_embeddings_batch(model, processor, model_type, batch_data, device, generation_strategy, media_base_dir):
     """
     Generates embeddings for a batch, handling single or multiple frames per clip.
 
@@ -207,7 +208,7 @@ def generate_embeddings_batch(model, processor, model_type, batch_data, device, 
     clip_id_to_indices = {}    # Maps clip_id to list of indices in all_images_to_process
 
     # 1. Determine required images for each clip and flatten the list
-    print(f"  Preprocessing batch: Identifying required keyframes ({generation_strategy})...")
+    # print(f"  Preprocessing batch: Identifying required keyframes ({generation_strategy})...") # Optional verbose log
     skipped_clips_count = 0
     required_paths_count = 0
     for clip_id, repr_rel_path in batch_data:
@@ -216,27 +217,48 @@ def generate_embeddings_batch(model, processor, model_type, batch_data, device, 
              skipped_clips_count += 1
              continue
 
-        # Find all necessary absolute keyframe paths for this clip based on strategy
-        # The representative path itself tells find_sibling_keyframes if it's midpoint or multi implicitly
-        abs_paths_for_clip = find_sibling_keyframes(repr_rel_path, media_base_dir)
+        abs_paths_for_clip = [] # Initialize list of paths for this clip
 
-        # --- Strategy-specific validation ---
-        is_multi_frame_strategy = generation_strategy in ['keyframe_multi_avg'] # Add future multi-frame strategies here
+        # --- Determine if strategy requires multiple frames ---
+        # List strategies that explicitly need multiple frames (e.g., for averaging)
+        is_multi_frame_strategy = generation_strategy in ['keyframe_multi_avg']
 
+        # --- Get image paths based on strategy ---
+        if is_multi_frame_strategy:
+            # Strategy requires multiple frames: Find siblings based on representative path
+            # find_sibling_keyframes expects the multi-frame naming convention (_25pct, etc.)
+            abs_paths_for_clip = find_sibling_keyframes(repr_rel_path, media_base_dir)
+            # Validate if enough frames were found for this strategy
+            if not abs_paths_for_clip:
+                print(f"  Warning: No valid keyframes found for multi-strategy Clip ID {clip_id} (repr: {repr_rel_path}). Skipping.")
+                skipped_clips_count += 1
+                continue
+            # Example: 'keyframe_multi_avg' might require exactly 3 frames
+            if generation_strategy == 'keyframe_multi_avg' and len(abs_paths_for_clip) < 3:
+                print(f"  Warning: Strategy '{generation_strategy}' expects 3 keyframes for Clip ID {clip_id}, but found {len(abs_paths_for_clip)}. Skipping.")
+                skipped_clips_count += 1
+                continue
+            # Add elif for other multi-frame strategies with different requirements
+        else:
+            # Strategy requires a single frame: ONLY use the representative path from DB
+            abs_path = os.path.join(media_base_dir, repr_rel_path)
+            if os.path.isfile(abs_path):
+                abs_paths_for_clip = [abs_path] # Use *only* this path
+            else:
+                # If the single required frame is missing, skip the clip
+                print(f"  Warning: Representative keyframe not found for single-strategy Clip ID {clip_id}: {abs_path}. Skipping.")
+                skipped_clips_count += 1
+                continue
+        # --- End image path gathering ---
+
+
+        # If we still don't have paths after the logic above, skip
         if not abs_paths_for_clip:
-            print(f"  Warning: No valid keyframes found for Clip ID {clip_id} (repr: {repr_rel_path}). Skipping.")
-            skipped_clips_count += 1
+            # This case should be covered by inner logic, but as a safeguard
+            if clip_id not in {c[0] for c in all_images_to_process}: # Avoid double counting skips
+                 print(f"  Warning: No paths determined for Clip ID {clip_id}. Skipping.")
+                 skipped_clips_count += 1
             continue
-
-        if is_multi_frame_strategy and len(abs_paths_for_clip) < 3:
-            # If strategy expects multiple frames (like avg), but we didn't find enough (e.g., only 1 or 2)
-            print(f"  Warning: Strategy '{generation_strategy}' expects multiple keyframes for Clip ID {clip_id}, but found only {len(abs_paths_for_clip)} ({[os.path.basename(p) for p in abs_paths_for_clip]}). Skipping.")
-            skipped_clips_count += 1
-            continue
-        elif not is_multi_frame_strategy and len(abs_paths_for_clip) > 1:
-            # If strategy expects one frame (like midpoint), but we found multiple (shouldn't happen with find_sibling_keyframes logic, but check)
-             print(f"  Warning: Strategy '{generation_strategy}' expects single keyframe for Clip ID {clip_id}, but found {len(abs_paths_for_clip)}. Using first: {os.path.basename(abs_paths_for_clip[0])}.")
-             abs_paths_for_clip = [abs_paths_for_clip[0]] # Use only the first one found
 
         # Add paths to the flat list and record indices for this clip_id
         start_index = len(all_images_to_process)
@@ -245,22 +267,22 @@ def generate_embeddings_batch(model, processor, model_type, batch_data, device, 
         clip_id_to_indices[clip_id] = list(range(start_index, start_index + len(abs_paths_for_clip)))
         required_paths_count += len(abs_paths_for_clip)
 
+    # End loop through batch_data
+
     if not all_images_to_process:
-        print("  Batch Preprocessing: No valid images found to process in this batch.")
+        # print("  Batch Preprocessing: No valid images found to process in this batch.") # Optional verbose log
         return []
 
-    print(f"  Preprocessing batch: Identified {required_paths_count} total images for {len(clip_id_to_indices)} clips ({skipped_clips_count} clips skipped).")
+    # print(f"  Preprocessing batch: Identified {required_paths_count} total images for {len(clip_id_to_indices)} clips ({skipped_clips_count} clips skipped).") # Optional verbose log
 
     # 2. Load images and perform model inference
-    print(f"  Processing {len(all_images_to_process)} images with {model_type} model...")
+    # print(f"  Processing {len(all_images_to_process)} images with {model_type} model...") # Optional verbose log
     all_features_np = None
     try:
-        # Load all images first to potentially catch file errors early
+        # Load all images first
         images = [Image.open(item[1]).convert("RGB") for item in all_images_to_process]
 
-        # Perform inference in batches if necessary (though often model processors handle internal batching)
-        # For simplicity here, assume the processor/model handles the full list.
-        # If OOM occurs, implement manual batching over `images` list here.
+        # Perform inference
         with torch.no_grad():
             if model_type == "clip":
                 inputs = processor(text=None, images=images, return_tensors="pt", padding=True)
@@ -269,56 +291,47 @@ def generate_embeddings_batch(model, processor, model_type, batch_data, device, 
                 all_features_np = image_features.cpu().numpy()
 
             elif model_type == "dino":
-                 # Using HuggingFace Transformers AutoImageProcessor/AutoModel
                  inputs = processor(images=images, return_tensors="pt").to(device)
                  outputs = model(**inputs)
-                 # DINOv2 embedding is often the pooler_output or last_hidden_state[:, 0] (CLS token)
-                 # Check model documentation/config. Using last_hidden_state mean pooling as robust default.
                  last_hidden_states = outputs.last_hidden_state
-                 # Mean pool across sequence length dimension (dim 1)
+                 # Mean pool - works generally well for DINOv2 base/small/large
                  image_features = last_hidden_states.mean(dim=1)
-                 # Alternative: CLS token: image_features = last_hidden_states[:, 0]
                  all_features_np = image_features.cpu().numpy()
 
-                 # --- Using TIMM DINOv2 (Alternative) ---
-                 # inputs = torch.stack([processor(img) for img in images]).to(device)
-                 # image_features = model.forward_features(inputs) # Get features before head
-                 # # DINOv2 often uses CLS token embedding from the features
-                 # if isinstance(image_features, list): image_features = image_features[-1] # Get last layer if list
-                 # cls_token_features = image_features[:, 0] # Assuming CLS token is first
-                 # all_features_np = cls_token_features.cpu().numpy()
-
-            # Add elif for other model types
             else:
                 print(f"ERROR: Embedding generation logic not implemented for model type: {model_type}")
                 return [] # Fatal error for this batch
 
     except FileNotFoundError as e:
         print(f"\nError: Image file not found during batch loading: {e}. Skipping entire batch.")
-        return [] # Skip entire batch if a file is missing during loading
+        # Log which file was missing if possible from `e`
+        traceback.print_exc()
+        return []
     except Exception as e:
         print(f"\nError during model inference for batch: {e}")
         traceback.print_exc()
-        return [] # Skip entire batch on inference error
+        return []
 
     if all_features_np is None:
         print("Error: Feature extraction resulted in None. Skipping batch.")
         return []
 
-    print(f"  Inference complete. Aggregating embeddings...")
+    # print(f"  Inference complete. Aggregating embeddings...") # Optional verbose log
 
     # 3. Aggregate features based on strategy and clip_id
-    processed_clip_ids = set(clip_id_to_indices.keys()) # Clips we actually processed images for
-    for clip_id in [item[0] for item in batch_data]: # Iterate original clip IDs to maintain order/completeness
-        if clip_id not in processed_clip_ids:
-            continue # Skip clips that were filtered out earlier
+    processed_clip_ids = set(clip_id_to_indices.keys())
+    original_batch_clip_ids = [item[0] for item in batch_data] # Maintain original order
 
-        indices = clip_id_to_indices[clip_id]
-        if not indices: # Should not happen if clip_id is in processed_clip_ids
+    for clip_id in original_batch_clip_ids:
+        if clip_id not in processed_clip_ids:
+            continue # Skip clips that were filtered out during path gathering
+
+        indices = clip_id_to_indices.get(clip_id)
+        if not indices:
              print(f"  Internal Error: No indices found for processed clip ID {clip_id}. Skipping.")
              continue
 
-        clip_features_np = all_features_np[indices] # Get rows corresponding to this clip's images
+        clip_features_np = all_features_np[indices]
 
         final_embedding = None
         if clip_features_np.shape[0] == 0:
@@ -327,42 +340,46 @@ def generate_embeddings_batch(model, processor, model_type, batch_data, device, 
 
         # --- Aggregation Logic ---
         if generation_strategy == 'keyframe_multi_avg':
-            # Average the embeddings for the multiple frames
-            final_embedding = np.mean(clip_features_np, axis=0)
-            # Optional: L2 normalize the averaged embedding
-            # norm = np.linalg.norm(final_embedding)
-            # if norm > 1e-6: final_embedding = final_embedding / norm
+            if clip_features_np.shape[0] >= 1: # Need at least one frame to average
+                 final_embedding = np.mean(clip_features_np, axis=0)
+                 # Optional: L2 normalize
+                 # norm = np.linalg.norm(final_embedding)
+                 # if norm > 1e-6: final_embedding = final_embedding / norm
+            else: # Should be caught earlier, but safety check
+                 print(f"  Warning: No features available to average for clip ID {clip_id}. Skipping.")
+                 continue
 
-        # Add elif for other multi-frame strategies (e.g., max pooling, concatenation + projection)
+        # Add elif for other multi-frame strategies
         # elif generation_strategy == 'keyframe_multi_max':
         #    final_embedding = np.max(clip_features_np, axis=0)
 
-        else: # Default: Assume single frame strategy (midpoint, or unknown treated as single)
+        else: # Default: Assume single frame strategy
             if clip_features_np.shape[0] > 1:
-                print(f"  Warning: Strategy '{generation_strategy}' implies single frame, but got {clip_features_np.shape[0]} features for clip {clip_id}. Using first.")
-            final_embedding = clip_features_np[0] # Take the first (and likely only) feature vector
+                # This warning should NOT appear with the refined logic above for single strategies
+                print(f"  Internal Warning: Single frame strategy '{generation_strategy}' got {clip_features_np.shape[0]} features for clip {clip_id}. Using first.")
+            # Take the first (and should be only) feature vector
+            final_embedding = clip_features_np[0]
 
 
         if final_embedding is not None:
             embeddings_out.append((clip_id, final_embedding.tolist()))
 
-    print(f"  Aggregation complete. Returning {len(embeddings_out)} embeddings.")
+    # print(f"  Aggregation complete. Returning {len(embeddings_out)} embeddings.") # Optional verbose log
     return embeddings_out
 
-
-# --- Main Execution ---
-def main():
+# --- Main Execution (Now Async) ---
+async def main(): # <--- Make main async
     parser = argparse.ArgumentParser(description="Generate image embeddings using various models and strategies, storing results in PostgreSQL/pgvector.")
-    parser.add_argument("--model_name", required=True, help="Identifier for the embedding model (e.g., 'openai/clip-vit-base-patch32', 'facebook/dinov2-base', 'your_custom_resnet').")
+    parser.add_argument("--model_name", required=True, help="Identifier for the embedding model (e.g., 'openai/clip-vit-base-patch32', 'facebook/dinov2-base').")
     parser.add_argument("--generation_strategy", required=True,
                         help="Label describing how the embedding relates to keyframes (e.g., 'keyframe_midpoint', 'keyframe_multi_avg'). Used in DB.")
     parser.add_argument("--source-identifier", default=None,
                         help="Optional: Process only clips belonging to this source_identifier.")
     parser.add_argument("--batch_size", type=int, default=16,
-                        help="Number of *clips* to process in each database query batch. Actual images processed depends on strategy.")
+                        help="Number of *clips* to process in each database query batch.")
     parser.add_argument("--limit", type=int, default=None, help="Limit the number of clips fetched from the database.")
     parser.add_argument("--overwrite", action="store_true",
-                        help="Generate and attempt to insert embeddings even if an entry already exists for the *exact* same clip_id, model_name, and generation_strategy combination. Uses ON CONFLICT DO NOTHING.")
+                        help="Generate and attempt to insert embeddings even if an entry already exists for this clip/model/strategy combo.")
 
     args = parser.parse_args()
 
@@ -375,177 +392,176 @@ def main():
     print(f"Limit: {args.limit or 'None'}")
     print("----------------------------")
 
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    # Initialize variables outside try/finally for summary report
     conn = None
     model = processor = model_type = None
     embedding_dim = -1
-    total_clips_fetched = 0
+    num_clips_found = 0
     total_embeddings_generated = 0
     total_inserted_count = 0
-    total_skipped_existing_count = 0 # Counted only if overwrite is True
-    total_error_count = 0 # Count clips that failed processing/insertion
+    total_skipped_existing_count = 0
+    total_error_count = 0
 
     try:
         print(f"Loading model and processor: {args.model_name}...")
+        # Model loading is typically synchronous CPU/GPU bound work
         model, processor, model_type, embedding_dim = get_model_and_processor(args.model_name, device=device)
         print(f"Model '{args.model_name}' loaded successfully. Type: {model_type}, Dim: {embedding_dim}")
 
+        # --- Database Connection (Assuming synchronous db_utils/psycopg2) ---
+        # If get_db_connection was async (using asyncpg), you would 'await' it here.
         conn = get_db_connection()
         media_base_dir = get_media_base_dir()
         print("Database connection established.")
+        # -----------------------------------------------------------------
 
+        # Using a context manager for the cursor is good practice
         with conn.cursor() as cur:
             # --- Build Query to Fetch Clips ---
             print("Building query to fetch clips...")
-            params = [] # Initialize params as an empty list
-            select_clause = sql.SQL("""
-                SELECT c.id, c.keyframe_filepath
-                FROM clips c
-            """)
+            params = []
+            select_clause = sql.SQL("SELECT c.id, c.keyframe_filepath FROM clips c")
             join_clauses = []
-            # We must have a representative keyframe path
             where_conditions = [
                 sql.SQL("c.keyframe_filepath IS NOT NULL"),
                 sql.SQL("c.keyframe_filepath != ''")
             ]
 
-            # Optional: Check if the vector column exists and matches dimension
-            # This adds complexity but can prevent errors later. Requires knowing the table structure.
-            # Note: pgvector index creation usually enforces dimension, but good check.
-            # where_conditions.append(sql.SQL("vector_dims(e.embedding) = %s")) # Assuming 'e.embedding' is the vector column
-
-            # Add source filtering if requested
             if args.source_identifier:
                 join_clauses.append(sql.SQL("JOIN source_videos sv ON c.source_video_id = sv.id"))
                 where_conditions.append(sql.SQL("sv.source_identifier = %s"))
                 params.append(args.source_identifier)
 
-            # Add filtering based on existing embeddings if not overwriting
             if not args.overwrite:
-                join_clauses.append(sql.SQL("""
-                    LEFT JOIN embeddings e ON c.id = e.clip_id
-                                         AND e.model_name = %s
-                                         AND e.generation_strategy = %s
-                """))
+                join_clauses.append(sql.SQL(
+                    """LEFT JOIN embeddings e ON c.id = e.clip_id
+                       AND e.model_name = %s AND e.generation_strategy = %s"""
+                ))
                 where_conditions.append(sql.SQL("e.id IS NULL"))
                 params.extend([args.model_name, args.generation_strategy])
                 print("Query will skip clips already having embeddings for this model/strategy.")
             else:
                 print("Query will fetch all matching clips; ON CONFLICT will handle existing during insert.")
 
-            # Assemble the final query
             query = select_clause
-            if join_clauses: query += sql.SQL(" ").join(join_clauses)
-            if where_conditions: query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_conditions)
-            query += sql.SQL(" ORDER BY c.id") # Consistent order is good practice
+            if join_clauses:
+                # Add a space between SELECT clause and the first JOIN
+                query += sql.SQL(" ") + sql.SQL(" ").join(join_clauses) # <-- Add space here
+            if where_conditions:
+                # Add WHERE keyword and join conditions
+                query += sql.SQL(" WHERE ") + sql.SQL(" AND ").join(where_conditions)
+            # Add ORDER BY
+            query += sql.SQL(" ORDER BY c.id")
+            # Add LIMIT if specified
             if args.limit:
                 query += sql.SQL(" LIMIT %s")
                 params.append(args.limit)
 
-            # --- Execute Query ---
+            # --- Execute Query (Synchronous) ---
             print("Fetching clips to process...")
-            # print(f"DEBUG Query: {cur.mogrify(query, params).decode()}") # Uncomment for debugging query
             cur.execute(query, params)
-            clips_to_process = cur.fetchall() # List of (clip_id, keyframe_filepath)
-            total_clips_fetched = len(clips_to_process)
+            clips_to_process = cur.fetchall()
+            num_clips_found = len(clips_to_process)
 
             if not clips_to_process:
                 print("No clips found matching the criteria requiring embedding generation.")
-                return # Exit early if nothing to do
+                # Optional: Check existing count here if needed
+                return # Exit early
 
-            print(f"Found {total_clips_fetched} clips to process.")
+            print(f"Found {num_clips_found} clips to process.")
+            # ----------------------------------
 
             # --- Process in Batches ---
-            num_batches = (total_clips_fetched + args.batch_size - 1) // args.batch_size
-            for i in tqdm(range(0, total_clips_fetched, args.batch_size), desc=f"Generating Embeddings", total=num_batches):
+            num_batches = (num_clips_found + args.batch_size - 1) // args.batch_size
+            for i in tqdm(range(0, num_clips_found, args.batch_size), desc=f"Generating Embeddings", total=num_batches):
                 batch_raw_data = clips_to_process[i:i+args.batch_size]
-                batch_clip_ids = {item[0] for item in batch_raw_data} # Set of clip IDs in this batch
+                batch_clip_ids = {item[0] for item in batch_raw_data}
 
-                # --- Call the batch generation function ---
-                embeddings_batch = generate_embeddings_batch(
+                # --- Call the ASYNC batch generation function ---
+                # 'await' is valid now because main is async
+                embeddings_batch = await generate_embeddings_batch(
                     model, processor, model_type, batch_raw_data, device, args.generation_strategy, media_base_dir
                 )
-                total_embeddings_generated += len(embeddings_batch)
+                # ----------------------------------------------
 
+                total_embeddings_generated += len(embeddings_batch)
                 batch_error_clips = batch_clip_ids - {emb[0] for emb in embeddings_batch}
                 if batch_error_clips:
                      total_error_count += len(batch_error_clips)
-                     # print(f"\nNote: Failed to generate embeddings for {len(batch_error_clips)} clips in batch {i//args.batch_size + 1}.") # Verbose logging
-
 
                 if embeddings_batch:
-                    # --- Insert into Database ---
+                    # --- Prepare for Insert ---
                     insert_query = sql.SQL("""
                         INSERT INTO embeddings (clip_id, embedding, model_name, generation_strategy)
-                        VALUES %s
-                        ON CONFLICT (clip_id, model_name, generation_strategy) DO NOTHING;
+                        VALUES %s ON CONFLICT (clip_id, model_name, generation_strategy) DO NOTHING;
                     """)
-                    # Prepare data: (clip_id, embedding_vector_as_string, model_name, strategy)
-                    # Ensure embedding list is converted to string '[1.0,2.0,...]' format for pgvector
                     values_to_insert = []
                     for clip_id, embedding_list in embeddings_batch:
                         if len(embedding_list) != embedding_dim:
-                            print(f"\nFATAL ERROR: Clip ID {clip_id} generated embedding dim ({len(embedding_list)}) != expected dim ({embedding_dim}). Skipping insert for this item.")
+                            print(f"\nERROR: Clip ID {clip_id} generated embedding dim ({len(embedding_list)}) != expected dim ({embedding_dim}). Skipping insert.")
                             total_error_count += 1
-                            continue # Skip this specific embedding
-                        # Simple conversion to string format pgvector expects
+                            batch_error_clips.discard(clip_id) # Adjust error count if already counted
+                            continue
                         embedding_str = '[' + ','.join(map(str, embedding_list)) + ']'
                         values_to_insert.append((clip_id, embedding_str, args.model_name, args.generation_strategy))
 
-                    if not values_to_insert:
-                         print(f"  Skipping database insert for batch {i//args.batch_size + 1} due to dimension errors or no valid embeddings.")
-                         continue
+                    if not values_to_insert: continue # Skip if batch ended up empty after checks
 
+                    # --- Insert into Database (Synchronous) ---
                     try:
-                        # ***** FIX HERE: Remove fetch=True *****
                         execute_values(cur, insert_query, values_to_insert, page_size=len(values_to_insert))
-                        
-                        # execute_values doesn't reliably return rows or rowcount in all versions/adapters.
-                        # Rely on cur.rowcount *after* the execute_values call.
-                        conn.commit() # Commit after each successful batch insertion
-                        batch_inserted_actual = cur.rowcount # Get rows affected by the *last* command (INSERT)
+                        conn.commit() # Commit after successful batch insert
+                        batch_inserted_actual = cur.rowcount
                         total_inserted_count += batch_inserted_actual
-
                         if args.overwrite:
-                             skipped_in_batch = len(values_to_insert) - batch_inserted_actual
-                             total_skipped_existing_count += skipped_in_batch
-                             # if skipped_in_batch > 0: print(f"  Skipped {skipped_in_batch} existing embeddings in batch.") # Verbose logging
-
+                             total_skipped_existing_count += (len(values_to_insert) - batch_inserted_actual)
                     except psycopg2.Error as db_err:
-                        conn.rollback() # Rollback the failed batch
+                        conn.rollback()
                         print(f"\nError inserting batch into database: {db_err}")
                         traceback.print_exc()
-                        total_error_count += len(values_to_insert) # Count all attempted in batch as errors if commit failed
+                        total_error_count += len(values_to_insert) # Count all intended in failed batch
+                        # Remove clips from this failed insert batch from the general batch_error_clips count
+                        error_clips_in_failed_insert = {val[0] for val in values_to_insert}
+                        batch_error_clips -= error_clips_in_failed_insert
                     except Exception as gen_err:
                         conn.rollback()
                         print(f"\nError preparing/executing insert for batch: {gen_err}")
+                        traceback.print_exc()
                         total_error_count += len(values_to_insert)
-
+                        error_clips_in_failed_insert = {val[0] for val in values_to_insert}
+                        batch_error_clips -= error_clips_in_failed_insert
+                    # -----------------------------------------
+            # --- End Batch Loop ---
+        # --- End Cursor Context ---
 
     except (ValueError, psycopg2.Error, ImportError, NotImplementedError, RuntimeError, Exception) as e:
         print(f"\nA critical error occurred: {e}")
         traceback.print_exc()
-        if conn: conn.rollback()
-        total_error_count += 1 # Count critical error itself
+        # No explicit rollback needed here if conn object wasn't successfully created
+        # or if using 'with conn:' which handles rollback/close on error (if conn is context manager)
+        total_error_count += 1
     finally:
-        if conn:
+        if conn: # Close synchronous connection if it was opened
             conn.close()
             print("\nDatabase connection closed.")
 
+        # --- Print Summary ---
         print(f"\n--- Summary ---")
         print(f"Model: {args.model_name} ({model_type}, Dim: {embedding_dim if embedding_dim > 0 else 'N/A'})")
         print(f"Strategy: {args.generation_strategy}")
         print(f"Source Filter: {args.source_identifier or 'ALL'}")
-        print(f"Clips Fetched from DB: {total_clips_fetched}")
-        # print(f"Embeddings Generated (attempted): {total_embeddings_generated}") # Can be confusing if errors occur
+        print(f"Clips Fetched from DB: {num_clips_found}")
         print(f"Embeddings Successfully Inserted/Updated: {total_inserted_count}")
         if args.overwrite:
             print(f"Skipped Insert (Already Existed): {total_skipped_existing_count}")
         print(f"Clips Failed (Errors/Skipped): {total_error_count}")
         print("---------------")
 
+
+# --- Run the async main function ---
 if __name__ == "__main__":
-    main()
+     # Use asyncio.run() to execute the async main function
+     asyncio.run(main())
