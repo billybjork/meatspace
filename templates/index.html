@@ -3,44 +3,82 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Meatspace</title>
+    <title>Meatspace Similarity Browser</title> <!-- More descriptive title -->
     <link rel="stylesheet" href="{{ url_for('static', path='style.css') }}">
 </head>
 <body>
 
     <h1>Similarity Browser</h1>
-    
-    <div class="query-section">
-        <h2>Query Clip: {{ query.title }}</h2>
-        <div class="media-container query-container"
-             data-video-src="{{ query.video_url }}">
-            <img src="{{ query.keyframe_url }}" alt="Query Keyframe: {{ query.title }}" class="keyframe-thumb">
-            <video class="video-playback" loop muted playsinline preload="metadata"></video>
-        </div>
-    </div>
 
-    <div class="results-section">
-        <h3>Similar Clips:</h3>
-        <div class="results-grid">
-            {% if results %}
-                {% for result in results %}
-                <div class="result-item">
-                    <a href="{{ url_for('query_clip', clip_id=result.clip_id) }}" class="result-link">
-                        <div class="media-container result-container"
-                             data-video-src="{{ result.video_url }}">
-                             <img src="{{ result.keyframe_url }}" alt="Result Keyframe {{ loop.index }}" class="keyframe-thumb">
-                             <video class="video-playback" loop muted playsinline preload="metadata"></video>
-                        </div>
-                    </a>
-                     <p class="similarity-score">Score: {{ "%.3f"|format(result.score) }}</p>
-                </div>
-                {% endfor %}
-            {% else %}
-                <p>No similar clips found.</p>
-            {% endif %}
-        </div>
+    <!-- Embedding Options Selector -->
+    <div class="options-selector">
+        <form id="options-form" method="GET" action="#"> <!-- Action set by JS -->
+            <label for="model-strategy-select">Embedding Model & Strategy:</label>
+            <select id="model-strategy-select">
+                {% if available_options %}
+                    {% for option in available_options %}
+                        {% set option_value = option.model_name + '|' + option.strategy %}
+                        <option value="{{ option_value }}"
+                                {% if option.model_name == model_name and option.strategy == strategy %}selected{% endif %}>
+                            {{ option.model_name }} - {{ option.strategy }}
+                        </option>
+                    {% endfor %}
+                {% else %}
+                    <option value="" disabled selected>No embedding options found</option>
+                {% endif %}
+            </select>
+            <!-- No submit button needed, using JS -->
+        </form>
     </div>
+    <!-- End Embedding Options Selector -->
 
+    {% if error %}
+    <div class="error-message">
+        <p><strong>Error:</strong> {{ error }}</p>
+    </div>
+    {% endif %}
+
+    <!-- Only show query/results if a query clip exists -->
+    {% if query %}
+        <div class="query-section">
+            <h2>Query Clip: {{ query.title }} (ID: {{ query.clip_id }})</h2>
+             <p class="current-options">(Using Model: {{ model_name }}, Strategy: {{ strategy }})</p> <!-- Show current selection -->
+            <div class="media-container query-container"
+                 data-video-src="{{ query.video_url }}">
+                <img src="{{ query.keyframe_url }}" alt="Query Keyframe: {{ query.title }}" class="keyframe-thumb">
+                <video class="video-playback" loop muted playsinline preload="metadata"></video>
+            </div>
+        </div>
+
+        <div class="results-section">
+            <h3>Similar Clips:</h3>
+            <div class="results-grid">
+                {% if results %}
+                    {% for result in results %}
+                    <div class="result-item">
+                         <!-- Link should also include current model/strategy -->
+                        <a href="{{ url_for('query_clip', clip_id=result.clip_id) }}?model={{ model_name }}&strategy={{ strategy }}" class="result-link">
+                            <div class="media-container result-container"
+                                 data-video-src="{{ result.video_url }}">
+                                 <img src="{{ result.keyframe_url }}" alt="Result Keyframe {{ loop.index }}" class="keyframe-thumb">
+                                 <video class="video-playback" loop muted playsinline preload="metadata"></video>
+                            </div>
+                        </a>
+                         <p class="similarity-score">Score: {{ "%.3f"|format(result.score) }}</p>
+                         <p class="clip-id-label">(ID: {{ result.clip_id }})</p> <!-- Optional: Show result clip ID -->
+                    </div>
+                    {% endfor %}
+                {% elif not error %} <!-- Only show 'No similar' if there wasn't a major error -->
+                    <p>No similar clips found for this model/strategy.</p>
+                {% endif %}
+            </div>
+        </div>
+    {% elif not error %} <!-- Show message if no query and no error -->
+        <p>No query clip specified or found.</p>
+    {% endif %}
+
+
+    <!-- Ensure script.js is loaded AFTER the elements it interacts with -->
     <script src="{{ url_for('static', path='script.js') }}"></script>
 
 </body>
