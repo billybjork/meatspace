@@ -4,9 +4,10 @@ import argparse
 from tqdm import tqdm
 import psycopg2
 from psycopg2 import sql
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-# Import helpers from db_utils
-from db_utils import get_db_connection, get_media_base_dir
+from utils.db_utils import get_db_connection, get_media_base_dir
 
 # --- MODIFIED extract_and_save_frames function ---
 def extract_and_save_frames(abs_video_path, clip_identifier, source_identifier, output_dir_abs, strategy='midpoint'):

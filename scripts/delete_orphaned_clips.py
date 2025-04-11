@@ -6,7 +6,7 @@ from psycopg2 import sql
 from tqdm import tqdm
 
 # Import helpers from db_utils
-from db_utils import get_db_connection, get_media_base_dir
+from utils.db_utils import get_db_connection, get_media_base_dir
 
 def delete_orphaned_clips(conn, source_identifier, dry_run=True):
     """

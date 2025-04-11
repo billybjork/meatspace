@@ -10,6 +10,8 @@ from psycopg2 import sql
 from psycopg2.extras import execute_values
 import re
 import traceback
+import sys
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 # Model Loading - Keep separate for clarity
 try:
@@ -26,7 +28,7 @@ except ImportError:
 #     print("Warning: timm or torchvision not found. DINOv2 models may not be available.")
 #     timm, transforms = None, None
 
-from db_utils import get_db_connection, get_media_base_dir
+from utils.db_utils import get_db_connection, get_media_base_dir
 
 # --- Model and Processor Loading ---
 def get_model_and_processor(model_name, device='cpu'):
