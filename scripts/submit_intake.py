@@ -97,30 +97,31 @@ def main():
         print("Failed to create database record. Aborting task submission.")
         sys.exit(1)
 
-    # 2. Submit the Prefect task run using .defer()
+    # 2. Submit the Prefect task run by calling the task function directly
     print(f"\nSubmitting intake_task for source_video_id: {source_id}...")
     print(f"  Input: {args.input_source}")
     print(f"  Re-encode: {not args.no_reencode}")
     print(f"  Overwrite: {args.overwrite}")
 
     try:
-        # Use .defer() for submitting outside a flow to the backend/queue
-        task_run_future = intake_task.defer(
+        # Call the task function directly. Prefect intercepts this.
+        task_run = intake_task(
             source_video_id=source_id,
             input_source=args.input_source,
             re_encode_for_qt=(not args.no_reencode),
             overwrite_existing=args.overwrite
         )
 
-        print(f"\nTask submitted via defer()! (Run ID: {task_run_future.task_run_id if hasattr(task_run_future, 'task_run_id') else 'N/A'})")
-        print("Monitor your Prefect worker logs or UI (if running) for progress.")
-        print(f"Check the database `source_videos` table (id={source_id}) and your MEDIA_BASE_DIR/source_videos directory for results.")
+        # Confirmation is best done via Prefect UI/Logs
+        print(f"\nTask submitted via direct call!")
+        print("Monitor your Prefect worker logs or UI for progress.")
+        print(f"Check the database `source_videos` table (id={source_id}) and your S3 bucket (meatspace/source_videos/) for results.")
 
     except Exception as e:
-        print(f"\nERROR submitting task via defer(): {e}")
+        print(f"\nERROR submitting task via direct call: {e}")
         print("Check database record state and logs for details.")
-        # Attempt to clean up the record maybe? Or mark as failed?
-        # For now, just exit. The record is in state 'new'.
+        # Consider adding logic here to update the DB record to a failed state
+        # if the submission itself fails critically.
         sys.exit(1)
 
 if __name__ == "__main__":

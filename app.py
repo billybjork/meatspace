@@ -209,7 +209,6 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         # Avoid DB calls in general exception handler if initial connection might have failed
         return templates.TemplateResponse("index.html", template_context)
 
-
 @router.get("/query/{clip_id}", response_class=HTMLResponse, name="query_clip")
 async def query_clip(
     clip_id: str,
@@ -307,7 +306,6 @@ async def query_clip(
             print(f"Received embedding data type: {type(query_embedding_data)}, value (partial): {str(query_embedding_data)[:100]}...")
             template_context["error"] = f"Failed to process embedding data from database for query clip '{clip_id}'. Data might be corrupt or in unexpected format."
             return templates.TemplateResponse("index.html", template_context)
-
 
         # --- Similarity Query ---
         # Fetches S3 keys for results

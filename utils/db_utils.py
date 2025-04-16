@@ -2,6 +2,7 @@ import os
 import psycopg2
 from psycopg2 import sql
 from dotenv import load_dotenv
+from prefect import get_run_logger
 
 # Load environment variables from .env file in the parent directory
 dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
@@ -53,35 +54,31 @@ def get_items_by_state(table: str, state: str) -> list[int]:
     return items
 
 def get_source_input_from_db(source_video_id: int) -> str | None:
-    """
-    Fetches the input source (URL or potentially path) for a given source_video_id.
-    Primarily looks for 'original_url'. Needs logic if local paths are stored differently.
-    """
-    input_source = None
+    """Fetches the original_url for a given source_video ID."""
     conn = None
+    input_source = None
+    logger = get_run_logger() # Use logger if available
     try:
         conn = get_db_connection()
         with conn.cursor() as cur:
-            # Select original_url, maybe fallback to filepath if url is null? Decide policy.
+            # Fetch original_url - assuming this holds the URL or initial path
             cur.execute("SELECT original_url FROM source_videos WHERE id = %s", (source_video_id,))
             result = cur.fetchone()
-            if result:
-                input_source = result[0] # Fetch the first column (original_url)
+            if result and result[0]:
+                input_source = result[0]
             else:
-                 print(f"Warning: No record found for source_video_id {source_video_id} in get_source_input_from_db")
+                # Log a warning if called but no URL found
+                if logger:
+                    logger.warning(f"No 'original_url' found in DB for source_video_id {source_video_id}")
+                else:
+                    print(f"Warning: No 'original_url' found in DB for source_video_id {source_video_id}")
 
-    except Exception as e:
-        print(f"DB Error fetching input source for ID {source_video_id}: {e}")
+    except (Exception, psycopg2.DatabaseError) as error:
+         if logger:
+             logger.error(f"DB error fetching input source for ID {source_video_id}: {error}")
+         else:
+             print(f"DB error fetching input source for ID {source_video_id}: {error}")
     finally:
         if conn:
             conn.close()
-
-    # Add logic here if you store initial local paths in a different column
-    # if not input_source:
-    #    # try fetching filepath?
-    #    pass
-
-    if not input_source:
-         print(f"Warning: Could not determine input source for source_video_id {source_video_id}.")
-
     return input_source
