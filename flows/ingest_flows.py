@@ -1,33 +1,24 @@
 import sys
 import os
 from pathlib import Path
-import traceback # Added for better error logging if imports fail
+import traceback
 
-# Add project root to the Python path
-# This assumes the script is in 'flows' directory, one level below project root 'src'
 project_root = Path(__file__).parent.parent.resolve()
 if str(project_root) not in sys.path:
     print(f"Adding project root to sys.path: {project_root}")
     sys.path.insert(0, str(project_root))
 
-# Now imports should work relative to the project root
 from prefect import flow, get_run_logger
-# Removed deployment/schedule imports from here, they are handled by prefect.yaml
-# from prefect.server.schemas.schedules import IntervalSchedule
-# from datetime import timedelta
 
-# Import tasks from their specific modules within the 'tasks' directory
-# Import DB helpers from the 'utils' directory
 try:
-    # Task Imports - UPDATED
-    from tasks.intake import intake_task # Renamed task import
+    from tasks.intake import intake_task
     from tasks.splice import splice_video_task
     from tasks.keyframe import extract_keyframes_task
     from tasks.embed import generate_embeddings_task
 
-    # Utility Imports
     from utils.db_utils import get_items_by_state, get_source_input_from_db
 
+# TODO: Update once dummy tasks no longer used
 except ImportError as e:
      # Handle potential path issues during development
      print(f"ERROR Could not import required modules: {e}")
@@ -44,8 +35,7 @@ except ImportError as e:
      def get_items_by_state(table, state): print(f"Dummy get_items_by_state({table}, {state}) called"); return []
      def get_source_input_from_db(sid): print(f"Dummy get_source_input_from_db({sid}) called"); return None
 
-
-# --- Configuration (Ideally load from .env or config file) ---
+# --- Configuration --- TODO: Add to .env and/or Railway variables
 DEFAULT_KEYFRAME_STRATEGY = os.getenv("DEFAULT_KEYFRAME_STRATEGY", "midpoint")
 DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "openai/clip-vit-base-patch32")
 # Derive the label used for the embedding generation based on the keyframe strategy
@@ -67,7 +57,6 @@ def process_clip_post_review(
     logger.info(f"FLOW: Starting post-review processing for approved clip_id: {clip_id}")
 
     # --- 1. Keyframing ---
-    # Need to ensure extract_keyframes_task is correctly implemented in tasks/keyframe.py
     logger.info(f"Submitting keyframe task for clip_id: {clip_id} with strategy: {keyframe_strategy}")
     try:
         keyframe_future = extract_keyframes_task.submit(clip_id=clip_id, strategy=keyframe_strategy)
@@ -80,7 +69,6 @@ def process_clip_post_review(
             logger.info(f"Keyframing task completed successfully for clip_id: {clip_id}. Proceeding to embedding.")
 
             # --- 2. Embedding ---
-            # Need to ensure generate_embeddings_task is correctly implemented in tasks/embed.py
             embedding_strategy_label = f"keyframe_{keyframe_strategy}"
             logger.info(f"Submitting embedding task for clip_id: {clip_id} with model: {model_name}, strategy_label: {embedding_strategy_label}")
             embed_future = generate_embeddings_task.submit(
@@ -136,7 +124,6 @@ def scheduled_ingest_initiator():
          logger.error(f"Failed to query for 'new' source videos: {db_query_err}", exc_info=True)
          error_count += 1
 
-
     # --- Stage 2: Find Downloaded Source Videos Ready for Splicing ---
     try:
         downloaded_source_ids = get_items_by_state(table="source_videos", state="downloaded")
@@ -153,7 +140,6 @@ def scheduled_ingest_initiator():
     except Exception as db_query_err:
          logger.error(f"Failed to query for 'downloaded' source videos: {db_query_err}", exc_info=True)
          error_count += 1
-
 
     # --- Stage 3: Find Clips Approved by Manual Review ---
     try:
@@ -173,15 +159,10 @@ def scheduled_ingest_initiator():
          logger.error(f"Failed to query for 'review_approved' clips: {db_query_err}", exc_info=True)
          error_count += 1
 
-
     if error_count > 0:
          logger.warning(f"FLOW: Scheduled Ingest Initiator cycle completed with {error_count} error(s).")
     else:
          logger.info("FLOW: Scheduled Ingest Initiator cycle complete.")
-
-
-# --- Deployment Definition Removed ---
-# The deployment is now handled by prefect.yaml and `prefect deploy`
 
 if __name__ == "__main__":
     # This block now primarily serves for direct local testing of one cycle,
