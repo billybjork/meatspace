@@ -15,8 +15,9 @@ import traceback # For detailed error logging
 load_dotenv()
 
 # --- Configuration ---
+# TODO: Change defaults to variables in Railway
 DATABASE_URL = os.getenv("DATABASE_URL")
-MEDIA_BASE_DIR = os.getenv("MEDIA_BASE_DIR")
+MEDIA_BASE_DIR = os.getenv("MEDIA_BASE_DIR", "/Users/billy/Dropbox/Projects/Meatspace/media")
 DEFAULT_MODEL_NAME = os.getenv("DEFAULT_MODEL_NAME", "openai/clip-vit-base-patch32")
 DEFAULT_GENERATION_STRATEGY = os.getenv("DEFAULT_GENERATION_STRATEGY", "keyframe_midpoint")
 NUM_RESULTS = int(os.getenv("NUM_RESULTS", 10))
