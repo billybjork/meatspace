@@ -6,16 +6,14 @@ import json
 from pathlib import Path
 import boto3
 from botocore.exceptions import NoCredentialsError, ClientError
-from datetime import datetime # Import datetime for date parsing
+from datetime import datetime
 
 from prefect import task, get_run_logger
 import psycopg2
 from psycopg2 import sql # Although not used here, good practice if building dynamic SQL
 import yt_dlp
 
-# Import utils from the 'utils' directory at the project root
 try:
-    # Assuming db_utils is one level up from 'tasks' directory
     from utils.db_utils import get_db_connection
 except ImportError:
      # Handle potential path issues during development/deployment
@@ -28,7 +26,6 @@ except ImportError:
     except ImportError as e:
         print(f"Failed to import db_utils even after path adjustment: {e}")
         def get_db_connection(): raise NotImplementedError("Dummy get_db_connection")
-
 
 # --- Task Configuration ---
 FINAL_SUFFIX = "_qt"
@@ -58,7 +55,6 @@ except NoCredentialsError:
 except Exception as e:
     print(f"ERROR initializing S3 client: {e}")
 
-
 def run_external_command(cmd_list, step_name="Command", cwd=None):
     """Runs an external command using subprocess, logs output, and raises errors."""
     logger = get_run_logger()
@@ -84,7 +80,6 @@ def run_external_command(cmd_list, step_name="Command", cwd=None):
     except Exception as e:
         logger.error(f"An unexpected error occurred during '{step_name}': {e}", exc_info=True)
         raise
-
 
 @task(name="Intake Source Video", retries=1, retry_delay_seconds=30)
 def intake_task(source_video_id: int,
@@ -327,7 +322,6 @@ def intake_task(source_video_id: int,
                 logger.error(f"An unexpected error occurred during S3 upload: {upload_err}")
                 raise RuntimeError("S3 upload failed") from upload_err
 
-
             # --- Update DB Record on Success ---
             logger.info("Updating database record with final details (including S3 key)...")
             db_title = metadata.get('title')
@@ -349,8 +343,6 @@ def intake_task(source_video_id: int,
             elif db_upload_date_str:
                  logger.warning(f"Unexpected upload_date format '{db_upload_date_str}'. Expected YYYYMMDD. Storing published_date as NULL.")
 
-
-            # *** CORRECTED UPDATE STATEMENT AND PARAMETERS ***
             cur.execute(
                 """
                 UPDATE source_videos
@@ -368,7 +360,7 @@ def intake_task(source_video_id: int,
                     last_error = NULL
                 WHERE id = %s
                 """,
-                (s3_object_key,          # Corresponds to filepath = %s
+                (s3_object_key,        # Corresponds to filepath = %s
                  db_title,             # Corresponds to title = COALESCE(%s, title)
                  db_duration,          # Corresponds to duration_seconds = %s
                  db_width,             # Corresponds to width = %s
