@@ -3,15 +3,12 @@ from pathlib import Path
 import os
 import sys
 
-# Add project root to sys.path
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    # Import the specific task function
     from tasks.intake import intake_task
-    # Import DB utilities to create the initial record
     from utils.db_utils import get_db_connection
 except ImportError as e:
     print(f"Error importing modules: {e}")
@@ -70,7 +67,6 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
     finally:
         if conn:
             conn.close()
-
 
 def main():
     parser = argparse.ArgumentParser(description="Manually trigger the intake task for a single video.")
