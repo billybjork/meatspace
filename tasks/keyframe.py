@@ -2,11 +2,14 @@ import cv2
 import os
 import re
 import shutil
+import tempfile
 import traceback
 from pathlib import Path
 from prefect import task, get_run_logger
 import psycopg2
 from psycopg2 import sql
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
 
 # Assuming db_utils.py is in ../utils relative to tasks/
 import sys
@@ -15,161 +18,99 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 
 try:
-    from utils.db_utils import get_db_connection, get_media_base_dir
+    from utils.db_utils import get_db_connection
 except ImportError as e:
     print(f"Error importing DB utils in keyframe.py: {e}")
-    # Provide dummy functions if needed for basic loading, but task will fail
     def get_db_connection(): raise NotImplementedError("Dummy DB connection")
-    def get_media_base_dir(): raise NotImplementedError("Dummy media base dir")
+
+# --- S3 Configuration ---
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+AWS_REGION = os.getenv("AWS_REGION")
+
+if not S3_BUCKET_NAME:
+    raise ValueError("S3_BUCKET_NAME environment variable not set.")
+
+s3_client = None
+try:
+    s3_client = boto3.client('s3', region_name=AWS_REGION)
+    print(f"Keyframe Task: Successfully initialized S3 client for bucket: {S3_BUCKET_NAME}")
+except NoCredentialsError:
+     print("Keyframe Task: ERROR initializing S3 client - AWS credentials not found.")
+except Exception as e:
+    print(f"Keyframe Task: ERROR initializing S3 client: {e}")
 
 # --- Configuration ---
-# Base subdirectory under MEDIA_BASE_DIR for keyframes
-KEYFRAMES_BASE_SUBDIR = os.getenv("KEYFRAMES_SUBDIR", "keyframes")
+KEYFRAMES_S3_PREFIX = os.getenv("KEYFRAMES_S3_PREFIX", "keyframes/")
 
-# --- Core Frame Extraction Logic (Adapted from script) ---
+# --- Core Frame Extraction Logic (Modified for Temp Files) ---
+# _extract_and_save_frames_internal remains the same as the previous correct version
 def _extract_and_save_frames_internal(
-    abs_video_path: str,
+    local_temp_video_path: str,
     clip_identifier: str,
-    source_identifier: str,
-    output_dir_abs: str,
+    title: str,
+    local_temp_output_dir: str,
     strategy: str = 'midpoint'
     ) -> dict:
-    """
-    Internal function to extract keyframe(s), save them, and return relative paths.
-    Assumes output directory already exists. Uses standard logging.
-
-    Args:
-        abs_video_path (str): Absolute path to the input video clip file.
-        clip_identifier (str): The logical identifier of the clip (e.g., Some_Long_Name_clip_00123).
-        source_identifier (str): The short identifier for the source (e.g., Landline).
-        output_dir_abs (str): Absolute path to the directory to save frames (includes source/strategy).
-        strategy (str): 'midpoint' or 'multi'.
-
-    Returns:
-        dict: Dictionary mapping strategy-based ID ('mid', '25pct', etc.) to relative file path.
-              Returns empty dict on error. Raises exceptions on critical errors.
-    """
-    logger = get_run_logger() # Use Prefect logger if available, else basic print
-    saved_frame_rel_paths = {}
+    logger = get_run_logger()
+    saved_frame_local_paths = {}
     cap = None
     try:
-        logger.debug(f"Opening video file for frame extraction: {abs_video_path}")
-        cap = cv2.VideoCapture(abs_video_path)
+        logger.debug(f"Opening temp video file for frame extraction: {local_temp_video_path}")
+        cap = cv2.VideoCapture(local_temp_video_path)
         if not cap.isOpened():
-            # Raise specific error instead of just printing
-            raise IOError(f"Error opening video file: {abs_video_path}")
+            raise IOError(f"Error opening temp video file: {local_temp_video_path}")
 
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         fps = cap.get(cv2.CAP_PROP_FPS)
-        logger.debug(f"Video properties: Total Frames={total_frames}, FPS={fps:.2f}")
+        logger.debug(f"Temp Video properties: Total Frames={total_frames}, FPS={fps:.2f}")
 
         if total_frames <= 0:
-            logger.warning(f"Video file has no frames or is invalid: {abs_video_path}")
-            # Don't raise, just return empty dict as it might be a valid (empty) clip
-            return saved_frame_rel_paths
+            logger.warning(f"Temp video file has no frames or is invalid: {local_temp_video_path}")
+            return saved_frame_local_paths
 
         frame_indices_to_extract = []
-        frame_ids = [] # Use consistent tags like '25pct', '50pct', '75pct', 'mid'
-
+        frame_ids = []
         if strategy == 'multi':
-            # Calculate indices for 25%, 50%, 75%
-            idx_25 = max(0, total_frames // 4)
-            idx_50 = max(0, total_frames // 2)
-            idx_75 = max(0, (total_frames * 3) // 4)
-            indices = sorted(list(set([idx_25, idx_50, idx_75]))) # Unique, sorted indices
+            idx_25 = max(0, total_frames // 4); idx_50 = max(0, total_frames // 2); idx_75 = max(0, (total_frames * 3) // 4)
+            indices = sorted(list(set([idx_25, idx_50, idx_75])))
             frame_indices_to_extract.extend(indices)
-
-            # Create corresponding frame tags dynamically based on unique indices found
             frame_ids_map = {idx_25: "25pct", idx_50: "50pct", idx_75: "75pct"}
-            # If indices collapsed, map them correctly
             frame_ids = [frame_ids_map[idx] for idx in indices]
-            # Ensure midpoint exists if indices collapse to one
-            if len(frame_ids) == 1 and frame_ids[0] != "50pct":
-                frame_ids = ["50pct"] # Relabel single frame as 50pct/midpoint
+            if len(frame_ids) == 1 and frame_ids[0] != "50pct": frame_ids = ["50pct"]
+        else:
+            frame_indices_to_extract.append(max(0, total_frames // 2)); frame_ids.append("mid")
 
-        else: # Default to midpoint (handles 'midpoint' explicitly)
-            frame_indices_to_extract.append(max(0, total_frames // 2))
-            frame_ids.append("mid")
-
-        # NOTE: output_dir_abs is created by the calling task function
-        media_base_dir = get_media_base_dir() # Assumes get_media_base_dir() is available
-
-        # --- Parse scene/clip part from clip_identifier ---
-        # Use the whole clip identifier (sanitized) for uniqueness if scene parsing fails
-        # Example: Landline_SomeLongName_clip_00123 -> scene_part=clip_00123
         scene_part = None
         match = re.search(r'_(clip|scene)_(\d+)$', clip_identifier)
-        if match:
-            scene_part = f"{match.group(1)}_{match.group(2)}" # e.g., "clip_00123" or "scene_123"
+        if match: scene_part = f"{match.group(1)}_{match.group(2)}"
         else:
-            # Fallback: Use the last part after underscore if it contains digits
             parts = clip_identifier.split('_')
-            if len(parts) > 1 and any(char.isdigit() for char in parts[-1]):
-                scene_part = parts[-1]
+            if len(parts) > 1 and any(char.isdigit() for char in parts[-1]): scene_part = parts[-1]
             else:
-                 # Last resort: Sanitize the whole identifier (might be long)
-                 sanitized_clip_id = re.sub(r'[^\w\-]+', '_', clip_identifier).strip('_')
-                 scene_part = sanitized_clip_id[-50:] # Limit length
+                 sanitized_clip_id = re.sub(r'[^\w\-]+', '_', clip_identifier).strip('_'); scene_part = sanitized_clip_id[-50:]
                  logger.warning(f"Could not parse standard suffix from clip_identifier '{clip_identifier}'. Using sanitized end part: '{scene_part}'")
 
-        # --- Generate and Save Frames ---
-        frame_tags_map = dict(zip(frame_indices_to_extract, frame_ids)) # Map index to tag
-
+        frame_tags_map = dict(zip(frame_indices_to_extract, frame_ids))
         for frame_index in frame_indices_to_extract:
-            logger.debug(f"Seeking to frame {frame_index}")
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
             ret, frame = cap.read()
             if ret:
                 frame_tag = frame_tags_map[frame_index]
-
-                # --- Construct NEW output filename ---
-                # Format: <SourceIdentifier>_<ScenePart>_frame_<FrameTag>.jpg
-                # Example: Landline_clip_00123_frame_50pct.jpg
-                output_filename = f"{source_identifier}_{scene_part}_frame_{frame_tag}.jpg"
-                # Sanitize further just in case source/scene parts had odd chars
-                output_filename = re.sub(r'[^\w\.\-]+', '_', output_filename)
-
-                output_path_abs = os.path.join(output_dir_abs, output_filename)
-                # Calculate relative path based on MEDIA_BASE_DIR for DB storage
-                try:
-                    output_path_rel = os.path.relpath(output_path_abs, media_base_dir)
-                    # Convert to forward slashes for cross-platform consistency in DB/URLs
-                    output_path_rel = output_path_rel.replace("\\", "/")
-                except ValueError as e:
-                    logger.error(f"Could not create relative path from '{output_path_abs}' based on '{media_base_dir}': {e}. Storing absolute path.")
-                    output_path_rel = output_path_abs # Fallback, though not ideal
-
-                logger.debug(f"Saving frame {frame_index} (tag: {frame_tag}) to {output_path_abs}")
-                success = cv2.imwrite(output_path_abs, frame)
-                if not success:
-                    logger.error(f"Failed to write frame image to {output_path_abs}")
-                    # Decide: continue with others or raise? Let's log and continue for now.
-                else:
-                    saved_frame_rel_paths[frame_tag] = output_path_rel # Store relative path with tag
-            else:
-                # This might happen if seeking goes slightly beyond the actual last frame
-                logger.warning(f"Could not read frame {frame_index} from {abs_video_path}. It might be at the very end.")
-        # --- End Frame Loop ---
-
-    except IOError as e: # Catch specific IO error from opening video
-        logger.error(f"IOError processing video {abs_video_path}: {e}")
-        raise # Re-raise IOError to signal failure
-    except cv2.error as cv_err:
-         logger.error(f"OpenCV error processing video {abs_video_path}: {cv_err}")
-         raise RuntimeError(f"OpenCV error during frame extraction") from cv_err
-    except Exception as e:
-        logger.error(f"An unexpected error occurred processing {abs_video_path}: {e}", exc_info=True)
-        raise # Re-raise unexpected errors
+                output_filename_base = f"{title}_{scene_part}_frame_{frame_tag}.jpg"
+                output_filename_base = re.sub(r'[^\w\.\-]+', '_', output_filename_base)
+                output_path_temp_abs = os.path.join(local_temp_output_dir, output_filename_base)
+                logger.debug(f"Saving frame {frame_index} (tag: {frame_tag}) to TEMP path {output_path_temp_abs}")
+                success = cv2.imwrite(output_path_temp_abs, frame)
+                if not success: logger.error(f"Failed to write frame image to TEMP path {output_path_temp_abs}")
+                else: saved_frame_local_paths[frame_tag] = output_path_temp_abs
+            else: logger.warning(f"Could not read frame {frame_index} from {local_temp_video_path}. It might be at the very end.")
+    except IOError as e: logger.error(f"IOError processing temp video {local_temp_video_path}: {e}"); raise
+    except cv2.error as cv_err: logger.error(f"OpenCV error processing temp video {local_temp_video_path}: {cv_err}"); raise RuntimeError(f"OpenCV error during frame extraction") from cv_err
+    except Exception as e: logger.error(f"An unexpected error occurred processing {local_temp_video_path}: {e}", exc_info=True); raise
     finally:
-        if cap and cap.isOpened():
-            cap.release()
-            logger.debug(f"Released video capture for {abs_video_path}")
-
-    if not saved_frame_rel_paths and total_frames > 0:
-         logger.warning(f"No frames were successfully saved for {abs_video_path} despite processing.")
-         # Optionally raise an error here if saving at least one frame is mandatory
-
-    return saved_frame_rel_paths
+        if cap and cap.isOpened(): cap.release(); logger.debug(f"Released video capture for {local_temp_video_path}")
+    if not saved_frame_local_paths and total_frames > 0: logger.warning(f"No frames were successfully saved for {local_temp_video_path} despite processing.")
+    return saved_frame_local_paths
 
 # --- Prefect Task ---
 @task(name="Extract Clip Keyframes", retries=1, retry_delay_seconds=30)
@@ -178,249 +119,222 @@ def extract_keyframes_task(
     strategy: str = 'midpoint',
     overwrite: bool = False
     ):
-    """
-    Prefect task to extract keyframe(s) for a single clip, save them,
-    and update the database record.
-
-    Args:
-        clip_id (int): The ID of the clip to process.
-        strategy (str): 'midpoint' or 'multi'.
-        overwrite (bool): If True, overwrite existing keyframes and DB path.
-
-    Returns:
-        dict: Information about the operation, including the representative
-              keyframe path stored in the DB. Example:
-              {'status': 'success', 'clip_id': clip_id, 'representative_path': '...', 'all_paths': {...}}
-              or {'status': 'skipped', ...} or raises error on failure.
-    """
     logger = get_run_logger()
     logger.info(f"TASK [Keyframe]: Starting for clip_id: {clip_id}, Strategy: '{strategy}', Overwrite: {overwrite}")
+
+    if not s3_client:
+        logger.error("S3 client not initialized. Cannot proceed.")
+        raise RuntimeError("S3 client failed to initialize.")
+
     conn = None
-    representative_rel_path = None
-    saved_frame_rel_paths = {}
-    final_status = "failed" # Default status
+    temp_dir_obj = None
+    representative_s3_key = None
+    saved_s3_keys = {}
+    final_status = "failed"
+    needs_processing = False # Flag to track if actual processing will occur
 
     try:
-        media_base_dir = get_media_base_dir()
+        temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_keyframe_{clip_id}_")
+        temp_dir = Path(temp_dir_obj.name)
+        logger.info(f"Using temporary directory: {temp_dir}")
+
         conn = get_db_connection()
-        conn.autocommit = False # Start transaction explicitly if needed, or use context manager
+        conn.autocommit = False # Start manual transaction management
 
-        # Use transaction context manager for automatic commit/rollback
-        with conn.transaction():
-            # === Transaction Start ===
+        # === Initial DB Check and State Update Block ===
+        try:
             with conn.cursor() as cur:
-                # 1. Acquire Advisory Lock for this clip
-                try:
-                    cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,)) # Use type 2 for clips
-                    logger.info(f"Acquired DB lock for clip_id: {clip_id}")
-                except Exception as lock_err:
-                    logger.error(f"Failed to acquire DB lock for clip_id {clip_id}: {lock_err}")
-                    raise RuntimeError("DB Lock acquisition failed") from lock_err
+                # 1. Acquire Advisory Lock
+                cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
+                logger.info(f"Acquired DB lock for clip_id: {clip_id}")
 
-                # 2. Fetch clip details and source identifier, check state
+                # 2. Fetch clip details & source identifier
                 cur.execute(
                     """
-                    SELECT
-                        c.clip_filepath, c.clip_identifier, c.keyframe_filepath, c.ingest_state,
-                        sv.source_identifier
-                    FROM clips c
-                    JOIN source_videos sv ON c.source_video_id = sv.id
-                    WHERE c.id = %s;
-                    """,
-                    (clip_id,)
+                    SELECT c.clip_filepath, c.clip_identifier, c.keyframe_filepath, c.ingest_state, sv.title
+                    FROM clips c JOIN source_videos sv ON c.source_video_id = sv.id WHERE c.id = %s;
+                    """, (clip_id,)
                 )
                 result = cur.fetchone()
-                if not result:
-                    raise ValueError(f"Clip ID {clip_id} not found.")
-
-                rel_clip_path, clip_identifier, current_keyframe_path, current_state, source_identifier = result
-                logger.info(f"Found clip: ID={clip_id}, Identifier='{clip_identifier}', State='{current_state}', Source='{source_identifier}'")
+                if not result: raise ValueError(f"Clip ID {clip_id} not found.")
+                clip_s3_key, clip_identifier, current_keyframe_s3_key, current_state, title = result
+                logger.info(f"Found clip: ID={clip_id}, Identifier='{clip_identifier}', State='{current_state}', Source='{title}', Clip S3 Key='{clip_s3_key}'")
 
                 # 3. Check if processing should proceed
-                # Allow 'review_approved' or failed states if overwrite=True
-                allow_processing = current_state == 'review_approved' or \
-                                  (overwrite and current_state in ['keyframing_failed', 'keyframed', 'embedding_failed', 'embedded'])
-                # Also allow if keyframe path is missing and state isn't explicitly failed/complete
-                allow_processing = allow_processing or (not current_keyframe_path and current_state not in ['keyframing_failed', 'keyframed', 'embedding_failed', 'embedded'])
+                allow_processing_state = current_state == 'review_approved' or \
+                                         (overwrite and current_state in ['keyframing_failed', 'keyframed', 'embedding_failed', 'embedded']) or \
+                                         (not current_keyframe_s3_key and current_state not in ['keyframing_failed', 'keyframed', 'embedding_failed', 'embedded'])
 
-
-                if not allow_processing:
-                    # More robust check: Is the *correct* keyframe path already set for this strategy?
-                    expected_dir_part = Path(KEYFRAMES_BASE_SUBDIR) / source_identifier / strategy
-                    path_matches_strategy = False
-                    if current_keyframe_path:
-                        # Normalize paths for comparison
-                        try:
-                             current_path_norm = Path(current_keyframe_path).parent
-                             if current_path_norm == expected_dir_part:
-                                 path_matches_strategy = True
-                        except Exception:
-                            pass # Ignore errors parsing path
+                if not allow_processing_state:
+                    # Check S3 path match only if state doesn't allow processing outright
+                    expected_s3_prefix_part = f"{KEYFRAMES_S3_PREFIX.strip('/')}/{title}/{strategy}/"
+                    path_matches_strategy = current_keyframe_s3_key and current_keyframe_s3_key.startswith(expected_s3_prefix_part)
 
                     if path_matches_strategy and not overwrite:
-                        logger.info(f"Skipping clip {clip_id}: Keyframe already exists with matching strategy ('{strategy}') path and overwrite=False.")
+                        logger.info(f"Skipping clip {clip_id}: Keyframe S3 key already exists with matching strategy and overwrite=False.")
                         final_status = "skipped"
-                        return {"status": final_status, "reason": "Existing keyframe path matches strategy", "clip_id": clip_id}
                     elif current_state not in ['review_approved', 'keyframing_failed'] and not overwrite:
-                         logger.warning(f"Skipping clip {clip_id}: Current state '{current_state}' is not suitable for keyframing and overwrite=False.")
-                         final_status = "skipped"
-                         return {"status": final_status, "reason": f"Incorrect state: {current_state}", "clip_id": clip_id}
-                    else:
-                         logger.info(f"Proceeding with clip {clip_id}: State='{current_state}', Overwrite={overwrite}, PathMatch={path_matches_strategy}")
-
-
-                if not rel_clip_path:
-                    raise ValueError(f"Clip ID {clip_id} has NULL clip_filepath.")
-                if not source_identifier:
-                    raise ValueError(f"Source identifier is NULL for clip ID {clip_id}.")
-
-                # Update state to 'keyframing'
-                cur.execute(
-                    "UPDATE clips SET ingest_state = 'keyframing', updated_at = NOW(), last_error = NULL WHERE id = %s",
-                    (clip_id,)
-                )
-                logger.info(f"Set clip {clip_id} state to 'keyframing'")
-
-                # --- Prepare Paths ---
-                abs_clip_path = os.path.join(media_base_dir, rel_clip_path)
-                if not os.path.isfile(abs_clip_path):
-                    raise FileNotFoundError(f"Clip video file not found: {abs_clip_path}")
-
-                output_dir_abs = os.path.join(media_base_dir, KEYFRAMES_BASE_SUBDIR, source_identifier, strategy)
-                logger.info(f"Ensuring output directory exists: {output_dir_abs}")
-                os.makedirs(output_dir_abs, exist_ok=True)
-
-                # --- Perform Extraction ---
-                logger.info(f"Calling frame extraction for clip {clip_id} ('{clip_identifier}')...")
-                # Use the internal function that raises errors
-                saved_frame_rel_paths = _extract_and_save_frames_internal(
-                    abs_clip_path,
-                    clip_identifier,
-                    source_identifier,
-                    output_dir_abs,
-                    strategy
-                )
-
-                if not saved_frame_rel_paths:
-                    # This could happen if the video was empty or frames couldn't be read/saved
-                    logger.warning(f"No keyframes were extracted or saved for clip {clip_id}. Check video validity.")
-                    # If no frames were saved, we can't pick a representative one. Consider this a failure?
-                    # Let's treat it as a failure for now, as subsequent steps rely on a keyframe.
-                    raise RuntimeError(f"Failed to extract any keyframes for clip {clip_id}")
-
-                # --- Select Representative Keyframe ---
-                representative_key = None
-                if strategy == 'multi':
-                    # Prefer '50pct', fallback if needed
-                    representative_key = '50pct' if '50pct' in saved_frame_rel_paths else next(iter(saved_frame_rel_paths), None)
-                elif strategy == 'midpoint':
-                    representative_key = 'mid' if 'mid' in saved_frame_rel_paths else next(iter(saved_frame_rel_paths), None)
-                # Add elif for future strategies
-
-                if representative_key and representative_key in saved_frame_rel_paths:
-                    representative_rel_path = saved_frame_rel_paths[representative_key]
-                    logger.info(f"Selected representative keyframe ({representative_key}): {representative_rel_path}")
+                        logger.warning(f"Skipping clip {clip_id}: State '{current_state}' not suitable and overwrite=False.")
+                        final_status = "skipped"
+                    else: # Should proceed due to overwrite or missing path despite state
+                        needs_processing = True
+                        logger.info(f"Proceeding with clip {clip_id}: State='{current_state}', Overwrite={overwrite}, S3PathMatch={path_matches_strategy}")
                 else:
-                    logger.error(f"Could not determine representative keyframe for clip {clip_id} from tags: {list(saved_frame_rel_paths.keys())}")
-                    raise ValueError("Failed to select a representative keyframe")
+                     needs_processing = True # Proceed based on state/overwrite/missing path
+                     logger.info(f"Proceeding with clip {clip_id} based on state/overwrite/missing keyframe.")
 
-                # --- Update DB on Success ---
-                cur.execute(
-                    """
-                    UPDATE clips
-                    SET keyframe_filepath = %s,
-                        ingest_state = 'keyframed',
-                        keyframed_at = NOW(),
-                        last_error = NULL,
-                        updated_at = NOW()
-                    WHERE id = %s
-                    """,
-                    (representative_rel_path, clip_id)
-                )
-                logger.info(f"Successfully updated DB for clip {clip_id}. State set to 'keyframed'.")
-                final_status = "success"
+                # 4. Update state to 'keyframing' only if processing
+                if needs_processing:
+                    if not clip_s3_key: raise ValueError(f"Clip ID {clip_id} has NULL clip_filepath (S3 key).")
+                    if not title:
+                         fallback_source_id = clip_identifier.split('_clip_')[0].split('_scene_')[0]; title = re.sub(r'[^\w\-]+', '_', fallback_source_id).strip('_')
+                         if not title: raise ValueError(f"Could not determine a valid source identifier for clip ID {clip_id}.")
+                         logger.warning(f"Source identifier was NULL for clip {clip_id}, using fallback: '{title}'")
 
-        # === Transaction End (Commit happens here if no exceptions) ===
-        logger.info(f"Transaction committed for clip {clip_id}.")
+                    cur.execute(
+                        "UPDATE clips SET ingest_state = 'keyframing', updated_at = NOW(), last_error = NULL WHERE id = %s",
+                        (clip_id,)
+                    )
+                    logger.info(f"Set clip {clip_id} state to 'keyframing'")
+            # ---- End Cursor Context ----
 
-    except (ValueError, IOError, FileNotFoundError, RuntimeError, psycopg2.DatabaseError) as e:
-        logger.error(f"TASK FAILED [Keyframe]: clip_id {clip_id} - {e}", exc_info=True)
-        if conn:
-            # Don't rollback here, transaction context manager handles it.
-            # Update DB state outside the transaction (requires autocommit=True)
+            # Commit the initial check/state update
+            conn.commit()
+            logger.debug("Initial check/state update transaction committed.")
+
+        except (ValueError, psycopg2.DatabaseError) as db_err:
+             logger.error(f"DB Error during initial check/update for clip {clip_id}: {db_err}", exc_info=True)
+             if conn: conn.rollback() # Rollback this specific block on error
+             raise # Re-raise to trigger main error handling
+
+        # === Exit if Skipped ===
+        if final_status == "skipped":
+            logger.info(f"Skipped processing for clip {clip_id}.")
+            # No further DB action needed as commit already happened
+            return {"status": final_status, "reason": "Skipped based on state/overwrite/existing path", "clip_id": clip_id}
+
+
+        # === S3 Download and Processing (Outside DB Transaction) ===
+        # 5. Download Clip from S3
+        local_temp_clip_path = temp_dir / Path(clip_s3_key).name
+        logger.info(f"Downloading s3://{S3_BUCKET_NAME}/{clip_s3_key} to {local_temp_clip_path}...")
+        try:
+            s3_client.download_file(S3_BUCKET_NAME, clip_s3_key, str(local_temp_clip_path))
+        except ClientError as s3_err:
+            raise RuntimeError("S3 download failed") from s3_err
+
+        # 6. Perform Extraction
+        saved_frame_local_paths = _extract_and_save_frames_internal(
+            str(local_temp_clip_path), clip_identifier, title, str(temp_dir), strategy
+        )
+        if not saved_frame_local_paths: raise RuntimeError(f"Failed to extract any keyframes locally for clip {clip_id}")
+
+        # 7. Upload Extracted Frames to S3
+        for frame_tag, temp_local_path_str in saved_frame_local_paths.items():
+            temp_local_path = Path(temp_local_path_str)
+            frame_s3_key = f"{KEYFRAMES_S3_PREFIX.strip('/')}/{title}/{strategy}/{temp_local_path.name}".replace("\\", "/")
             try:
-                conn.autocommit = True # Enable autocommit for error update
+                with open(temp_local_path, "rb") as f: s3_client.upload_fileobj(f, S3_BUCKET_NAME, frame_s3_key)
+                saved_s3_keys[frame_tag] = frame_s3_key
+            except ClientError as s3_upload_err: logger.error(f"Failed to upload keyframe {temp_local_path.name} to S3: {s3_upload_err}")
+            except Exception as upload_err: logger.error(f"Unexpected error uploading keyframe {temp_local_path.name}: {upload_err}", exc_info=True)
+        if len(saved_s3_keys) != len(saved_frame_local_paths): logger.warning("Not all extracted frames were successfully uploaded to S3.")
+        if not saved_s3_keys: raise RuntimeError(f"Failed to upload ANY keyframes to S3 for clip {clip_id}")
+
+        # 8. Select Representative S3 Key
+        repr_tag = '50pct' if strategy == 'multi' else 'mid'
+        representative_s3_key = saved_s3_keys.get(repr_tag) or next(iter(saved_s3_keys.values()), None)
+        if not representative_s3_key: raise ValueError("Failed to select a representative S3 key after upload")
+        logger.info(f"Selected representative S3 key: {representative_s3_key}")
+
+        # === Final DB Update Block ===
+        try:
+            with conn.cursor() as cur:
+                 # Acquire lock again for final update
+                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
+
+                 # Update DB on Success
+                 cur.execute(
+                    """
+                    UPDATE clips SET keyframe_filepath = %s, ingest_state = 'keyframed',
+                        keyframed_at = NOW(), last_error = NULL, updated_at = NOW()
+                    WHERE id = %s AND ingest_state = 'keyframing';
+                    """, (representative_s3_key, clip_id)
+                 )
+                 if cur.rowcount == 0: logger.warning(f"DB update for final state 'keyframed' for clip {clip_id} affected 0 rows.")
+                 else: logger.info(f"Successfully updated DB for clip {clip_id}. State set to 'keyframed'."); final_status = "success"
+            # --- End Cursor Context ---
+            conn.commit() # Commit final update
+            logger.debug("Final update transaction committed.")
+
+        except (ValueError, psycopg2.DatabaseError) as db_err:
+             logger.error(f"DB Error during final update for clip {clip_id}: {db_err}", exc_info=True)
+             if conn: conn.rollback()
+             raise # Re-raise to trigger main error handling
+
+
+    except (ValueError, IOError, FileNotFoundError, RuntimeError, ClientError, psycopg2.DatabaseError) as e:
+        # --- Main Error Handling ---
+        logger.error(f"TASK FAILED [Keyframe]: clip_id {clip_id} - {e}", exc_info=True)
+        final_status = "failed"
+        if conn:
+            try:
+                conn.rollback() # Rollback any potentially open transaction
+                conn.autocommit = True # Enable autocommit for error state update
                 with conn.cursor() as err_cur:
                     err_cur.execute(
                         """
-                        UPDATE clips
-                        SET ingest_state = 'keyframing_failed',
-                            last_error = %s,
-                            retry_count = COALESCE(retry_count, 0) + 1,
-                            updated_at = NOW()
-                        WHERE id = %s AND ingest_state = 'keyframing'
-                        """,
-                        (f"{type(e).__name__}: {str(e)[:500]}", clip_id) # Store error message
+                        UPDATE clips SET ingest_state = 'keyframing_failed', last_error = %s,
+                            retry_count = COALESCE(retry_count, 0) + 1, updated_at = NOW()
+                        WHERE id = %s AND ingest_state IN ('keyframing', 'review_approved');
+                        """, (f"{type(e).__name__}: {str(e)[:500]}", clip_id)
                     )
-                logger.info(f"Set clip {clip_id} state to 'keyframing_failed' after error.")
+                logger.info(f"Attempted to set clip {clip_id} state to 'keyframing_failed' after error.")
             except Exception as db_err:
                 logger.error(f"Failed to update error state in DB for clip {clip_id} after task failure: {db_err}")
-        # Re-raise the original exception to mark the Prefect task as failed
-        raise e
+        raise e # Re-raise original exception
     except Exception as e:
          # Catch any other unexpected errors
          logger.error(f"UNEXPECTED TASK FAILED [Keyframe]: clip_id {clip_id} - {e}", exc_info=True)
+         final_status = "failed"
          if conn:
              try:
+                 conn.rollback()
                  conn.autocommit = True
                  with conn.cursor() as err_cur:
                     err_cur.execute(
                         """
-                        UPDATE clips SET ingest_state = 'keyframing_failed', last_error = %s, retry_count = COALESCE(retry_count, 0) + 1, updated_at = NOW()
-                        WHERE id = %s AND ingest_state = 'keyframing'
-                        """,
-                         (f"Unexpected:{type(e).__name__}: {str(e)[:480]}", clip_id)
+                        UPDATE clips SET ingest_state = 'keyframing_failed', last_error = %s,
+                            retry_count = COALESCE(retry_count, 0) + 1, updated_at = NOW()
+                        WHERE id = %s AND ingest_state IN ('keyframing', 'review_approved');
+                        """, (f"Unexpected:{type(e).__name__}: {str(e)[:480]}", clip_id)
                     )
-                 logger.info(f"Set clip {clip_id} state to 'keyframing_failed' after unexpected error.")
+                 logger.info(f"Attempted to set clip {clip_id} state to 'keyframing_failed' after unexpected error.")
              except Exception as db_err:
                  logger.error(f"Failed to update error state in DB for clip {clip_id} after unexpected task failure: {db_err}")
-         raise # Re-raise
+         raise
     finally:
+        # --- Cleanup ---
         if conn:
-            conn.autocommit = True # Ensure autocommit is reset before closing
+            conn.autocommit = True # Ensure reset before closing
             conn.close()
             logger.debug(f"DB connection closed for clip_id: {clip_id}")
+        if temp_dir_obj:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                logger.info(f"Cleaned up temporary directory: {temp_dir}")
+            except Exception as cleanup_err:
+                 logger.warning(f"Error cleaning up temporary directory {temp_dir}: {cleanup_err}")
 
-    # Return success information
     return {
         "status": final_status,
         "clip_id": clip_id,
-        "representative_path": representative_rel_path,
-        "all_paths": saved_frame_rel_paths,
+        "representative_s3_key": representative_s3_key,
+        "all_s3_keys": saved_s3_keys,
         "strategy": strategy
     }
 
-# Example of how to potentially run this locally (for testing syntax, etc.)
-# Note: Requires DB and media files to be accessible
+# Example local run block (remains the same, less useful without S3/DB)
 if __name__ == "__main__":
-    print("Running keyframe task locally for testing (requires specific setup)...")
-    # Replace with a valid clip_id from your DB that is in 'review_approved' state
-    test_clip_id = 1
-    test_strategy = 'multi' # or 'midpoint'
-    test_overwrite = True # Set to True to force processing if already done
-
-    # Make sure environment variables like DATABASE_URL, MEDIA_BASE_DIR are set
-    if not os.getenv("DATABASE_URL") or not os.getenv("MEDIA_BASE_DIR"):
-         print("Error: DATABASE_URL and MEDIA_BASE_DIR must be set in environment for local test.")
-    else:
-        try:
-            # Prefect tasks can be called like regular functions for local testing
-            result = extract_keyframes_task.fn( # Use .fn to bypass Prefect engine orchestration
-                clip_id=test_clip_id,
-                strategy=test_strategy,
-                overwrite=test_overwrite
-            )
-            print(f"\nLocal Test Result:\n{result}")
-        except Exception as e:
-            print(f"\nLocal test failed: {e}")
-            traceback.print_exc()
+    print("Running keyframe task locally for testing (requires S3/DB setup)...")
+    pass
