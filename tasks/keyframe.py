@@ -10,13 +10,12 @@ import psycopg2
 from psycopg2 import sql
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
-
-# Assuming db_utils.py is in ../utils relative to tasks/
 import sys
+
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
-
 try:
     from utils.db_utils import get_db_connection
 except ImportError as e:
@@ -42,8 +41,7 @@ except Exception as e:
 # --- Configuration ---
 KEYFRAMES_S3_PREFIX = os.getenv("KEYFRAMES_S3_PREFIX", "keyframes/")
 
-# --- Core Frame Extraction Logic (Modified for Temp Files) ---
-# _extract_and_save_frames_internal remains the same as the previous correct version
+# --- Core Frame Extraction Logic ---
 def _extract_and_save_frames_internal(
     local_temp_video_path: str,
     clip_identifier: str,
@@ -213,7 +211,6 @@ def extract_keyframes_task(
             # No further DB action needed as commit already happened
             return {"status": final_status, "reason": "Skipped based on state/overwrite/existing path", "clip_id": clip_id}
 
-
         # === S3 Download and Processing (Outside DB Transaction) ===
         # 5. Download Clip from S3
         local_temp_clip_path = temp_dir / Path(clip_s3_key).name
@@ -271,7 +268,6 @@ def extract_keyframes_task(
              logger.error(f"DB Error during final update for clip {clip_id}: {db_err}", exc_info=True)
              if conn: conn.rollback()
              raise # Re-raise to trigger main error handling
-
 
     except (ValueError, IOError, FileNotFoundError, RuntimeError, ClientError, psycopg2.DatabaseError) as e:
         # --- Main Error Handling ---
@@ -334,7 +330,7 @@ def extract_keyframes_task(
         "strategy": strategy
     }
 
-# Example local run block (remains the same, less useful without S3/DB)
+# Local run block for testing purposes
 if __name__ == "__main__":
     print("Running keyframe task locally for testing (requires S3/DB setup)...")
     pass

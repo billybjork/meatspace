@@ -27,7 +27,6 @@ document.addEventListener('DOMContentLoaded', () => {
                  console.log(`Action: ${action} on Clip ID: ${clipId}`); // Debug log other actions
             }
 
-
             // --- Common API call logic remains the same ---
             clipItem.classList.add('processing'); // Visual feedback
             feedbackDiv.textContent = 'Processing...';

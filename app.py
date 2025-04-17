@@ -1,13 +1,12 @@
 import os
 import random
 import ast
-import json # Added for processing_metadata
-from typing import AsyncGenerator, Optional # Added Optional
-from fastapi import FastAPI, Request, HTTPException, Query, Depends, APIRouter, Form # Added Form
+from typing import AsyncGenerator, Optional
+from fastapi import FastAPI, Request, HTTPException, Query, Depends, APIRouter, Form
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field # Added Pydantic for request bodies
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import asyncpg
 import traceback
@@ -68,11 +67,10 @@ async def get_db_connection(request: Request) -> AsyncGenerator[asyncpg.Connecti
             await pool.release(connection)
 
 # --- FastAPI Application Instance ---
-# Assuming lifespan management is in main.py
 app = FastAPI(title="Meatspace")
 
 # --- Static Files and Templates ---
-script_dir = os.path.dirname(os.path.abspath(__file__)) # Use abspath for reliability
+script_dir = os.path.dirname(os.path.abspath(__file__))
 static_dir = os.path.join(script_dir, "static")
 templates_dir = os.path.join(script_dir, "templates")
 
@@ -88,7 +86,7 @@ templates = Jinja2Templates(directory=templates_dir)
 router = APIRouter()
 
 # --- Helper Functions ---
-def format_clip_data(record, request: Request): # Request param likely removable if base_url not needed
+def format_clip_data(record: Request):
     """Formats a database record into a dictionary for the template, using CloudFront URLs."""
     if not record:
         return None
@@ -148,12 +146,9 @@ async def fetch_available_embedding_options(conn: asyncpg.Connection):
         logger.error(f"Error fetching available embedding options: {e}", exc_info=True)
     return options
 
-
 # --- Request Body Models ---
 class ClipActionPayload(BaseModel):
-    action: str # 'approve', 'skip', 'archive', 'merge_next', 'split', 'retry_splice' <-- Add retry_splice
-    # Remove split_at_seconds as it's no longer needed for review UI actions
-    # split_at_seconds: Optional[float] = Field(None, gt=0)
+    action: str # 'approve', 'skip', 'archive', 'merge_next', 'split', 'retry_splice'
 
 # --- API Routes (defined on the router) ---
 
@@ -225,7 +220,6 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         # Avoid DB calls in general exception handler if initial connection might have failed
         return templates.TemplateResponse("index.html", template_context)
 
-
 @router.get("/query/{clip_id}", response_class=HTMLResponse, name="query_clip")
 async def query_clip(
     clip_id: str,
@@ -245,7 +239,7 @@ async def query_clip(
         "results": [],
         "error": None,
         "available_options": [],
-        "model_name": model_name, # Reflect selected model/strategy
+        "model_name": model_name,
         "strategy": strategy
     }
 
@@ -485,22 +479,20 @@ async def handle_clip_action(
     elif action == "merge_next":
         target_state = "pending_merge_with_next"
     elif action == "retry_splice":
-        target_state = "pending_resplice" # New state to trigger the resplice task
-        # No extra params needed here unless passing retry settings via API
+        target_state = "pending_resplice"
     else:
         raise HTTPException(status_code=400, detail=f"Invalid action: {action}")
 
     if target_state is None:
         raise HTTPException(status_code=400, detail="Could not determine target state for action.")
 
-    # Parameter binding logic (remains largely the same)
     set_clauses.append(f"ingest_state = ${param_counter}")
     params.insert(0, target_state)
 
     where_param_index = len(params) + 1
     params.append(clip_db_id)
 
-    # Define states from which actions are allowed (primarily pending/skipped, add others if needed)
+    # Define states from which actions are allowed
     allowed_source_states = ['pending_review', 'review_skipped', 'merge_failed', 'split_failed', 'resplice_failed'] # Allow retry from failed states too
 
     try:
@@ -543,9 +535,7 @@ async def handle_clip_action(
         logger.error(f"Error processing action for clip {clip_db_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error processing action.")
 
-
 # --- API Endpoint for Undo ---
-# Update allowed_undo_states to include the new states
 @router.post("/api/clips/{clip_db_id}/undo", name="undo_clip_action", status_code=200)
 async def undo_clip_action(
     clip_db_id: int,
@@ -559,11 +549,9 @@ async def undo_clip_action(
     allowed_undo_states = [
         'review_approved', 'review_skipped', 'archived',
         'pending_merge_with_next',
-        # 'pending_split', # Remove split
-        'pending_resplice', # Add resplice state
+        'pending_resplice',
         'merge_failed',
-        # 'split_failed', # Remove split
-        'resplice_failed' # Add resplice failure state
+        'resplice_failed'
     ]
 
     try:

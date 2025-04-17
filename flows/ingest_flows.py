@@ -9,7 +9,7 @@ if str(project_root) not in sys.path:
     print(f"Adding project root to sys.path: {project_root}")
     sys.path.insert(0, str(project_root))
 
-from prefect import flow, get_run_logger, task # Added task decorator for potential future use
+from prefect import flow, get_run_logger, task
 
 # --- Task Imports ---
 from tasks.intake import intake_task
@@ -32,7 +32,6 @@ DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "openai/clip-vit-
 DEFAULT_EMBEDDING_STRATEGY_LABEL = f"keyframe_{DEFAULT_KEYFRAME_STRATEGY}"
 # Delay between submitting batches of tasks to avoid overwhelming DB/API
 TASK_SUBMIT_DELAY = float(os.getenv("TASK_SUBMIT_DELAY", 0.1))
-
 
 # --- Flows ---
 
@@ -89,7 +88,6 @@ def process_clip_post_review(
          # Depending on the error, may want to update clip state to failed using a separate task/call
 
     logger.info(f"FLOW: Finished post-review processing flow for clip_id: {clip_id}")
-
 
 @flow(name="Scheduled Ingest Initiator", log_prints=True)
 def scheduled_ingest_initiator():
@@ -155,10 +153,10 @@ def scheduled_ingest_initiator():
             for cid in clips_ready_for_keyframes:
                 try:
                     # Call the flow directly to create a sub-flow run
-                    process_clip_post_review(clip_id=cid) # <-- THE FIX: Call flow directly
+                    process_clip_post_review(clip_id=cid)
                     logger.debug(f"[{stage_name}] Initiated process_clip_post_review sub-flow for clip_id: {cid}") # Updated log message
-                    time.sleep(TASK_SUBMIT_DELAY) # Keep delay for staggering initiation
-                except Exception as flow_call_err: # Renamed variable for clarity
+                    time.sleep(TASK_SUBMIT_DELAY) # Delay for staggering initiation
+                except Exception as flow_call_err:
                      logger.error(f"[{stage_name}] Failed to initiate process_clip_post_review flow for clip_id {cid}: {flow_call_err}", exc_info=True)
                      error_count += 1
     except Exception as db_query_err:
@@ -168,7 +166,6 @@ def scheduled_ingest_initiator():
     # --- Stage 4: Find Clips Pending Merge -> Submit Merge Task ---
     stage_name = "Merge"
     try:
-        # Use the new helper function from db_utils
         merge_pairs = get_pending_merge_pairs() # Expects list of tuples [(id1, id2), ...]
         processed_counts[stage_name] = len(merge_pairs)
         if merge_pairs:
@@ -214,7 +211,6 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed during re-splice check/submission: {db_query_err}", exc_info=True)
          error_count += 1
 
-
     # --- Completion Logging ---
     summary_log = f"FLOW: Scheduled Ingest Initiator cycle complete. Processed counts: {processed_counts}."
     if error_count > 0:
@@ -223,7 +219,7 @@ def scheduled_ingest_initiator():
          logger.info(summary_log)
 
 if __name__ == "__main__":
-    # This block now primarily serves for direct local testing of one cycle,
+    # This block serves for direct local testing of one cycle,
     # or potentially other script-like actions related to these flows.
     # The actual deployment registration happens via `prefect deploy`.
 
@@ -232,7 +228,6 @@ if __name__ == "__main__":
     # It does NOT use the scheduler or worker queue. Useful for quick debugging.
     # Submitted tasks *will* still go to the queue if a worker is running.
     try:
-        # Ensure dummy functions are sufficient if tasks/utils are missing
         scheduled_ingest_initiator()
     except Exception as e:
         print(f"\nError during local test run: {e}")

@@ -51,7 +51,7 @@ except NoCredentialsError:
 except Exception as e:
     print(f"Embed Task: ERROR initializing S3 client: {e}")
 
-# --- Global Model Cache (remains the same) ---
+# --- Global Model Cache ---
 _model_cache = {}
 def get_cached_model_and_processor(model_name, device='cpu'):
     logger = get_run_logger(); logger.debug(f"Requesting model: {model_name}")
@@ -72,7 +72,7 @@ def _load_model_and_processor_internal(model_name, device='cpu'):
     if not all([model, processor, model_type_str, embedding_dim]): raise RuntimeError(f"Failed init components: {model_name}")
     return model, processor, model_type_str, embedding_dim
 
-# --- Helper to GENERATE potential sibling S3 Keys (remains the same) ---
+# --- Helper to GENERATE potential sibling S3 Keys ---
 def generate_potential_sibling_s3_keys(representative_s3_key):
     logger = get_run_logger(); potential_keys = []
     if not representative_s3_key: logger.warning("generate_potential_sibling_s3_keys received empty key."); return []
@@ -87,7 +87,6 @@ def generate_potential_sibling_s3_keys(representative_s3_key):
         if not potential_keys: logger.warning(f"Logic error generating keys for {representative_s3_key}."); return [representative_s3_key]
         return sorted(list(set(potential_keys)))
     except Exception as e: logger.error(f"Error generating sibling S3 keys for {representative_s3_key}: {e}", exc_info=True); return []
-
 
 # --- Prefect Task ---
 @task(name="Generate Clip Embedding", retries=1, retry_delay_seconds=45)
@@ -302,7 +301,7 @@ def generate_embeddings_task(
         "strategy": generation_strategy, "embedding_dim": embedding_dim,
     }
 
-# Example local run block (remains the same)
+# Local run block for testing purposes
 if __name__ == "__main__":
     print("Running embedding task locally for testing (requires S3/DB/Model setup)...")
     pass
