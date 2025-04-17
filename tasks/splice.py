@@ -256,6 +256,7 @@ def splice_video_task(source_video_id: int):
         with conn.cursor() as cur:
             # === Transaction Start (initial check/update) ===
             try:
+                cur.execute("SELECT pg_advisory_xact_lock(1, %s)", (source_video_id,))
                 cur.execute("SELECT filepath, ingest_state, title FROM source_videos WHERE id = %s FOR UPDATE", (source_video_id,))
                 result = cur.fetchone()
                 if not result: raise ValueError(f"Source video ID {source_video_id} not found.")
