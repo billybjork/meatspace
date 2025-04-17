@@ -10,23 +10,25 @@ document.addEventListener('DOMContentLoaded', () => {
         const feedbackDiv = clipItem.querySelector('.action-feedback');
         const undoButton = clipItem.querySelector('.undo-button');
         let action = null;
-        let payload = {};
+        let payload = {}; // Initialize payload
 
+        // Handle standard action buttons
         if (target.matches('.action-btn')) {
             action = target.dataset.action;
-            payload.action = action;
+            payload.action = action; // Set the action in the payload
 
-            if (action === 'split') {
-                const timeInput = clipItem.querySelector('.split-time-input');
-                const splitTime = parseFloat(timeInput.value);
-                if (isNaN(splitTime) || splitTime <= 0) {
-                    feedbackDiv.textContent = 'Error: Please enter a valid positive split time.';
-                    feedbackDiv.className = 'action-feedback error';
-                    return; // Don't proceed
-                }
-                payload.split_at_seconds = splitTime;
+            // --- Check if action is 'retry_splice' (no extra data needed from UI) ---
+            if (action === 'retry_splice') {
+                 console.log(`Action: ${action} on Clip ID: ${clipId}`); // Log retry action
+                 // Payload already contains { action: 'retry_splice' }
             }
-            console.log(`Action: ${action} on Clip ID: ${clipId}`, payload); // Debug log
+            // For other actions, payload is just { action: 'action_name' }
+            else {
+                 console.log(`Action: ${action} on Clip ID: ${clipId}`); // Debug log other actions
+            }
+
+
+            // --- Common API call logic remains the same ---
             clipItem.classList.add('processing'); // Visual feedback
             feedbackDiv.textContent = 'Processing...';
             feedbackDiv.className = 'action-feedback';
@@ -39,7 +41,7 @@ document.addEventListener('DOMContentLoaded', () => {
                         'Content-Type': 'application/json',
                         'Accept': 'application/json'
                     },
-                    body: JSON.stringify(payload)
+                    body: JSON.stringify(payload) // Send the payload
                 });
 
                 const result = await response.json(); // Always try to parse JSON
@@ -48,22 +50,24 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(result.detail || `HTTP error! status: ${response.status}`);
                 }
 
-                feedbackDiv.textContent = `Success: Marked as ${result.new_state}.`;
+                // Adjust success message slightly for retry
+                let successMessage = `Success: Marked as ${result.new_state}.`;
+                if (action === 'retry_splice') {
+                    successMessage = `Success: Queued for re-splicing (state: ${result.new_state}).`;
+                }
+
+                feedbackDiv.textContent = successMessage;
                 feedbackDiv.className = 'action-feedback success';
                 clipItem.classList.remove('processing');
                 clipItem.classList.add('done'); // Mark as done visually
-                // Optionally hide the item after a delay:
-                // setTimeout(() => clipItem.style.display = 'none', 2000);
 
-                // Show Undo button temporarily
+                // Show Undo button temporarily (still useful for retry)
                 undoButton.style.display = 'inline-block';
                 setTimeout(() => {
-                    // Hide undo only if the item hasn't been reset by an undo action
                     if (clipItem.classList.contains('done')) {
                         undoButton.style.display = 'none';
                     }
-                }, 15000); // 15 seconds undo window
-
+                }, 15000);
 
             } catch (error) {
                 console.error('Action failed:', error);
@@ -72,8 +76,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 clipItem.classList.remove('processing'); // Remove processing state on error
             }
 
+        // --- Undo logic remains the same ---
         } else if (target.matches('.undo-button')) {
-            console.log(`Undo Action on Clip ID: ${clipId}`);
+            // ... (keep existing undo logic) ...
+             console.log(`Undo Action on Clip ID: ${clipId}`);
             clipItem.classList.add('processing');
             feedbackDiv.textContent = 'Undoing...';
             feedbackDiv.className = 'action-feedback';
@@ -91,11 +97,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(result.detail || `HTTP error! status: ${response.status}`);
                 }
 
-                feedbackDiv.textContent = `Success: Reverted to ${result.new_state}. Refresh to see it back in queue.`;
+                feedbackDiv.textContent = `Success: Reverted to ${result.new_state}. You may need to refresh.`; // Adjusted message
                 feedbackDiv.className = 'action-feedback success';
                 clipItem.classList.remove('processing', 'done'); // Reset visual state
-                // Maybe reload the page or just update UI to indicate it's back
-                // For simplicity, just leave the message. User can refresh.
 
 
             } catch (error) {
@@ -103,7 +107,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 feedbackDiv.textContent = `Undo Error: ${error.message}`;
                 feedbackDiv.className = 'action-feedback error';
                 clipItem.classList.remove('processing');
-                 // Show undo button again if undo failed? Or just leave error.
             }
         }
     });

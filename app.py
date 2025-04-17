@@ -149,10 +149,11 @@ async def fetch_available_embedding_options(conn: asyncpg.Connection):
     return options
 
 
-# --- Request Body Models for Review Actions ---
+# --- Request Body Models ---
 class ClipActionPayload(BaseModel):
-    action: str # 'approve', 'skip', 'archive', 'merge_next', 'split'
-    split_at_seconds: Optional[float] = Field(None, gt=0) # Only used for 'split', ensure positive
+    action: str # 'approve', 'skip', 'archive', 'merge_next', 'split', 'retry_splice' <-- Add retry_splice
+    # Remove split_at_seconds as it's no longer needed for review UI actions
+    # split_at_seconds: Optional[float] = Field(None, gt=0)
 
 # --- API Routes (defined on the router) ---
 
@@ -464,14 +465,14 @@ async def handle_clip_action(
     request: Request,
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
-    """Handles user actions on a clip (approve, skip, archive, merge, split)."""
+    """Handles user actions on a clip (approve, skip, archive, merge, retry_splice)."""
     logger.info(f"Received action '{payload.action}' for clip_id: {clip_db_id}")
 
     action = payload.action
     target_state = None
-    set_clauses = ["updated_at = NOW()", "last_error = NULL"]
-    params = []  # ← ADD THIS
-    param_counter = 1  # ← AND THIS
+    set_clauses = ["updated_at = NOW()", "last_error = NULL", "processing_metadata = NULL"] # Clear metadata on most actions
+    params = []
+    param_counter = 1
 
     if action == "approve":
         target_state = "review_approved"
@@ -483,44 +484,36 @@ async def handle_clip_action(
         set_clauses.append("reviewed_at = NOW()")
     elif action == "merge_next":
         target_state = "pending_merge_with_next"
-    elif action == "split":
-        if payload.split_at_seconds is None:
-            raise HTTPException(status_code=400, detail="Missing 'split_at_seconds' for split action.")
-        target_state = "pending_split"
-        set_clauses.append(f"processing_metadata = ${param_counter + 1}")
-        params.append(json.dumps({"split_at_seconds": payload.split_at_seconds}))
+    elif action == "retry_splice":
+        target_state = "pending_resplice" # New state to trigger the resplice task
+        # No extra params needed here unless passing retry settings via API
     else:
         raise HTTPException(status_code=400, detail=f"Invalid action: {action}")
 
     if target_state is None:
         raise HTTPException(status_code=400, detail="Could not determine target state for action.")
 
+    # Parameter binding logic (remains largely the same)
     set_clauses.append(f"ingest_state = ${param_counter}")
     params.insert(0, target_state)
 
-    # Add clip ID as the last parameter for the WHERE clause
     where_param_index = len(params) + 1
     params.append(clip_db_id)
 
-    # Define states from which actions are allowed (primarily pending/skipped)
-    allowed_source_states = ['pending_review', 'review_skipped']
+    # Define states from which actions are allowed (primarily pending/skipped, add others if needed)
+    allowed_source_states = ['pending_review', 'review_skipped', 'merge_failed', 'split_failed', 'resplice_failed'] # Allow retry from failed states too
 
     try:
         async with conn.transaction():
-            # Use advisory lock (consider locking the source video too if merge/split)
             await conn.execute("SELECT pg_advisory_xact_lock(2, $1)", clip_db_id)
-
-            # Get current state to prevent race conditions or invalid transitions
             current_state = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id)
             if not current_state:
                 raise HTTPException(status_code=404, detail="Clip not found.")
 
-            # Only allow actions from specific states
             if current_state not in allowed_source_states:
                  logger.warning(f"Action '{action}' requested on clip {clip_db_id} with unexpected state '{current_state}'. Action rejected.")
-                 raise HTTPException(status_code=409, detail=f"Clip is not in a state for review action (state: {current_state}). Please refresh.")
+                 raise HTTPException(status_code=409, detail=f"Clip is not in a state for this review action (state: {current_state}). Please refresh.")
 
-            # Construct the final query
             set_clause_sql = ', '.join(set_clauses)
             update_query = f"""
                 UPDATE clips SET {set_clause_sql}
@@ -528,14 +521,12 @@ async def handle_clip_action(
                 AND ingest_state = ANY(${where_param_index + 1})
                 RETURNING id;
             """
-            # Add allowed states array as the final parameter
             final_params = params + [allowed_source_states]
 
             logger.debug(f"Executing Action Query: {update_query} with params: {final_params}")
             updated_id = await conn.fetchval(update_query, *final_params)
 
             if updated_id is None:
-                # State might have changed between select and update, or ID was wrong
                 current_state_after = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id)
                 logger.warning(f"Failed to update clip {clip_db_id}. State might have changed. Current state: {current_state_after}")
                 raise HTTPException(status_code=409, detail="Clip state may have changed, action could not be applied. Please refresh.")
@@ -554,21 +545,25 @@ async def handle_clip_action(
 
 
 # --- API Endpoint for Undo ---
+# Update allowed_undo_states to include the new states
 @router.post("/api/clips/{clip_db_id}/undo", name="undo_clip_action", status_code=200)
 async def undo_clip_action(
     clip_db_id: int,
-    request: Request, # Keep request param for context if needed later
+    request: Request,
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """Attempts to revert a clip's state back to 'pending_review'."""
     logger.info(f"Received UNDO request for clip_id: {clip_db_id}")
 
     target_state = "pending_review"
-    # Define states from which undo is allowed
     allowed_undo_states = [
         'review_approved', 'review_skipped', 'archived',
-        'pending_merge_with_next', 'pending_split',
-        'merge_failed', 'split_failed' # Allow undo after failure to try again or different action
+        'pending_merge_with_next',
+        # 'pending_split', # Remove split
+        'pending_resplice', # Add resplice state
+        'merge_failed',
+        # 'split_failed', # Remove split
+        'resplice_failed' # Add resplice failure state
     ]
 
     try:

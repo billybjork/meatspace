@@ -66,10 +66,7 @@
                     <button class="action-btn skip-btn" data-action="skip">⏭️ Skip</button>
                     <button class="action-btn archive-btn" data-action="archive">🗑️ Archive</button>
                     <button class="action-btn merge-next-btn" data-action="merge_next" {% if not clip.can_merge_next %}disabled title="No valid next clip to merge with"{% endif %}>🖇️ Merge w/ Next</button>
-                    <button class="action-btn split-btn" data-action="split">✂️ Split At</button>
-                    <span class="split-input">
-                       <input type="number" step="0.1" min="0" class="split-time-input" placeholder="sec">s
-                    </span>
+                    <button class="action-btn retry-splice-btn" data-action="retry_splice">♻️ Retry Splice</button>
                     <button class="undo-button" style="display: none;">Undo</button>
                 </div>
                 <div class="action-feedback"></div>

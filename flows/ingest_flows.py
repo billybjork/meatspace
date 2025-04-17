@@ -2,7 +2,7 @@ import sys
 import os
 from pathlib import Path
 import traceback
-import time # Added for potential delays
+import time
 
 project_root = Path(__file__).parent.parent.resolve()
 if str(project_root) not in sys.path:
@@ -12,45 +12,18 @@ if str(project_root) not in sys.path:
 from prefect import flow, get_run_logger, task # Added task decorator for potential future use
 
 # --- Task Imports ---
-try:
-    from tasks.intake import intake_task
-    from tasks.splice import splice_video_task
-    from tasks.keyframe import extract_keyframes_task
-    from tasks.embed import generate_embeddings_task
-    # Import the new editing tasks
-    from tasks.editing import merge_clips_task, split_clip_task
-except ImportError as e:
-     # Handle potential path issues during development
-     print(f"ERROR Could not import required task modules: {e}")
-     print(f"Project root added to path was: {project_root}")
-     print("Ensure tasks/*.py exist and are importable.")
-     print("Traceback:")
-     traceback.print_exc() # Print full traceback for import errors
-     print("Defining dummy task functions to allow script loading for deployment definition...")
-     # Define dummy functions if needed for script to load without crashing
-     def intake_task(**kwargs): raise NotImplementedError("Dummy Task: intake_task")
-     def splice_video_task(**kwargs): raise NotImplementedError("Dummy Task: splice_video_task")
-     def extract_keyframes_task(**kwargs): raise NotImplementedError("Dummy Task: extract_keyframes_task")
-     def generate_embeddings_task(**kwargs): raise NotImplementedError("Dummy Task: generate_embeddings_task")
-     def merge_clips_task(**kwargs): raise NotImplementedError("Dummy Task: merge_clips_task")
-     def split_clip_task(**kwargs): raise NotImplementedError("Dummy Task: split_clip_task")
+from tasks.intake import intake_task
+from tasks.splice import splice_video_task
+from tasks.keyframe import extract_keyframes_task
+from tasks.embed import generate_embeddings_task
+from tasks.editing import merge_clips_task, resplice_clip_task
 
 # --- DB Util Imports ---
-try:
-    from utils.db_utils import (
-        get_items_by_state,
-        get_source_input_from_db,
-        get_pending_merge_pairs, # New helper
-        get_pending_split_jobs   # New helper
-    )
-except ImportError as e:
-    print(f"ERROR Could not import DB utility functions: {e}")
-    print("Defining dummy DB utility functions...")
-    def get_items_by_state(table, state): print(f"Dummy get_items_by_state({table}, {state}) called"); return []
-    def get_source_input_from_db(sid): print(f"Dummy get_source_input_from_db({sid}) called"); return None
-    def get_pending_merge_pairs(): print("Dummy get_pending_merge_pairs() called"); return []
-    def get_pending_split_jobs(): print("Dummy get_pending_split_jobs() called"); return []
-
+from utils.db_utils import (
+    get_items_by_state,
+    get_source_input_from_db,
+    get_pending_merge_pairs,
+)
 
 # --- Configuration ---
 DEFAULT_KEYFRAME_STRATEGY = os.getenv("DEFAULT_KEYFRAME_STRATEGY", "midpoint")
@@ -121,7 +94,7 @@ def process_clip_post_review(
 @flow(name="Scheduled Ingest Initiator", log_prints=True)
 def scheduled_ingest_initiator():
     """
-    Scheduled flow to find new work at different stages and trigger the appropriate next tasks.
+    Scheduled flow to find new work at different stages and trigger the appropriate next tasks/flows.
     This acts as the main heartbeat for progressing the ingest pipeline automatically.
     """
     logger = get_run_logger()
@@ -172,21 +145,21 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed to query for 'downloaded' source videos: {db_query_err}", exc_info=True)
          error_count += 1
 
-    # --- Stage 3: Find Approved Clips -> Submit Post-Review Flow ---
+    # --- Stage 3: Find Approved Clips -> Initiate Post-Review Flow ---
     stage_name = "Post-Review (Keyframe/Embed)"
     try:
         clips_ready_for_keyframes = get_items_by_state(table="clips", state="review_approved")
         processed_counts[stage_name] = len(clips_ready_for_keyframes)
         if clips_ready_for_keyframes:
-            logger.info(f"[{stage_name}] Found {len(clips_ready_for_keyframes)} clips approved by review. Submitting post-review processing flow...")
+            logger.info(f"[{stage_name}] Found {len(clips_ready_for_keyframes)} clips approved by review. Initiating post-review processing flows...")
             for cid in clips_ready_for_keyframes:
                 try:
-                    # Submit the sub-flow. It will run independently.
-                    process_clip_post_review.submit(clip_id=cid)
-                    logger.debug(f"[{stage_name}] Submitted process_clip_post_review flow for clip_id: {cid}")
-                    time.sleep(TASK_SUBMIT_DELAY)
-                except Exception as task_submit_err:
-                     logger.error(f"[{stage_name}] Failed to submit process_clip_post_review flow for clip_id {cid}: {task_submit_err}", exc_info=True)
+                    # Call the flow directly to create a sub-flow run
+                    process_clip_post_review(clip_id=cid) # <-- THE FIX: Call flow directly
+                    logger.debug(f"[{stage_name}] Initiated process_clip_post_review sub-flow for clip_id: {cid}") # Updated log message
+                    time.sleep(TASK_SUBMIT_DELAY) # Keep delay for staggering initiation
+                except Exception as flow_call_err: # Renamed variable for clarity
+                     logger.error(f"[{stage_name}] Failed to initiate process_clip_post_review flow for clip_id {cid}: {flow_call_err}", exc_info=True)
                      error_count += 1
     except Exception as db_query_err:
          logger.error(f"[{stage_name}] Failed to query for 'review_approved' clips: {db_query_err}", exc_info=True)
@@ -220,34 +193,25 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed during merge check/submission: {db_query_err}", exc_info=True)
          error_count += 1
 
-
-    # --- Stage 5: Find Clips Pending Split -> Submit Split Task ---
-    stage_name = "Split"
+    # --- Stage 5: Re-Splice ---
+    stage_name = "Re-Splice"
     try:
-        # Use the new helper function from db_utils
-        split_jobs = get_pending_split_jobs() # Expects list of tuples [(id, split_time_float), ...]
-        processed_counts[stage_name] = len(split_jobs)
-        if split_jobs:
-              logger.info(f"[{stage_name}] Found {len(split_jobs)} clips marked for splitting. Submitting split tasks...")
-              for cid, split_time in split_jobs:
-                   try:
-                       # Ensure split_time is float, helper should handle this
-                       if not isinstance(split_time, float) or split_time <= 0:
-                            logger.error(f"[{stage_name}] Invalid split time '{split_time}' received for clip {cid}. Skipping.")
-                            error_count += 1
-                            # TODO: Consider setting state to split_failed here via another task/call
-                            continue
-
-                       split_clip_task.submit(clip_id=cid, split_at_seconds=split_time)
-                       logger.debug(f"[{stage_name}] Submitted split_clip_task for clip_id: {cid} at {split_time}s")
-                       time.sleep(TASK_SUBMIT_DELAY)
-                   except Exception as task_submit_err:
-                        logger.error(f"[{stage_name}] Failed to submit split_clip_task for clip_id {cid}: {task_submit_err}", exc_info=True)
-                        error_count += 1
-
+        # Use the standard get_items_by_state helper
+        clips_to_resplice = get_items_by_state(table="clips", state="pending_resplice")
+        processed_counts[stage_name] = len(clips_to_resplice)
+        if clips_to_resplice:
+            logger.info(f"[{stage_name}] Found {len(clips_to_resplice)} clips marked for re-splicing. Submitting re-splice tasks...")
+            for cid in clips_to_resplice:
+                try:
+                    # Submit the new resplice task
+                    resplice_clip_task.submit(clip_id=cid)
+                    logger.debug(f"[{stage_name}] Submitted resplice_clip_task for original clip_id: {cid}")
+                    time.sleep(TASK_SUBMIT_DELAY)
+                except Exception as task_submit_err:
+                     logger.error(f"[{stage_name}] Failed to submit resplice_clip_task for clip_id {cid}: {task_submit_err}", exc_info=True)
+                     error_count += 1
     except Exception as db_query_err:
-         # Catch errors from the helper function or submission loop
-         logger.error(f"[{stage_name}] Failed during split check/submission: {db_query_err}", exc_info=True)
+         logger.error(f"[{stage_name}] Failed during re-splice check/submission: {db_query_err}", exc_info=True)
          error_count += 1
 
 
