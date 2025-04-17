@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Review Clips</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
+    <style>
+        /* Add specific styles for the review page */
+        .clip-review-item {
+            border: 1px solid #ccc;
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f9f9f9;
+            display: flex; /* Use flexbox for layout */
+            flex-direction: column; /* Stack elements vertically */
+            opacity: 1;
+            transition: opacity 0.5s ease-out;
+        }
+        .clip-review-item.processing, .clip-review-item.done {
+            opacity: 0.5;
+            pointer-events: none; /* Disable clicks when processing/done */
+        }
+        .clip-review-item video {
+            max-width: 100%; /* Make video responsive */
+            height: auto;
+            margin-bottom: 10px;
+            background-color: #000; /* Black background for video player */
+        }
+        .clip-info { margin-bottom: 10px; font-size: 0.9em; color: #555; }
+        .clip-actions button { margin: 5px; padding: 8px 12px; cursor: pointer; }
+        .action-feedback { font-style: italic; margin-top: 5px; font-size: 0.9em;}
+        .action-feedback.error { color: red; }
+        .action-feedback.success { color: green; }
+        .undo-button { background-color: #ffc107; color: black; }
+        .split-input { display: inline-block; margin-left: 10px; }
+        .split-input input { width: 60px; padding: 5px; }
+    </style>
+</head>
+<body>
+    <h1>Review Clips</h1>
+
+    {% if error %}
+        <p style="color: red;">Error: {{ error }}</p>
+    {% endif %}
+
+    <div id="review-queue">
+        {% if clips %}
+            {% for clip in clips %}
+            <div class="clip-review-item" id="clip-{{ clip.clip_db_id }}" data-clip-id="{{ clip.clip_db_id }}">
+                <div class="clip-info">
+                    <strong>{{ clip.title }}</strong> ({{ clip.source_title }})<br>
+                    ID: {{ clip.clip_db_id }} | Source ID: {{ clip.source_video_id }} | Time: {{ "%.2f"|format(clip.start_time) }}s - {{ "%.2f"|format(clip.end_time) }}s
+                </div>
+                {% if clip.video_url %}
+                <video controls muted loop autoplay playsinline>
+                    <source src="{{ clip.video_url }}" type="video/mp4">
+                    Your browser does not support the video tag.
+                </video>
+                {% else %}
+                <p style="color:orange;">Video URL unavailable.</p>
+                {% endif %}
+
+                <div class="clip-actions">
+                    <button class="action-btn approve-btn" data-action="approve">✅ Approve</button>
+                    <button class="action-btn skip-btn" data-action="skip">⏭️ Skip</button>
+                    <button class="action-btn archive-btn" data-action="archive">🗑️ Archive</button>
+                    <button class="action-btn merge-next-btn" data-action="merge_next" {% if not clip.can_merge_next %}disabled title="No valid next clip to merge with"{% endif %}>🖇️ Merge w/ Next</button>
+                    <button class="action-btn split-btn" data-action="split">✂️ Split At</button>
+                    <span class="split-input">
+                       <input type="number" step="0.1" min="0" class="split-time-input" placeholder="sec">s
+                    </span>
+                    <button class="undo-button" style="display: none;">Undo</button>
+                </div>
+                <div class="action-feedback"></div>
+            </div>
+            {% endfor %}
+        {% else %}
+            <p>No clips currently pending review.</p>
+        {% endif %}
+    </div>
+
+    <script src="{{ url_for('static', path='/review.js') }}"></script>
+</body>
+</html>

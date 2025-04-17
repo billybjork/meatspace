@@ -62,4 +62,4 @@ if __name__ == '__main__':
     print("Starting FastAPI server from main.py...")
     # Use reload=True for development, False for production
     # Point uvicorn to this file (main) and the 'app' object imported from app.py
-    uvicorn.run("main:app", host="127.0.0.1", port=5001, reload=True)
+    uvicorn.run("main:app", host="127.0.0.1", port=5002, reload=True)
