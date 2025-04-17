@@ -28,10 +28,12 @@ from utils.db_utils import (
 # --- Configuration ---
 DEFAULT_KEYFRAME_STRATEGY = os.getenv("DEFAULT_KEYFRAME_STRATEGY", "midpoint")
 DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "openai/clip-vit-base-patch32")
-# Derive the label used for the embedding generation based on the keyframe strategy
 DEFAULT_EMBEDDING_STRATEGY_LABEL = f"keyframe_{DEFAULT_KEYFRAME_STRATEGY}"
-# Delay between submitting batches of tasks to avoid overwhelming DB/API
 TASK_SUBMIT_DELAY = float(os.getenv("TASK_SUBMIT_DELAY", 0.1))
+# Add timeouts for result() calls - adjust as needed
+KEYFRAME_TIMEOUT = int(os.getenv("KEYFRAME_TIMEOUT", 600)) # 10 minutes default
+EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900)) # 15 minutes default
+
 
 # --- Flows ---
 
@@ -43,52 +45,57 @@ def process_clip_post_review(
     ):
     """
     Processes a single clip after it has passed manual review.
-    This flow handles keyframing and subsequent embedding for the approved clip.
+    Handles keyframing and subsequent embedding for the approved clip.
+    Uses .result() for task chaining.
     """
     logger = get_run_logger()
     logger.info(f"FLOW: Starting post-review processing for approved clip_id: {clip_id}")
 
-    # --- 1. Keyframing ---
-    logger.info(f"Submitting keyframe task for clip_id: {clip_id} with strategy: {keyframe_strategy}")
     try:
-        # Submit keyframing task
+        # --- 1. Keyframing ---
+        logger.info(f"Submitting keyframe task for clip_id: {clip_id} with strategy: {keyframe_strategy}")
         keyframe_future = extract_keyframes_task.submit(clip_id=clip_id, strategy=keyframe_strategy)
 
-        # Wait for keyframing to complete before proceeding to embedding
-        keyframe_state = keyframe_future.wait(timeout=300) # Add a reasonable timeout
+        # Get the result, blocking until completion or failure within timeout
+        logger.info(f"Waiting for keyframe task result (timeout: {KEYFRAME_TIMEOUT}s)...")
+        keyframe_result = keyframe_future.result(timeout=KEYFRAME_TIMEOUT) # Use .result()
 
-        if keyframe_state and keyframe_state.is_completed():
-            logger.info(f"Keyframing task completed successfully for clip_id: {clip_id}. Proceeding to embedding.")
+        # If .result() returns without error, the task succeeded.
+        logger.info(f"Keyframing task completed successfully for clip_id: {clip_id}. Result: {keyframe_result}. Proceeding to embedding.")
 
-            # --- 2. Embedding ---
-            embedding_strategy_label = f"keyframe_{keyframe_strategy}"
-            logger.info(f"Submitting embedding task for clip_id: {clip_id} with model: {model_name}, strategy_label: {embedding_strategy_label}")
-            # Submit embedding task
-            embed_future = generate_embeddings_task.submit(
-                clip_id=clip_id,
-                model_name=model_name,
-                generation_strategy=embedding_strategy_label
-            )
-            # Wait for embedding to finish
-            embed_state = embed_future.wait(timeout=600) # Potentially longer timeout for embedding
-            if embed_state and embed_state.is_completed():
-                 logger.info(f"Embedding task completed successfully for clip_id: {clip_id}.")
-            elif embed_state:
-                 logger.warning(f"Embedding task for clip_id: {clip_id} did not complete successfully (State: {embed_state.type.value}).")
-            else:
-                 logger.warning(f"Embedding task for clip_id: {clip_id} timed out or failed to return state.")
+        # --- 2. Embedding ---
+        embedding_strategy_label = f"keyframe_{keyframe_strategy}"
+        logger.info(f"Submitting embedding task for clip_id: {clip_id} with model: {model_name}, strategy_label: {embedding_strategy_label}")
+        embed_future = generate_embeddings_task.submit(
+            clip_id=clip_id,
+            model_name=model_name,
+            generation_strategy=embedding_strategy_label
+        )
 
-        elif keyframe_state:
-             logger.warning(f"Keyframing task for clip_id: {clip_id} did not complete successfully (State: {keyframe_state.type.value}). Skipping embedding.")
-        else:
-             logger.warning(f"Keyframing task for clip_id: {clip_id} timed out or failed to return state. Skipping embedding.")
+        # Get the result, blocking until completion or failure within timeout
+        logger.info(f"Waiting for embedding task result (timeout: {EMBEDDING_TIMEOUT}s)...")
+        embed_result = embed_future.result(timeout=EMBEDDING_TIMEOUT) # Use .result()
+
+        # If .result() returns without error, the task succeeded.
+        logger.info(f"Embedding task completed successfully for clip_id: {clip_id}. Result: {embed_result}.")
 
     except Exception as e:
+         # This will catch exceptions from .result() if the tasks fail or time out
          logger.error(f"Error during post-review processing flow for clip_id {clip_id}: {e}", exc_info=True)
-         # Depending on the error, may want to update clip state to failed using a separate task/call
+         # Optional: Add logic here to update the clip's DB state to reflect the failure stage
+         # (e.g., check if keyframe_result exists to know if error was during embedding)
+         # You might need a separate task or direct DB call here. For now, just log.
 
     logger.info(f"FLOW: Finished post-review processing flow for clip_id: {clip_id}")
 
+
+# --- scheduled_ingest_initiator Flow ---
+# No changes needed here based on the specific error, but be aware of the
+# "future was garbage collected" warnings. If they become problematic or hide
+# actual errors, you might consider collecting futures in lists within the loop
+# and potentially using prefect.utilities.waiters.wait_for_task_runs if you need
+# to ensure all submitted tasks reach a certain state before the initiator finishes.
+# For now, leaving it as is should be fine.
 @flow(name="Scheduled Ingest Initiator", log_prints=True)
 def scheduled_ingest_initiator():
     """
@@ -99,6 +106,7 @@ def scheduled_ingest_initiator():
     logger.info("FLOW: Running Scheduled Ingest Initiator cycle...")
     error_count = 0
     processed_counts = {}
+    futures = {"intake": [], "splice": [], "merge": [], "resplice": []} # Optional: store futures
 
     # --- Stage 1: Find New Source Videos -> Submit Intake ---
     stage_name = "Intake"
@@ -111,9 +119,10 @@ def scheduled_ingest_initiator():
                 try:
                     source_input = get_source_input_from_db(sid)
                     if source_input:
-                        intake_task.submit(source_video_id=sid, input_source=source_input)
+                        future = intake_task.submit(source_video_id=sid, input_source=source_input)
+                        futures["intake"].append(future) # Optional: track future
                         logger.debug(f"[{stage_name}] Submitted intake_task for source_id: {sid}")
-                        time.sleep(TASK_SUBMIT_DELAY) # Small delay
+                        time.sleep(TASK_SUBMIT_DELAY)
                     else:
                         logger.error(f"[{stage_name}] Could not find input source for new source_video_id: {sid}. Cannot submit intake task.")
                         error_count += 1
@@ -133,7 +142,8 @@ def scheduled_ingest_initiator():
             logger.info(f"[{stage_name}] Found {len(downloaded_source_ids)} downloaded sources ready for splicing. Submitting splice tasks...")
             for sid in downloaded_source_ids:
                 try:
-                    splice_video_task.submit(source_video_id=sid)
+                    future = splice_video_task.submit(source_video_id=sid)
+                    futures["splice"].append(future) # Optional: track future
                     logger.debug(f"[{stage_name}] Submitted splice_video_task for source_id: {sid}")
                     time.sleep(TASK_SUBMIT_DELAY)
                 except Exception as task_submit_err:
@@ -152,10 +162,11 @@ def scheduled_ingest_initiator():
             logger.info(f"[{stage_name}] Found {len(clips_ready_for_keyframes)} clips approved by review. Initiating post-review processing flows...")
             for cid in clips_ready_for_keyframes:
                 try:
-                    # Call the flow directly to create a sub-flow run
+                    # Call the flow directly - Prefect handles its execution.
+                    # No future object is returned here to wait on *within this flow*.
                     process_clip_post_review(clip_id=cid)
-                    logger.debug(f"[{stage_name}] Initiated process_clip_post_review sub-flow for clip_id: {cid}") # Updated log message
-                    time.sleep(TASK_SUBMIT_DELAY) # Delay for staggering initiation
+                    logger.debug(f"[{stage_name}] Initiated process_clip_post_review sub-flow for clip_id: {cid}")
+                    time.sleep(TASK_SUBMIT_DELAY)
                 except Exception as flow_call_err:
                      logger.error(f"[{stage_name}] Failed to initiate process_clip_post_review flow for clip_id {cid}: {flow_call_err}", exc_info=True)
                      error_count += 1
@@ -166,42 +177,38 @@ def scheduled_ingest_initiator():
     # --- Stage 4: Find Clips Pending Merge -> Submit Merge Task ---
     stage_name = "Merge"
     try:
-        merge_pairs = get_pending_merge_pairs() # Expects list of tuples [(id1, id2), ...]
+        merge_pairs = get_pending_merge_pairs()
         processed_counts[stage_name] = len(merge_pairs)
         if merge_pairs:
              logger.info(f"[{stage_name}] Found {len(merge_pairs)} clip pairs marked for merging. Submitting merge tasks...")
-             submitted_merges = set() # Prevent submitting same clip twice if query returns duplicates
+             submitted_merges = set()
              for cid1, cid2 in merge_pairs:
                   if cid1 not in submitted_merges and cid2 not in submitted_merges:
                       try:
-                          merge_clips_task.submit(clip_id_1=cid1, clip_id_2=cid2)
-                          submitted_merges.add(cid1)
-                          submitted_merges.add(cid2)
+                          future = merge_clips_task.submit(clip_id_1=cid1, clip_id_2=cid2)
+                          futures["merge"].append(future) # Optional: track future
+                          submitted_merges.add(cid1); submitted_merges.add(cid2)
                           logger.debug(f"[{stage_name}] Submitted merge_clips_task for pair: ({cid1}, {cid2})")
                           time.sleep(TASK_SUBMIT_DELAY)
                       except Exception as task_submit_err:
                            logger.error(f"[{stage_name}] Failed to submit merge_clips_task for pair ({cid1}, {cid2}): {task_submit_err}", exc_info=True)
                            error_count += 1
-                  else:
-                      logger.warning(f"[{stage_name}] Skipping duplicate merge submission involving clips {cid1} or {cid2}")
-
+                  else: logger.warning(f"[{stage_name}] Skipping duplicate merge submission involving clips {cid1} or {cid2}")
     except Exception as db_query_err:
-         # Catch errors from the helper function or submission loop
          logger.error(f"[{stage_name}] Failed during merge check/submission: {db_query_err}", exc_info=True)
          error_count += 1
 
     # --- Stage 5: Re-Splice ---
     stage_name = "Re-Splice"
     try:
-        # Use the standard get_items_by_state helper
         clips_to_resplice = get_items_by_state(table="clips", state="pending_resplice")
         processed_counts[stage_name] = len(clips_to_resplice)
         if clips_to_resplice:
             logger.info(f"[{stage_name}] Found {len(clips_to_resplice)} clips marked for re-splicing. Submitting re-splice tasks...")
             for cid in clips_to_resplice:
                 try:
-                    # Submit the new resplice task
-                    resplice_clip_task.submit(clip_id=cid)
+                    future = resplice_clip_task.submit(clip_id=cid)
+                    futures["resplice"].append(future) # Optional: track future
                     logger.debug(f"[{stage_name}] Submitted resplice_clip_task for original clip_id: {cid}")
                     time.sleep(TASK_SUBMIT_DELAY)
                 except Exception as task_submit_err:
@@ -211,6 +218,17 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed during re-splice check/submission: {db_query_err}", exc_info=True)
          error_count += 1
 
+    # --- Optional: Wait for submitted tasks if needed, or just log completion ---
+    # If you need to ensure all tasks *submitted* in this cycle finish before the
+    # initiator flow itself finishes, you could add waiting logic here.
+    # Example (simple approach, adjust as needed):
+    # for stage, fut_list in futures.items():
+    #     for fut in fut_list:
+    #         try:
+    #             fut.wait(timeout=1) # Brief wait to allow state propagation
+    #         except Exception:
+    #             pass # Ignore errors here, just trying to prevent GC warning
+
     # --- Completion Logging ---
     summary_log = f"FLOW: Scheduled Ingest Initiator cycle complete. Processed counts: {processed_counts}."
     if error_count > 0:
@@ -218,15 +236,9 @@ def scheduled_ingest_initiator():
     else:
          logger.info(summary_log)
 
-if __name__ == "__main__":
-    # This block serves for direct local testing of one cycle,
-    # or potentially other script-like actions related to these flows.
-    # The actual deployment registration happens via `prefect deploy`.
 
+if __name__ == "__main__":
     print("Running one cycle of scheduled_ingest_initiator for local testing...")
-    # Note: This runs the flow synchronously *in this process*.
-    # It does NOT use the scheduler or worker queue. Useful for quick debugging.
-    # Submitted tasks *will* still go to the queue if a worker is running.
     try:
         scheduled_ingest_initiator()
     except Exception as e:
