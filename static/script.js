@@ -28,7 +28,6 @@ document.addEventListener('DOMContentLoaded', () => {
         console.log("Options selector dropdown not found on this page.");
     }
 
-
     // --- Hover Playback Logic ---
     console.log("Setting up hover listeners for media containers.");
     const mediaContainers = document.querySelectorAll('.media-container');
@@ -64,7 +63,6 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         container.addEventListener('mouseenter', () => {
-            // console.log(`Mouse Enter on Container ${index}, video: ${videoSrc}`);
             // Clear any previous timeout for *this specific container* if needed,
             // but a single global timeout might be simpler if overlaps aren't common.
             // Using a single timeout means only the *last* hovered item will try to play after the delay.
@@ -77,7 +75,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 if (playPromise !== undefined) {
                     playPromise.then(() => {
-                        // console.log(`Container ${index}: Playback started successfully for ${videoSrc}`);
                         // Hide image, show video ONLY on successful play start
                         if (image) image.style.opacity = '0';
                         video.style.opacity = '1';

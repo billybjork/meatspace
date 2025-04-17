@@ -86,7 +86,7 @@ templates = Jinja2Templates(directory=templates_dir)
 router = APIRouter()
 
 # --- Helper Functions ---
-def format_clip_data(record: Request):
+def format_clip_data(record, request: Request):
     """Formats a database record into a dictionary for the template, using CloudFront URLs."""
     if not record:
         return None

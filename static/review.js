@@ -100,7 +100,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 // Maybe reload the page or just update UI to indicate it's back
                 // For simplicity, just leave the message. User can refresh.
 
-
             } catch (error) {
                 console.error('Undo failed:', error);
                 feedbackDiv.textContent = `Undo Error: ${error.message}`;
