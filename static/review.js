@@ -75,16 +75,14 @@ document.addEventListener('DOMContentLoaded', () => {
                 clipItem.classList.remove('processing'); // Remove processing state on error
             }
 
-        // --- Undo logic remains the same ---
         } else if (target.matches('.undo-button')) {
-            // ... (keep existing undo logic) ...
-             console.log(`Undo Action on Clip ID: ${clipId}`);
+            console.log(`Undo Action on Clip ID: ${clipId}`);
             clipItem.classList.add('processing');
             feedbackDiv.textContent = 'Undoing...';
             feedbackDiv.className = 'action-feedback';
             undoButton.style.display = 'none'; // Hide undo while processing undo
 
-             try {
+            try {
                 const response = await fetch(`/api/clips/${clipId}/undo`, {
                     method: 'POST',
                     headers: { 'Accept': 'application/json' }
@@ -96,9 +94,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     throw new Error(result.detail || `HTTP error! status: ${response.status}`);
                 }
 
-                feedbackDiv.textContent = `Success: Reverted to ${result.new_state}. You may need to refresh.`; // Adjusted message
+                feedbackDiv.textContent = `Success: Reverted to ${result.new_state}. Refresh to see it back in queue.`;
                 feedbackDiv.className = 'action-feedback success';
                 clipItem.classList.remove('processing', 'done'); // Reset visual state
+                // Maybe reload the page or just update UI to indicate it's back
+                // For simplicity, just leave the message. User can refresh.
 
 
             } catch (error) {
@@ -106,6 +106,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 feedbackDiv.textContent = `Undo Error: ${error.message}`;
                 feedbackDiv.className = 'action-feedback error';
                 clipItem.classList.remove('processing');
+                // Show undo button again if undo failed? Or just leave error.
             }
         }
     });
