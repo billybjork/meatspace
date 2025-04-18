@@ -16,7 +16,8 @@ from tasks.intake import intake_task
 from tasks.splice import splice_video_task
 from tasks.keyframe import extract_keyframes_task
 from tasks.embed import generate_embeddings_task
-from tasks.editing import merge_clips_task, split_clip_task
+from tasks.merge import merge_clips_task
+from tasks.split import split_clip_task
 
 # --- DB Util Imports ---
 from utils.db_utils import (
@@ -90,7 +91,7 @@ def scheduled_ingest_initiator():
     logger.info("FLOW: Running Scheduled Ingest Initiator cycle...")
     error_count = 0
     processed_counts = {}
-    futures = {"intake": [], "splice": [], "merge": [], "resplice": [], "embed": []}
+    futures = {"intake": [], "splice": [], "merge": [], "resplice": [], "embed": []} # Added "split" to futures dict if needed
 
     # --- Stage 1: Intake ---
     stage_name = "Intake"
@@ -187,6 +188,7 @@ def scheduled_ingest_initiator():
              for cid1, cid2 in merge_pairs:
                   if cid1 not in submitted_merges and cid2 not in submitted_merges:
                       try:
+                          # --- Using the imported merge_clips_task ---
                           future = merge_clips_task.submit(clip_id_1=cid1, clip_id_2=cid2)
                           futures["merge"].append(future)
                           submitted_merges.add(cid1); submitted_merges.add(cid2)
@@ -203,12 +205,12 @@ def scheduled_ingest_initiator():
         processed_counts[stage_name] = len(clips_to_split)
         if clips_to_split:
             logger.info(f"[{stage_name}] Found {len(clips_to_split)} clips pending split. Submitting split tasks...")
-            # Consider adding a future tracking list if needed: futures["split"] = []
+            futures["split"] = [] # Initialize list for split futures if tracking is desired
             for cid in clips_to_split:
                 try:
-                    # Submit the new task
+                    # --- Using the imported split_clip_task ---
                     future = split_clip_task.submit(clip_id=cid)
-                    # futures["split"].append(future) # Optional tracking
+                    futures["split"].append(future) # Optional tracking
                     logger.debug(f"[{stage_name}] Submitted split_clip_task for original clip_id: {cid}")
                     time.sleep(TASK_SUBMIT_DELAY)
                 except Exception as task_submit_err:
