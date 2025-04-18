@@ -1,8 +1,8 @@
 import os
 import random
 import ast
-import json # <-- ADD THIS IMPORT
-from typing import AsyncGenerator, Optional, List # <-- Import List if needed for type hints
+import json
+from typing import AsyncGenerator, Optional, List
 from fastapi import FastAPI, Request, HTTPException, Query, Depends, APIRouter, Form, Path, Body # <-- ADD Path, Body
 from fastapi.responses import RedirectResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
@@ -162,10 +162,8 @@ async def fetch_available_embedding_options(conn: asyncpg.Connection):
 class ClipActionPayload(BaseModel):
     action: str # 'approve', 'skip', 'archive', 'merge_next', 'retry_splice'
 
-# --- ADD THIS NEW MODEL ---
 class SplitActionPayload(BaseModel):
     split_time_seconds: float = Field(..., gt=0, description="Relative time in seconds within the clip to perform the split.")
-# -------------------------
 
 # --- API Routes (defined on the router) ---
 
@@ -287,7 +285,6 @@ async def query_clip(
 
         query_embedding_vector = None
         try:
-            # Adjusted embedding parsing
             if isinstance(query_embedding_data, (list, tuple)):
                  query_embedding_vector = list(query_embedding_data)
             elif isinstance(query_embedding_data, str) and query_embedding_data.startswith('[') and query_embedding_data.endswith(']'):
@@ -401,7 +398,6 @@ async def review_clips_ui(
             formatted = format_clip_data(record, request)
             if formatted:
                 formatted.update({
-                    # "id": record['id'], # Use clip_db_id which is already set by format_clip_data
                     "source_video_id": record['source_video_id'],
                     "source_title": record['source_title'],
                     "start_time": record['start_time_seconds'],
@@ -429,7 +425,7 @@ async def review_clips_ui(
 # --- API Endpoint for Clip Actions (Approve, Skip, Archive, Merge, Resplice) ---
 @router.post("/api/clips/{clip_db_id}/action", name="clip_action", status_code=200)
 async def handle_clip_action(
-    request: Request,  # move non-default first
+    request: Request,
     clip_db_id: int = Path(..., description="Database ID of the clip", gt=0),
     payload: ClipActionPayload = Body(...),
     conn: asyncpg.Connection = Depends(get_db_connection)
@@ -469,7 +465,6 @@ async def handle_clip_action(
                 WHERE id = $2 AND ingest_state = ANY($3)
                 RETURNING id;
             """
-            # Params: [target_state, clip_db_id, allowed_source_states]
             final_params = params + [clip_db_id, allowed_source_states]
 
             logger.debug(f"Executing Action Query: {update_query} with params: {final_params}")
@@ -491,10 +486,9 @@ async def handle_clip_action(
         logger.error(f"Error processing action for clip {clip_db_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error processing action.")
 
-# --- ADD THIS NEW ENDPOINT for SPLIT ---
 @router.post("/api/clips/{clip_db_id}/split", name="queue_clip_split", status_code=200)
 async def queue_clip_split(
-    request: Request, # Keep request if needed for context, otherwise optional
+    request: Request,
     clip_db_id: int = Path(..., description="Database ID of the clip to split", gt=0),
     payload: SplitActionPayload = Body(...),
     conn: asyncpg.Connection = Depends(get_db_connection)
@@ -508,7 +502,7 @@ async def queue_clip_split(
     requested_split_time = payload.split_time_seconds
     new_state = "pending_split"
     # Minimum time from start/end to allow a split (adjust as needed)
-    min_margin = 0.5
+    min_margin = 0.1
 
     # States from which splitting is allowed
     allowed_source_states = ['pending_review', 'review_skipped']
@@ -588,7 +582,6 @@ async def queue_clip_split(
         logger.error(f"Error queueing clip {clip_db_id} for split: {e}", exc_info=True)
         # Don't expose raw error details in production
         raise HTTPException(status_code=500, detail="Internal server error processing split request.")
-# ----------------------------------
 
 # --- API Endpoint for Undo ---
 @router.post("/api/clips/{clip_db_id}/undo", name="undo_clip_action", status_code=200)
@@ -601,11 +594,10 @@ async def undo_clip_action(
     logger.info(f"Received UNDO request for clip_db_id: {clip_db_id}")
 
     target_state = "pending_review"
-    # Add 'pending_split' and 'split_failed' to states that can be undone
     allowed_undo_states = [
         'review_approved', 'review_skipped', 'archived',
-        'pending_merge_with_next', 'pending_resplice', 'pending_split', # Added pending_split
-        'merge_failed', 'resplice_failed', 'split_failed' # Added split_failed
+        'pending_merge_with_next', 'pending_resplice', 'pending_split',
+        'merge_failed', 'resplice_failed', 'split_failed'
     ]
 
     try:
@@ -642,11 +634,9 @@ async def undo_clip_action(
         logger.error(f"Error processing undo for clip {clip_db_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error processing undo.")
 
-
-# --- Include the router in the main app ---
 app.include_router(router)
 
-# --- Optional: Add a root path for basic health check or info ---
+# --- Root path for basic health check or info ---
 @app.get("/", include_in_schema=False)
 async def root_redirect():
     # Redirect to the main query UI (which handles random clip redirection)

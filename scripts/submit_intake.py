@@ -2,11 +2,9 @@ import argparse
 from pathlib import Path
 import os
 import sys
-import psycopg2 # Import standard postgres library
-from dotenv import load_dotenv # To load DATABASE_URL
+import psycopg2
+from dotenv import load_dotenv
 
-# --- Load Environment Variables ---
-# Load environment variables from .env file located in the project root (one level up from 'scripts')
 project_root_for_env = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 dotenv_path = os.path.join(project_root_for_env, '.env')
 
@@ -22,20 +20,13 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     print("ERROR: DATABASE_URL environment variable not found.")
     sys.exit(1)
-# --- End Environment Loading ---
 
-
-# --- Add Project Root to Python Path ---
-# Ensures modules in 'tasks', 'utils', etc., can be imported
 project_root_for_imports = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root_for_imports not in sys.path:
     sys.path.insert(0, project_root_for_imports)
-# --- End Path Addition ---
-
 
 try:
     from tasks.intake import intake_task
-    # utils.db_utils is no longer needed here as we use psycopg2 directly for this script
 except ImportError as e:
     print(f"Error importing Prefect task 'intake_task': {e}")
     print(f"Ensure you are running this script relative to the project root (e.g., python scripts/{os.path.basename(__file__)})")
@@ -61,9 +52,7 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
     print(f"Setting web_scraped: {web_scraped_flag}")
 
     try:
-        # --- Use psycopg2 directly ---
         conn = psycopg2.connect(DATABASE_URL)
-        # --- End change ---
 
         with conn.cursor() as cur:
             # Insert record, including original_url and web_scraped flag
@@ -106,7 +95,6 @@ def main():
     parser = argparse.ArgumentParser(description="Manually submit a video URL or local path for the Prefect intake workflow.")
     parser.add_argument("input_source", help="The URL (http/https) or absolute local file path of the video to process.")
     parser.add_argument("--title", help="Optional initial title for the database record (recommended for local files). If omitted, derived from filename/URL.", default=None)
-    # Add back optional args if the intake_task signature needs them directly
     parser.add_argument("--no-reencode", action="store_true", help="Tell the intake task *not* to re-encode the video (default is True for re-encoding).")
     parser.add_argument("--overwrite", action="store_true", help="Tell the intake task to overwrite existing files/data if necessary (use with caution).")
 
