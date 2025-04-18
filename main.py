@@ -1,10 +1,16 @@
 import uvicorn
-import asyncpg
 import os
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+from fastapi.responses import RedirectResponse
 
-from app import app, DATABASE_URL
+# --- Import application components ---
+from config import log
+from database import connect_db, close_db, get_db_connection
+from routers.search import router as search_router
+from routers.review import ui_router as review_ui_router, api_router as review_api_router
 
 # --- Lifespan Management for Database Pool ---
 
@@ -12,54 +18,77 @@ from app import app, DATABASE_URL
 async def lifespan(app_instance: FastAPI):
     """
     Context manager for application lifespan events.
-    Handles database connection pool creation and closing.
+    Handles asyncpg database connection pool creation and closing.
     """
-    print("Lifespan: Startup phase starting...")
+    log.info("Lifespan: Startup phase starting...")
     pool = None # Initialize pool variable
     try:
-        print(f"Lifespan: Attempting to create database pool for URL (partially hidden): {DATABASE_URL[:15]}...")
-        pool = await asyncpg.create_pool(
-            dsn=DATABASE_URL,
-            min_size=1, # Example: configure pool size
-            max_size=10
-        )
+        pool = await connect_db()
         # Store the pool in the application state for access in dependencies
         app_instance.state.db_pool = pool
-        print("Lifespan: Database pool created successfully and stored in app.state.db_pool.")
-
-        # Test connection
-        async with pool.acquire() as connection:
-            version = await connection.fetchval("SELECT version();")
-            print(f"Lifespan: Database connection test successful. PostgreSQL version: {version[:15]}...")
-
+        log.info("Lifespan: Database pool created and stored in app.state.db_pool.")
     except Exception as e:
-        # Log error and potentially prevent app startup if critical
-        print(f"FATAL LIFESPAN ERROR: Could not create database connection pool during startup: {e}")
+        # Log error details provided by connect_db
+        log.critical(f"FATAL LIFESPAN ERROR during startup: {e}", exc_info=True)
+        # Depending on severity, you might want the app to fail startup
+        # raise e # Re-raise to stop startup
 
-    print("Lifespan: Startup phase complete. Yielding control to application.")
+    log.info("Lifespan: Startup phase complete. Yielding control to application.")
     yield  # Application runs here
 
     # --- Shutdown phase ---
-    print("Lifespan: Shutdown phase starting...")
-    # Retrieve the pool from app state
+    log.info("Lifespan: Shutdown phase starting...")
+    # Retrieve the pool from app state to close it
     pool_to_close = getattr(app_instance.state, 'db_pool', None)
-    if pool_to_close:
-        print("Lifespan: Closing database connection pool...")
-        try:
-            await pool_to_close.close()
-            print("Lifespan: Database connection pool closed successfully.")
-        except Exception as e:
-            print(f"ERROR during database pool closing: {e}")
-    else:
-        print("Lifespan: No database pool found in app state to close.")
-    print("Lifespan: Shutdown phase complete.")
+    # Use the close_db function from database.py
+    await close_db(pool_to_close)
+    log.info("Lifespan: Shutdown phase complete.")
 
-# --- Attach Lifespan to the App ---
-app.router.lifespan_context = lifespan
+# --- Create FastAPI Application Instance ---
+app = FastAPI(
+    title="Meatspace API",
+    lifespan=lifespan # Use the lifespan context manager
+)
+
+# --- Static Files and Templates Setup ---
+script_dir = os.path.dirname(os.path.abspath(__file__))
+static_dir = os.path.join(script_dir, "static")
+templates_dir = os.path.join(script_dir, "templates")
+
+if not os.path.isdir(static_dir):
+     log.warning(f"Static directory not found at: {static_dir}")
+if not os.path.isdir(templates_dir):
+     log.warning(f"Templates directory not found at: {templates_dir}")
+
+app.mount("/static", StaticFiles(directory=static_dir), name="static")
+templates = Jinja2Templates(directory=templates_dir)
+
+# Store templates in app state so router functions can access it via request.app.state.templates
+app.state.templates = templates
+log.info("Static files and Jinja2 templates configured.")
+
+# --- Include Routers ---
+app.include_router(search_router)      # Includes routes like / and /query/{id}
+app.include_router(review_ui_router)   # Includes /review
+app.include_router(review_api_router)  # Includes /api/clips/... actions
+log.info("Included API routers.")
+
+# --- Root path redirect ---
+# Redirects the bare domain access to the main search/index page
+@app.get("/", include_in_schema=False)
+async def root_redirect(request: Request):
+    # Redirect to the named route 'index' from the search router
+    return RedirectResponse(url=request.url_for('index'), status_code=303)
 
 # --- Main Execution ---
 if __name__ == '__main__':
-    print("Starting FastAPI server from main.py...")
-    # Use reload=True for development, False for production
-    # Point uvicorn to this file (main) and the 'app' object imported from app.py
-    uvicorn.run("main:app", host="127.0.0.1", port=5002, reload=True)
+    log.info("Starting FastAPI server using Uvicorn...")
+    # Get host/port from environment variables or use defaults
+    host = os.getenv("HOST", "127.0.0.1")
+    port = int(os.getenv("PORT", "8000"))
+    reload = os.getenv("RELOAD", "true").lower() == "true" # Control reload via env var
+
+    log.info(f"Server configured to run on {host}:{port} with reload={'enabled' if reload else 'disabled'}")
+
+    # Point uvicorn to this file (main) and the 'app' object defined here
+    uvicorn.run("main:app", host=host, port=port, reload=reload)
