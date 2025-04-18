@@ -14,6 +14,7 @@ from prefect import flow, get_run_logger, task
 # --- Task Imports ---
 from tasks.intake import intake_task
 from tasks.splice import splice_video_task
+from tasks.sprite_generator import generate_sprite_sheet_task
 from tasks.keyframe import extract_keyframes_task
 from tasks.embed import generate_embeddings_task
 from tasks.merge import merge_clips_task
@@ -91,7 +92,7 @@ def scheduled_ingest_initiator():
     logger.info("FLOW: Running Scheduled Ingest Initiator cycle...")
     error_count = 0
     processed_counts = {}
-    futures = {"intake": [], "splice": [], "merge": [], "resplice": [], "embed": []} # Added "split" to futures dict if needed
+    futures = {"intake": [], "splice": [], "sprite_gen": [], "merge": [], "split": [], "embed": []}
 
     # --- Stage 1: Intake ---
     stage_name = "Intake"
@@ -127,6 +128,26 @@ def scheduled_ingest_initiator():
                     time.sleep(TASK_SUBMIT_DELAY)
                 except Exception as task_submit_err: logger.error(f"[{stage_name}] Failed to submit splice_video_task for source_id {sid}: {task_submit_err}", exc_info=True); error_count += 1
     except Exception as db_query_err: logger.error(f"[{stage_name}] Failed to query for 'downloaded' source videos: {db_query_err}", exc_info=True); error_count += 1
+
+    # --- Stage 2.5: Sprite Sheet Generation ---
+    stage_name = "SpriteGen"
+    try:
+        clips_needing_sprites = get_items_by_state(table="clips", state="pending_sprite_generation")
+        processed_counts[stage_name] = len(clips_needing_sprites)
+        if clips_needing_sprites:
+            logger.info(f"[{stage_name}] Found {len(clips_needing_sprites)} clips needing sprite sheets. Submitting generation tasks...")
+            for cid in clips_needing_sprites:
+                try:
+                    future = generate_sprite_sheet_task.submit(clip_id=cid)
+                    futures["sprite_gen"].append(future) # Optional tracking
+                    logger.debug(f"[{stage_name}] Submitted generate_sprite_sheet_task for clip_id: {cid}")
+                    time.sleep(TASK_SUBMIT_DELAY)
+                except Exception as task_submit_err:
+                     logger.error(f"[{stage_name}] Failed to submit generate_sprite_sheet_task for clip_id {cid}: {task_submit_err}", exc_info=True)
+                     error_count += 1
+    except Exception as db_query_err:
+         logger.error(f"[{stage_name}] Failed to query for 'pending_sprite_generation' clips: {db_query_err}", exc_info=True)
+         error_count += 1
 
     # --- Stage 3: Find Approved Clips -> Initiate FULL Post-Review Flow ---
     # This stage kicks off the process_clip_post_review flow which handles BOTH keyframing and embedding.

@@ -390,12 +390,12 @@ def splice_video_task(source_video_id: int):
                         (source_video_id, clip_s3_key, clip_identifier,
                          start_frame, end_frame_exclusive, # Store frame numbers
                          start_time_seconds, end_time_seconds, # Store calculated times
-                         'pending_review') # Set initial state
+                         'pending_sprite_generation')
                     )
                     new_clip_id = cur.fetchone()[0]
                     created_clip_ids.append(new_clip_id)
                     processed_clip_count += 1
-                    logger.info(f"Successfully processed and recorded clip_id: {new_clip_id}")
+                    logger.info(f"Successfully recorded clip_id: {new_clip_id} (State: pending_sprite_generation)") # Update log
 
                 except (ClientError, psycopg2.DatabaseError, subprocess.CalledProcessError, Exception) as clip_err:
                     failed_clip_count += 1

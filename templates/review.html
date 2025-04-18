@@ -11,20 +11,14 @@
             margin-bottom: 20px;
             padding: 15px;
             background-color: #f9f9f9;
-            display: flex; /* Use flexbox for layout */
-            flex-direction: column; /* Stack elements vertically */
+            display: flex;
+            flex-direction: column;
             opacity: 1;
             transition: opacity 0.5s ease-out;
         }
         .clip-review-item.processing, .clip-review-item.done {
             opacity: 0.5;
-            pointer-events: none; /* Disable clicks when processing/done */
-        }
-        .clip-review-item video {
-            max-width: 100%; /* Make video responsive */
-            height: auto;
-            margin-bottom: 10px;
-            background-color: #000; /* Black background for video player */
+            pointer-events: none; /* Disable interactions when processing/done */
         }
         .clip-info { margin-bottom: 10px; font-size: 0.9em; color: #555; }
         .clip-actions button { margin: 5px; padding: 8px 12px; cursor: pointer; }
@@ -32,8 +26,90 @@
         .action-feedback.error { color: red; }
         .action-feedback.success { color: green; }
         .undo-button { background-color: #ffc107; color: black; }
-        .split-input { display: inline-block; margin-left: 10px; }
-        .split-input input { width: 60px; padding: 5px; }
+
+        /* --- Sprite Viewer Styles --- */
+        .sprite-viewer {
+        background-size: cover; /* Keep default, JS overrides */
+        background-repeat: no-repeat;
+        border: 1px solid #aaa;
+        margin-bottom: 5px;
+        position: relative;
+        overflow: hidden; /* Clips the background image */
+        background-color: #222;
+        color: #eee;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-style: italic;
+        /* Add maybe a min-height just in case? */
+        /* min-height: 50px; */
+        }
+        .sprite-viewer:focus { /* Style when focused for keyboard input */
+            outline: 2px solid dodgerblue;
+            box-shadow: 0 0 5px dodgerblue;
+        }
+        .sprite-viewer.no-sprite {
+            background-image: none !important;
+            /* Maybe give it a default size when no sprite? */
+            min-height: 100px;
+            width: 160px;
+        }
+        .playback-controls {
+             display: flex;
+             align-items: center;
+             gap: 10px; /* Spacing between controls */
+             margin-bottom: 10px;
+        }
+        .playback-controls input[type=range] {
+            flex-grow: 1; /* Allow range slider to take up space */
+            cursor: pointer;
+        }
+        .sprite-current-frame {
+             font-family: monospace;
+             font-size: 0.9em;
+             min-width: 80px; /* Prevent layout shift */
+             text-align: right;
+        }
+
+        /* --- Split Controls Styles --- */
+        .split-controls {
+             display: none; /* Hidden by default */
+             margin-top: 10px;
+             border: 1px dashed blue;
+             padding: 10px;
+             background-color: #eef;
+        }
+        .split-controls .frame-info {
+            font-family: monospace;
+            margin: 5px 0;
+            background-color: #fff;
+            padding: 5px;
+            border: 1px solid #ccc;
+            display: inline-block; /* Fit content */
+        }
+        .split-feedback {
+            margin-left: 10px;
+            font-style: italic;
+            color: #d00; /* Default to error color */
+            font-size: 0.9em;
+        }
+        .split-feedback:empty {
+             display: none; /* Hide if no feedback */
+        }
+        /* Style for disabled buttons */
+        button[disabled] {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+        .split-mode-btn[disabled] { /* Specific styling for disabled split button */
+            background-color: #eee;
+            color: #999;
+            border-color: #ddd;
+        }
+        .retry-sprite-btn { /* Button to retry sprite gen */
+            background-color: #ffae42; /* Orange */
+            color: black;
+        }
     </style>
 </head>
 <body>
@@ -46,35 +122,75 @@
     <div id="review-queue">
         {% if clips %}
             {% for clip in clips %}
-            <div class="clip-review-item" id="clip-{{ clip.clip_db_id }}" data-clip-id="{{ clip.clip_db_id }}">
+            {# --- Main Clip Item Div --- #}
+            <div class="clip-review-item"
+                 id="clip-{{ clip.clip_db_id }}"
+                 data-clip-id="{{ clip.clip_db_id }}"
+                 {# Pass necessary data for JS sprite handling #}
+                 {% if clip.sprite_metadata and not clip.sprite_error %}
+                 data-sprite-url="{{ clip.sprite_sheet_url }}"
+                 data-sprite-meta="{{ clip.sprite_metadata|tojson|forceescape }}" {# Pass JSON metadata safely #}
+                 {% endif %}
+                 {# Pass FPS even if sprite failed, might be useful? #}
+                 data-clip-fps="{{ clip.sprite_metadata.clip_fps if clip.sprite_metadata else '0' }}"
+                 >
+
+                {# --- Clip Info Header --- #}
                 <div class="clip-info">
                     <strong>{{ clip.title }}</strong> ({{ clip.source_title }})<br>
-                    ID: {{ clip.clip_db_id }} | Source ID: {{ clip.source_video_id }} | Time: {{ "%.2f"|format(clip.start_time) }}s - {{ "%.2f"|format(clip.end_time) }}s
+                    ID: {{ clip.clip_db_id }} | Source ID: {{ clip.source_video_id }} | Time: {{ "%.3f"|format(clip.start_time) }}s - {{ "%.3f"|format(clip.end_time) }}s
+                     {% if clip.sprite_error %} | <strong style="color:orange;">Sprite Failed</strong> {% endif %}
                 </div>
-                {% if clip.video_url %}
-                <video controls muted loop autoplay playsinline>
-                    <source src="{{ clip.video_url }}" type="video/mp4">
-                    Your browser does not support the video tag.
-                </video>
-                {% else %}
-                <p style="color:orange;">Video URL unavailable.</p>
-                {% endif %}
 
-                <div class="clip-actions">
-                    <button class="action-btn approve-btn" data-action="approve">✅ Approve</button>
-                    <button class="action-btn skip-btn" data-action="skip">⏭️ Skip</button>
-                    <button class="action-btn archive-btn" data-action="archive">🗑️ Archive</button>
-                    <button class="action-btn merge-next-btn" data-action="merge_next" {% if not clip.can_merge_next %}disabled title="No valid next clip to merge with"{% endif %}>🖇️ Merge w/ Next</button>
-                    <button class="action-btn split-mode-btn" data-action="enter_split_mode">✂️ Split Clip</button>
-                    <div class="split-controls" style="display: none; margin-top: 10px; border: 1px dashed blue; padding: 10px;">
-                        <span>Use the video player to find the split point.</span><br>
-                        Current Time: <span class="split-current-time">0.00</span>s<br>
-                        <button class="action-btn confirm-split-btn" data-action="confirm_split" disabled>Confirm Split at <span class="split-confirm-time">0.00</span>s</button>
-                        <button class="action-btn cancel-split-btn" data-action="cancel_split_mode">Cancel</button>
-                        <span class="split-feedback" style="margin-left: 10px; font-style: italic;"></span>
-                    </div>
-                    <button class="undo-button" style="display: none;">Undo</button>
+                {# --- Sprite Viewer --- #}
+                <div class="sprite-viewer" id="sprite-viewer-{{ clip.clip_db_id }}" tabindex="0"> {# tabindex makes it focusable #}
+                     {# JS will populate background or show message #}
+                     Loading sprite...
+                 </div>
+
+                {# --- Playback Controls --- #}
+                <div class="playback-controls" id="controls-{{ clip.clip_db_id }}">
+                     <button class="sprite-play-pause-btn" data-clip-id="{{ clip.clip_db_id }}" title="Play/Pause (Spacebar when focused)">⏯️</button>
+                     <input type="range" class="sprite-scrub-bar" id="scrub-{{ clip.clip_db_id }}" value="0" min="0" max="100" title="Scrub through frames">
+                     <span class="sprite-current-frame" id="frame-display-{{ clip.clip_db_id }}">Frame: 0</span>
                 </div>
+
+                {# --- Action Buttons --- #}
+                <div class="clip-actions">
+                    <button class="action-btn approve-btn" data-action="approve" title="Approve for embedding">✅ Approve</button>
+                    <button class="action-btn skip-btn" data-action="skip" title="Skip review for now">⏭️ Skip</button>
+                    <button class="action-btn archive-btn" data-action="archive" title="Archive this clip (will be deleted)">🗑️ Archive</button>
+                    <button class="action-btn merge-next-btn" data-action="merge_next" {% if not clip.can_merge_next %}disabled title="No valid next clip available for merging"{% else %}title="Mark this clip to be merged with the next sequential clip"{% endif %}>🖇️ Merge w/ Next</button>
+
+                    {# --- Split Button (conditionally enabled) --- #}
+                    <button class="action-btn split-mode-btn"
+                            data-action="enter_split_mode"
+                            {% if not clip.sprite_metadata or clip.sprite_error %}disabled title="Sprite sheet unavailable or failed, cannot split"{% else %}title="Enter mode to select a frame for splitting"{% endif %} >
+                        ✂️ Split Clip
+                    </button>
+
+                     {# --- Retry Sprite Button (only if failed) --- #}
+                     {% if clip.sprite_error %}
+                     <button class="action-btn retry-sprite-btn" data-action="retry_sprite_gen" title="Attempt to regenerate the sprite sheet">Retry Sprite</button>
+                     {% endif %}
+
+                    {# --- Split Controls Panel (hidden by default) --- #}
+                    <div class="split-controls" id="split-controls-{{ clip.clip_db_id }}">
+                         <span>Use scrub bar or <strong>arrow keys</strong> (← →) when viewer is focused to select split frame. Press Enter to confirm.</span><br>
+                         <div class="frame-info">
+                             Selected Frame: <span class="split-confirm-frame">0</span> / <span class="split-total-frames">?</span> |
+                             Approx. Time: <span class="split-confirm-time">0.00</span>s
+                         </div>
+                         <button class="action-btn confirm-split-btn" data-action="confirm_split" disabled>Confirm Split at Frame <span class="split-confirm-frame-btn-text">0</span></button>
+                         <button class="action-btn cancel-split-btn" data-action="cancel_split_mode" title="Cancel split (Escape key)">Cancel</button>
+                         <br><span class="split-feedback"></span> {# Feedback message area #}
+                    </div>
+
+                    {# --- Undo Button (conditionally shown by JS) --- #}
+                    <button class="undo-button" style="display: none;" title="Undo the last action">Undo</button>
+                </div>
+
+                {# --- Action Feedback Area --- #}
                 <div class="action-feedback"></div>
             </div>
             {% endfor %}
@@ -83,6 +199,7 @@
         {% endif %}
     </div>
 
+    {# --- Load Javascript --- #}
     <script src="{{ url_for('static', path='/review.js') }}"></script>
 </body>
 </html>
