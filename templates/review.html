@@ -65,7 +65,14 @@
                     <button class="action-btn skip-btn" data-action="skip">⏭️ Skip</button>
                     <button class="action-btn archive-btn" data-action="archive">🗑️ Archive</button>
                     <button class="action-btn merge-next-btn" data-action="merge_next" {% if not clip.can_merge_next %}disabled title="No valid next clip to merge with"{% endif %}>🖇️ Merge w/ Next</button>
-                    <button class="action-btn retry-splice-btn" data-action="retry_splice">♻️ Retry Splice</button>
+                    <button class="action-btn split-mode-btn" data-action="enter_split_mode">✂️ Split Clip</button>
+                    <div class="split-controls" style="display: none; margin-top: 10px; border: 1px dashed blue; padding: 10px;">
+                        <span>Use the video player to find the split point.</span><br>
+                        Current Time: <span class="split-current-time">0.00</span>s<br>
+                        <button class="action-btn confirm-split-btn" data-action="confirm_split" disabled>Confirm Split at <span class="split-confirm-time">0.00</span>s</button>
+                        <button class="action-btn cancel-split-btn" data-action="cancel_split_mode">Cancel</button>
+                        <span class="split-feedback" style="margin-left: 10px; font-style: italic;"></span>
+                    </div>
                     <button class="undo-button" style="display: none;">Undo</button>
                 </div>
                 <div class="action-feedback"></div>

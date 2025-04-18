@@ -16,7 +16,7 @@ from tasks.intake import intake_task
 from tasks.splice import splice_video_task
 from tasks.keyframe import extract_keyframes_task
 from tasks.embed import generate_embeddings_task
-from tasks.editing import merge_clips_task, resplice_clip_task
+from tasks.editing import merge_clips_task, split_clip_task
 
 # --- DB Util Imports ---
 from utils.db_utils import (
@@ -196,21 +196,27 @@ def scheduled_ingest_initiator():
                   else: logger.warning(f"[{stage_name}] Skipping duplicate merge submission involving clips {cid1} or {cid2}")
     except Exception as db_query_err: logger.error(f"[{stage_name}] Failed during merge check/submission: {db_query_err}", exc_info=True); error_count += 1
 
-    # --- Stage 5: Re-Splice ---
-    stage_name = "Re-Splice"
+    # --- Stage 5: Split ---
+    stage_name = "Split"
     try:
-        clips_to_resplice = get_items_by_state(table="clips", state="pending_resplice")
-        processed_counts[stage_name] = len(clips_to_resplice)
-        if clips_to_resplice:
-            logger.info(f"[{stage_name}] Found {len(clips_to_resplice)} clips for re-splicing. Submitting re-splice tasks...")
-            for cid in clips_to_resplice:
+        clips_to_split = get_items_by_state(table="clips", state="pending_split")
+        processed_counts[stage_name] = len(clips_to_split)
+        if clips_to_split:
+            logger.info(f"[{stage_name}] Found {len(clips_to_split)} clips pending split. Submitting split tasks...")
+            # Consider adding a future tracking list if needed: futures["split"] = []
+            for cid in clips_to_split:
                 try:
-                    future = resplice_clip_task.submit(clip_id=cid)
-                    futures["resplice"].append(future)
-                    logger.debug(f"[{stage_name}] Submitted resplice_clip_task for original clip_id: {cid}")
+                    # Submit the new task
+                    future = split_clip_task.submit(clip_id=cid)
+                    # futures["split"].append(future) # Optional tracking
+                    logger.debug(f"[{stage_name}] Submitted split_clip_task for original clip_id: {cid}")
                     time.sleep(TASK_SUBMIT_DELAY)
-                except Exception as task_submit_err: logger.error(f"[{stage_name}] Failed to submit resplice_clip_task for clip_id {cid}: {task_submit_err}", exc_info=True); error_count += 1
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed during re-splice check/submission: {db_query_err}", exc_info=True); error_count += 1
+                except Exception as task_submit_err:
+                     logger.error(f"[{stage_name}] Failed to submit split_clip_task for clip_id {cid}: {task_submit_err}", exc_info=True)
+                     error_count += 1
+    except Exception as db_query_err:
+         logger.error(f"[{stage_name}] Failed during split check/submission: {db_query_err}", exc_info=True)
+         error_count += 1
 
     # --- Completion Logging ---
     summary_log = f"FLOW: Scheduled Ingest Initiator cycle complete. Processed counts: {processed_counts}."
