@@ -361,55 +361,68 @@ async def query_clip(
 async def review_clips_ui(
     request: Request,
     conn: asyncpg.Connection = Depends(get_db_connection),
-    limit: int = Query(10, ge=1, le=50)
+    limit: int = Query(10, ge=1, le=50) # Limit how many clips to review at once
 ):
     """Serves the HTML page for reviewing clips."""
     clips_to_review = []
     error_message = None
     try:
+        # Query for clips pending review, including adjacent clip info for merge context
+        # Order by source_video_id, then start_frame to get them sequentially
+        # Fetch necessary fields for display and formatting
         records = await conn.fetch(
             """
             WITH OrderedClips AS (
                 SELECT
                     c.id, c.clip_identifier, c.clip_filepath, c.keyframe_filepath,
                     c.start_time_seconds, c.end_time_seconds, c.source_video_id,
-                    c.ingest_state, sv.title as source_title,
+                    c.ingest_state,
+                    sv.title as source_title,
+                    -- Use window functions to get previous/next clip IDs and states within the same source
+                    LAG(c.id) OVER w as prev_clip_id,
                     LEAD(c.id) OVER w as next_clip_id,
+                    LAG(c.ingest_state) OVER w as prev_clip_state,
                     LEAD(c.ingest_state) OVER w as next_clip_state
                 FROM clips c
                 JOIN source_videos sv ON c.source_video_id = sv.id
                 WINDOW w AS (PARTITION BY c.source_video_id ORDER BY c.start_frame)
             )
-            SELECT * FROM OrderedClips
-            WHERE ingest_state = 'pending_review' OR ingest_state = 'review_skipped'
+            SELECT *
+            FROM OrderedClips
+            WHERE ingest_state = 'pending_review'
             ORDER BY source_video_id, start_time_seconds
             LIMIT $1;
-            """, limit
+            """,
+            limit
         )
 
-        valid_merge_target_states = {'pending_review', 'review_skipped'}
+        valid_merge_target_states = {'pending_review', 'review_skipped'} # Keep review_skipped for merge logic check
         for record in records:
             formatted = format_clip_data(record, request)
             if formatted:
                 formatted.update({
+                    # "id": record['id'], # Use clip_db_id which is already set by format_clip_data
                     "source_video_id": record['source_video_id'],
                     "source_title": record['source_title'],
                     "start_time": record['start_time_seconds'],
                     "end_time": record['end_time_seconds'],
+                    # Check if merge is possible (next clip exists and is in a valid state for merging)
+                    # LEAD function still fetches the state of the next clip, even if that next clip isn't 'pending_review' itself.
                     "can_merge_next": record['next_clip_id'] is not None and record['next_clip_state'] in valid_merge_target_states,
-                    "clip_db_id": record['id'] # Ensure DB ID is present for API calls
                 })
                 clips_to_review.append(formatted)
 
-    except UndefinedTableError as e:
-         logger.error(f"DB table error fetching review clips: {e}", exc_info=True)
-         error_message = f"Database table error: {e}. Check setup."
+    except asyncpg.exceptions.UndefinedTableError as e:
+         logger.error(f"ERROR accessing DB tables (e.g., '{e}') fetching review clips: {e}", exc_info=True)
+         error_message = f"Database table error: {e}. Please check application setup."
     except Exception as e:
         logger.error(f"Error fetching clips for review: {e}", exc_info=True)
         error_message = "Failed to load clips for review."
 
     return templates.TemplateResponse("review.html", {
-        "request": request, "clips": clips_to_review, "error": error_message,
+        "request": request,
+        "clips": clips_to_review,
+        "error": error_message,
         "CLOUDFRONT_DOMAIN": CLOUDFRONT_DOMAIN
     })
 
