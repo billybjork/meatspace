@@ -13,18 +13,17 @@ import psycopg2
 from psycopg2 import sql
 from psycopg2.extras import execute_values
 
-# S3 Imports
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 
 # Model Loading Imports
 try:
-    from transformers import CLIPProcessor, CLIPModel, AutoImageProcessor, AutoModel
+    # Specify `low_cpu_mem_usage=True` if memory is tight, might relate to meta device use
+    from transformers import CLIPProcessor, CLIPModel, AutoImageProcessor, AutoModel #, BitsAndBytesConfig
 except ImportError:
-    print("Warning: transformers library not found.")
+    print("Warning: transformers library not found. CLIP/some DINOv2 models will not be available.")
     CLIPProcessor, CLIPModel, AutoImageProcessor, AutoModel = None, None, None, None
 
-# DB Utils Import
 import sys
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
@@ -54,22 +53,99 @@ except Exception as e:
 # --- Global Model Cache ---
 _model_cache = {}
 def get_cached_model_and_processor(model_name, device='cpu'):
-    logger = get_run_logger(); logger.debug(f"Requesting model: {model_name}")
-    if model_name in _model_cache: logger.debug("Using cached model."); return _model_cache[model_name]
-    else: logger.info(f"Loading/caching model: {model_name}"); model, processor, model_type, embedding_dim = _load_model_and_processor_internal(model_name, device); _model_cache[model_name] = (model, processor, model_type, embedding_dim); return model, processor, model_type, embedding_dim
+    """Loads model/processor or retrieves from cache."""
+    logger = get_run_logger()
+    cache_key = f"{model_name}_{device}" # Include device in cache key
+    if cache_key in _model_cache:
+        logger.debug(f"Using cached model/processor for: {cache_key}")
+        return _model_cache[cache_key]
+    else:
+        logger.info(f"Loading and caching model/processor: {model_name} to device: {device}")
+        # Pass device directly to loading function
+        model, processor, model_type, embedding_dim = _load_model_and_processor_internal(model_name, device)
+        _model_cache[cache_key] = (model, processor, model_type, embedding_dim)
+        return model, processor, model_type, embedding_dim
+
 def _load_model_and_processor_internal(model_name, device='cpu'):
-    logger = get_run_logger(); logger.info(f"Attempting load: {model_name}")
-    model_type_str = None; embedding_dim = None; model = None; processor = None
+    """Internal function to load models directly onto the target device."""
+    logger = get_run_logger()
+    logger.info(f"Attempting to load model: {model_name} directly to device: {device}")
+    model_type_str = None
+    embedding_dim = None
+    model = None
+    processor = None
+
+    # Optional: Configuration for low memory or quantization if needed later
+    # quantization_config = BitsAndBytesConfig(load_in_8bit=True) # Example
+
+    # --- CLIP Models ---
     if "clip" in model_name.lower():
         if CLIPModel is None: raise ImportError("transformers required for CLIP.")
-        try: model = CLIPModel.from_pretrained(model_name).to(device).eval(); processor = CLIPProcessor.from_pretrained(model_name); embedding_dim = getattr(model.config, 'projection_dim', 512); model_type_str = "clip"; logger.info(f"Loaded CLIP: {model_name} (Dim: {embedding_dim})")
-        except Exception as e: raise ValueError(f"Failed load CLIP: {model_name}") from e
+        try:
+            # Load model directly to the target device if possible
+            # Use device_map="auto" or explicitly device for from_pretrained if applicable
+            # For simpler models like CLIP base, loading directly might work.
+            # If using accelerate/multi-gpu, device_map="auto" is better.
+            # Let's try loading directly first.
+            model = CLIPModel.from_pretrained(
+                model_name,
+                # torch_dtype=torch.float16 # Optional: Use float16 if GPU supports and memory is tight
+                # low_cpu_mem_usage=True # Optional: If loading large models on CPU
+                # device_map="auto" # Optional: If using accelerate for multi-GPU/CPU offload
+            ).to(device).eval() # Load first, then move
+
+            processor = CLIPProcessor.from_pretrained(model_name)
+            # Determine embedding dim
+            if hasattr(model.config, 'projection_dim'): embedding_dim = model.config.projection_dim
+            elif "large" in model_name.lower(): embedding_dim = 768
+            elif "base" in model_name.lower(): embedding_dim = 512
+            else: embedding_dim = 512 # Default
+            model_type_str = "clip"
+            logger.info(f"Loaded CLIP model: {model_name} (Dim: {embedding_dim})")
+        except NotImplementedError as nie:
+            # Catch the specific meta tensor error if it still occurs
+            if "Cannot copy out of meta tensor" in str(nie):
+                 logger.error(f"Caught meta tensor error loading CLIP ({model_name}). This may indicate issues with accelerated loading or device placement.")
+                 # Potentially add fallback logic here if needed, but usually indicates deeper env issue
+                 raise ValueError(f"Meta tensor error loading CLIP: {model_name}. Check torch/transformers/accelerate versions.") from nie
+            else:
+                raise # Re-raise other NotImplementedErrors
+        except Exception as e:
+            raise ValueError(f"Failed load CLIP: {model_name}") from e
+
+    # --- DINOv2 Models (using Transformers) ---
     elif "dinov2" in model_name.lower():
         if AutoModel is None: raise ImportError("transformers required for DINOv2.")
-        try: processor = AutoImageProcessor.from_pretrained(model_name); model = AutoModel.from_pretrained(model_name).to(device).eval(); embedding_dim = getattr(model.config, 'hidden_size', None); model_type_str = "dino"; logger.info(f"Loaded DINOv2: {model_name} (Dim: {embedding_dim})")
-        except Exception as e: raise ValueError(f"Failed load DINOv2: {model_name}") from e
-    else: raise ValueError(f"Model not recognized: {model_name}")
-    if not all([model, processor, model_type_str, embedding_dim]): raise RuntimeError(f"Failed init components: {model_name}")
+        try:
+            processor = AutoImageProcessor.from_pretrained(model_name)
+            # Load model directly
+            model = AutoModel.from_pretrained(
+                model_name
+            ).to(device).eval()
+
+            # Determine embedding dim (remains the same)
+            if hasattr(model.config, 'hidden_size'): embedding_dim = model.config.hidden_size
+            else:
+                if "base" in model_name: embedding_dim = 768
+                elif "small" in model_name: embedding_dim = 384
+                elif "large" in model_name: embedding_dim = 1024
+                elif "giant" in model_name: embedding_dim = 1536
+                else: raise ValueError(f"Cannot determine embedding dimension for DINOv2: {model_name}")
+            model_type_str = "dino"
+            logger.info(f"Loaded DINOv2 model (Transformers): {model_name} (Dim: {embedding_dim})")
+        except NotImplementedError as nie:
+             if "Cannot copy out of meta tensor" in str(nie):
+                 logger.error(f"Caught meta tensor error loading DINOv2 ({model_name}). Check libraries.")
+                 raise ValueError(f"Meta tensor error loading DINOv2: {model_name}.") from nie
+             else: raise
+        except Exception as e: raise ValueError(f"Failed to load DINOv2 model: {model_name}") from e
+
+    else:
+        raise ValueError(f"Model name not recognized or supported: {model_name}")
+
+    if model is None or processor is None or model_type_str is None or embedding_dim is None:
+         raise RuntimeError(f"Failed to initialize components for model: {model_name}")
+
     return model, processor, model_type_str, embedding_dim
 
 # --- Helper to GENERATE potential sibling S3 Keys ---
