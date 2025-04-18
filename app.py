@@ -166,10 +166,22 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         available_options = await fetch_available_embedding_options(conn)
         template_context["available_options"] = available_options
 
-        # Fetch a random clip identifier from the DB
+        # Fetch a random clip identifier ONLY from EMBEDDED clips
         random_clip_record = await conn.fetchrow(
-            "SELECT clip_identifier FROM clips ORDER BY RANDOM() LIMIT 1"
+            """
+            SELECT c.clip_identifier
+            FROM clips c
+            JOIN embeddings e ON c.id = e.clip_id -- Ensure embedding exists
+            WHERE c.ingest_state = 'embedded'      -- Filter by state
+              AND e.model_name = $1              -- Filter by default model
+              AND e.generation_strategy = $2     -- Filter by default strategy
+            ORDER BY RANDOM()
+            LIMIT 1
+            """,
+             DEFAULT_MODEL_NAME, DEFAULT_GENERATION_STRATEGY
         )
+
+        # Check if any embedded clips were found for the default model/strategy
         if random_clip_record and random_clip_record['clip_identifier']:
             random_clip_id = random_clip_record['clip_identifier']
 
@@ -189,17 +201,18 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
             elif not available_options:
                  logger.warning("No embedding options available in DB. Redirecting with defaults, but similarity search may fail.")
 
-            # Include default (or first available) model/strategy in the redirect URL query params
+            # Redirect with the selected embedded clip and model/strategy
             redirect_url = request.url_for('query_clip', clip_id=random_clip_id).include_query_params(
                  model=final_model,
                  strategy=final_strategy
             )
-            logger.info(f"Redirecting to random clip: {random_clip_id} with model={final_model}, strategy={final_strategy}")
+            logger.info(f"Redirecting to random EMBEDDED clip: {random_clip_id} with model={final_model}, strategy={final_strategy}")
             return RedirectResponse(url=redirect_url, status_code=303) # Use 303 See Other for GET redirect
         else:
-            # Handle case where there are no clips in the DB yet
-            logger.info("No clips found in database.")
-            template_context["error"] = "No clips found in the database."
+            # Handle case where NO embedded clips are found (for the default model/strategy)
+            logger.info(f"No embedded clips found matching default model/strategy ({DEFAULT_MODEL_NAME}/{DEFAULT_GENERATION_STRATEGY}).")
+            template_context["error"] = "No embedded clips found to display for the default search criteria. Please check ingest status or select different embedding options."
+            # Still show the page with options, but no query/results
             return templates.TemplateResponse("index.html", template_context)
 
     except asyncpg.exceptions.UndefinedTableError as e:
@@ -335,6 +348,7 @@ async def query_clip(
             WHERE e.model_name = $2             -- Use selected model
               AND e.generation_strategy = $3    -- Use selected strategy
               AND c.id != $4                    -- Exclude query clip itself BY DB ID
+              AND c.ingest_state = 'embedded'   -- Ensure results are also embedded
             ORDER BY
                 e.embedding <=> $1::vector ASC  -- Order by distance (ascending)
             LIMIT $5;
