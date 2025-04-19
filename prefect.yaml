@@ -13,7 +13,7 @@ deployments:
       name: default-agent-pool # Target work pool
       work_queue_name: default # Target work queue
     schedule:
-      interval: 60 # Run every 60 seconds (1 minute)
+      interval: 300 # Run every 5 minutes
     tags: ["ingest", "scheduled"]
     description: Periodically checks DB for new ingest work and triggers tasks.
     parameters: {} # Add if the flow takes parameters (later)

@@ -1,4 +1,3 @@
-# --- START OF FILE tasks/sprite_generator.py ---
 import os
 import subprocess
 import tempfile
@@ -8,26 +7,29 @@ import json
 import math
 from prefect import task, get_run_logger
 import psycopg2
-from psycopg2 import sql, extras
+from psycopg2 import sql, extras # Keep DictCursor
 from botocore.exceptions import ClientError
 
+# Use the pooled connection from db_utils
 try:
-    from utils.db_utils import get_db_connection
+    # Adjust path if needed based on your structure - tasks/ vs utils/
+    from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
-    # Basic fallback for path issues during import
     import sys
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')) # Adjust path if needed
-    if project_root not in sys.path:
-        sys.path.insert(0, project_root)
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+    if project_root not in sys.path: sys.path.insert(0, project_root)
     try:
-        from utils.db_utils import get_db_connection
+        from utils.db_utils import get_db_connection, release_db_connection
     except ImportError as e:
-        print(f"ERROR importing db_utils in sprite_generator.py after path adjustment: {e}")
-        def get_db_connection(): raise NotImplementedError("Dummy DB connection")
+        print(f"ERROR importing db_utils in sprite_generator.py: {e}")
+        # Define dummies only if absolutely necessary for script loading, but prefer fixing imports
+        def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB connection getter")
+        def release_db_connection(conn): raise NotImplementedError("Dummy DB connection releaser")
 
 
-# Reuse existing components where possible
+# Reuse existing components where possible (ensure imports work)
 try:
+    # Assuming splice.py is in the same 'tasks' directory
     from .splice import (
         s3_client, S3_BUCKET_NAME, FFMPEG_PATH, run_ffmpeg_command,
         sanitize_filename
@@ -35,40 +37,73 @@ try:
     if not S3_BUCKET_NAME:
         raise ImportError("S3_BUCKET_NAME not configured in splice module")
     if not FFMPEG_PATH:
-        FFMPEG_PATH = "ffmpeg" # Provide default if not imported
+        FFMPEG_PATH = "ffmpeg"
         print("Warning: FFMPEG_PATH not imported from splice, defaulting to 'ffmpeg'")
 
 except ImportError as e:
      print(f"ERROR importing from .splice in sprite_generator.py: {e}")
-     # Define fallbacks or raise error if essential components are missing
-     s3_client = None # Or initialize directly here if needed
+     # Define fallbacks or raise error
+     s3_client = None # Or initialize Boto3 client here directly if needed
      S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
      FFMPEG_PATH = "ffmpeg"
      if not S3_BUCKET_NAME: raise ValueError("S3_BUCKET_NAME environment variable not set.")
-     # Define dummy run_ffmpeg_command if needed for basic script loading
-     def run_ffmpeg_command(cmd, step, cwd=None): raise NotImplementedError("Dummy ffmpeg runner")
-     def sanitize_filename(name): return "sanitized_dummy"
+     if not s3_client:
+         # Basic Boto3 client init as fallback example
+         try:
+             import boto3
+             s3_client = boto3.client('s3')
+             print("Warning: Initialized default Boto3 S3 client in sprite_generator fallback.")
+         except ImportError:
+             raise ImportError("Boto3 required but not installed, and S3 client not imported.")
+         except Exception as boto_err:
+             raise RuntimeError(f"Failed to initialize fallback Boto3 client: {boto_err}")
+
+     def run_ffmpeg_command(cmd, step, cwd=None):
+        # Basic fallback implementation if import fails
+        print(f"Executing Fallback FFMPEG Step: {step}")
+        print(f"Command: {' '.join(cmd)}")
+        try:
+            # Use shell=False for security unless absolutely necessary
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd, encoding='utf-8')
+            print(f"FFMPEG Output:\n{result.stdout[:500]}...") # Print partial output
+            return result
+        except FileNotFoundError:
+             print(f"ERROR: {cmd[0]} command not found.")
+             raise
+        except subprocess.CalledProcessError as e:
+             print(f"ERROR: {step} failed. Exit code: {e.returncode}")
+             print(f"Stderr:\n{e.stderr}")
+             raise
+     def sanitize_filename(name):
+         # Basic fallback sanitization
+         return "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in name)
 
 
 SPRITE_SHEET_S3_PREFIX = "sprite_sheets/"
-SPRITE_TILE_WIDTH = 160  # Keep desired display width (pixels)
-SPRITE_TILE_HEIGHT = -1 # Auto-calculate height based on aspect ratio
-SPRITE_FPS = 24          # Target FPS for sprite sheet frames
-SPRITE_COLS = 5          # <<< REDUCED COLUMNS for vertical video test
+SPRITE_TILE_WIDTH = 160
+SPRITE_TILE_HEIGHT = -1
+SPRITE_FPS = 24
+SPRITE_COLS = 5
 
-@task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45)
+# Add concurrency limit example if needed for resource management
+@task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45) # Add task_run_concurrency_limit=N here if needed
 def generate_sprite_sheet_task(clip_id: int):
     """
     Generates a sprite sheet for a given clip, uploads it to S3,
     and updates the clip's DB record with the path and metadata.
     Transitions state from 'pending_sprite_generation' to 'pending_review'.
+    Uses advisory lock and handles skips gracefully.
     """
     logger = get_run_logger()
-    logger.info(f"TASK [SpriteGen]: Starting for clip_id: {clip_id} (Target FPS: {SPRITE_FPS}, Cols: {SPRITE_COLS})")
+    logger.info(f"TASK [SpriteGen]: Starting for clip_id: {clip_id}")
     conn = None
     temp_dir_obj = None
     clip_data = {}
-    final_state = "sprite_generation_failed" # Default to failure
+    task_outcome = "failed" # Default outcome status
+    final_db_state = "sprite_generation_failed" # Default DB state on failure
+    error_message = None # Store error message for DB update
+    sprite_s3_key = None # Keep track of generated key
+    task_skipped = False # Flag to indicate early skip
 
     # --- Dependency Checks ---
     if not s3_client:
@@ -83,18 +118,19 @@ def generate_sprite_sheet_task(clip_id: int):
 
 
     try:
-        conn = get_db_connection()
+        # Use pooled connection
+        conn = get_db_connection(cursor_factory=extras.DictCursor) # Use DictCursor for easier access
         conn.autocommit = False # Manual transaction control
 
         temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_spritegen_{clip_id}_")
         temp_dir = Path(temp_dir_obj.name)
-        logger.info(f"Using temporary directory: {temp_dir}")
+        # logger.debug(f"Using temporary directory: {temp_dir}") # Reduce noise
 
-        # === DB Check and State Update ===
+        # === DB Check, Lock, and State Update ===
         try:
-            with conn.cursor(cursor_factory=extras.DictCursor) as cur:
+            with conn.cursor() as cur: # Use the connection's cursor directly
                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
-                logger.debug(f"Acquired lock for clip {clip_id}")
+                # logger.debug(f"Acquired lock for clip {clip_id}") # Reduce noise
                 cur.execute(
                     """
                     SELECT clip_filepath, clip_identifier, start_time_seconds, end_time_seconds,
@@ -106,21 +142,30 @@ def generate_sprite_sheet_task(clip_id: int):
                 clip_data = cur.fetchone()
 
                 if not clip_data: raise ValueError(f"Clip {clip_id} not found.")
-                if clip_data['ingest_state'] != 'pending_sprite_generation':
-                    logger.warning(f"Clip {clip_id} not in 'pending_sprite_generation' state (state: {clip_data['ingest_state']}). Skipping.")
-                    conn.rollback() # Release lock
-                    return {"status": "skipped", "reason": f"Incorrect state: {clip_data['ingest_state']}"}
+
+                current_state = clip_data['ingest_state']
+                if current_state != 'pending_sprite_generation':
+                    logger.warning(f"Clip {clip_id} not in 'pending_sprite_generation' state (state: {current_state}). Skipping.")
+                    task_skipped = True # Set the skip flag
+                    task_outcome = "skipped"
+                    conn.rollback() # Release lock, no changes needed
+                    # No need to set final_db_state here, as we are skipping DB update
+                    return {"status": "skipped", "reason": f"Incorrect state: {current_state}"} # Early exit
+
                 if not clip_data['clip_filepath']: raise ValueError("Clip filepath missing.")
 
+                # Set state to 'generating_sprite'
                 cur.execute("UPDATE clips SET ingest_state = 'generating_sprite', updated_at = NOW() WHERE id = %s", (clip_id,))
                 logger.info(f"Set clip {clip_id} state to 'generating_sprite'")
-            conn.commit() # Commit short transaction
-            logger.debug("Initial check/state update committed.")
+            conn.commit() # Commit state change
+            # logger.debug("Initial check/state update committed.") # Reduce noise
 
         except (ValueError, psycopg2.DatabaseError) as db_err:
             logger.error(f"DB Error during initial check/update for sprite gen: {db_err}", exc_info=True)
             if conn: conn.rollback()
-            raise
+            error_message = f"DB Init Error: {db_err}"
+            # final_db_state remains 'sprite_generation_failed'
+            raise # Re-raise to fail the task immediately
 
         # === Main Processing ===
         clip_s3_key = clip_data['clip_filepath']
@@ -222,20 +267,21 @@ def generate_sprite_sheet_task(clip_id: int):
 
 
         # --- Generate Sprite Sheet ---
-        # Calculate target number of frames for the sprite sheet
+        # (Keep sprite sheet generation logic, ffmpeg command construction)
         num_sprite_frames = math.ceil(duration * SPRITE_FPS)
-        logger.info(f"Targeting {num_sprite_frames} frames for sprite sheet (Duration: {duration:.2f}s, Sprite FPS: {SPRITE_FPS})")
+        # logger.info(f"Targeting {num_sprite_frames} frames for sprite sheet (Duration: {duration:.2f}s, Sprite FPS: {SPRITE_FPS})")
 
         if num_sprite_frames <= 0:
             logger.warning(f"Clip {clip_id} duration too short or calculated sprite frames zero ({num_sprite_frames}). Skipping sprite sheet generation.")
-            final_state = "pending_review" # Move to review without sprite
+            final_db_state = "pending_review" # Move to review without sprite
             sprite_s3_key = None
             sprite_metadata = None
+            task_outcome = "success_no_sprite" # Indicate success but no sprite generated
         else:
-            # Use the NEW SPRITE_COLS value in filename for clarity
+            # (Keep filename, path, S3 key generation)
             sprite_filename = f"{sanitize_filename(clip_identifier)}_sprite_{SPRITE_FPS}fps_c{SPRITE_COLS}.jpg"
             local_sprite_path = temp_dir / sprite_filename
-            sprite_s3_key = f"{SPRITE_SHEET_S3_PREFIX}{sprite_filename}"
+            sprite_s3_key = f"{SPRITE_SHEET_S3_PREFIX}{sprite_filename}" # Store for later use
 
             # Calculate number of rows needed based on the NEW SPRITE_COLS, ensure at least 1
             num_rows = max(1, math.ceil(num_sprite_frames / SPRITE_COLS))
@@ -328,67 +374,119 @@ def generate_sprite_sheet_task(clip_id: int):
             logger.info(f"Sprite sheet generated and uploaded for clip {clip_id}.")
             final_state = "pending_review" # Success state
 
-        # === Final DB Update ===
+        # === Final DB Update (only if not skipped) ===
         try:
             with conn.cursor() as cur:
-                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
-                 # Ensure sprite_metadata is stored as JSONB
-                 # Use json.dumps to ensure correct JSON formatting for DB insertion
+                 # No need to re-lock if transaction is still active
+                 # cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,)) # Lock already held if not skipped
+
+                 # Update state, sprite path, metadata, clear error
                  cur.execute(
                      """
                      UPDATE clips
                      SET ingest_state = %s,
                          sprite_sheet_filepath = %s,
-                         sprite_metadata = %s::jsonb, -- Cast string to jsonb
+                         sprite_metadata = %s::jsonb,
                          updated_at = NOW(),
-                         last_error = NULL -- Clear error on success
-                     WHERE id = %s AND ingest_state = 'generating_sprite';
+                         last_error = NULL -- Clear error on success/no_sprite
+                     WHERE id = %s AND ingest_state = 'generating_sprite'; -- Ensure we only update if still generating
                      """,
-                     (final_state, sprite_s3_key, json.dumps(sprite_metadata) if sprite_metadata else None, clip_id)
+                     (final_db_state, sprite_s3_key, json.dumps(sprite_metadata) if sprite_metadata else None, clip_id)
                  )
-            conn.commit()
-            logger.info(f"TASK [SpriteGen]: Finished for clip {clip_id}. Final State: {final_state}. Sprite Key: {sprite_s3_key}")
-            return {"status": "success", "sprite_sheet_key": sprite_s3_key, "new_state": final_state}
+                 rows_updated = cur.rowcount
+                 if rows_updated == 0:
+                      logger.warning(f"Final DB update affected 0 rows for clip {clip_id}. State might have changed unexpectedly.")
+                      # This could happen if another process somehow changed the state after 'generating_sprite'
+                      # Rollback this attempt? Or let it commit nothing? Let's rollback to be safe.
+                      conn.rollback()
+                      task_outcome = "failed_db_update_state_mismatch"
+                      error_message = "DB state changed before final update"
+                 else:
+                      conn.commit() # Commit the final successful update
+                      logger.info(f"Successfully updated clip {clip_id} to state '{final_db_state}' with sprite key '{sprite_s3_key}'.")
 
         except (psycopg2.DatabaseError, psycopg2.OperationalError) as db_err:
             logger.error(f"DB Error during final update for sprite gen: {db_err}", exc_info=True)
             if conn: conn.rollback()
-            final_state = 'sprite_generation_failed' # Ensure state reflects failure
-            raise
+            task_outcome = "failed_db_update"
+            final_db_state = 'sprite_generation_failed' # Ensure DB reflects failure if possible
+            error_message = f"DB Final Update Error: {db_err}"
+            # We need to try and update the state to failed outside this failed transaction
+            # This is handled by the main except block below
+
 
     # === Main Error Handling ===
     except Exception as e:
         logger.error(f"TASK FAILED [SpriteGen]: clip_id {clip_id} - {e}", exc_info=True)
-        final_state = 'sprite_generation_failed'
-        if conn:
-            try:
-                conn.rollback()
-                conn.autocommit = True
-                with conn.cursor() as err_cur:
-                    err_cur.execute(
-                        """
-                        UPDATE clips SET ingest_state = %s, last_error = %s, updated_at = NOW()
-                        WHERE id = %s AND ingest_state IN ('generating_sprite', 'pending_sprite_generation');
-                        """,
-                        (final_state, f"SpriteGen failed: {type(e).__name__}: {str(e)[:450]}", clip_id)
-                    )
-                logger.info(f"Attempted to set clip {clip_id} state to '{final_state}'.")
-            except Exception as db_err:
-                 logger.error(f"Failed to update error state in DB after sprite gen failure: {db_err}")
-        # Reraise the exception for Prefect to mark the task as failed
+        task_outcome = "failed" # Ensure outcome is marked as failed
+        final_db_state = 'sprite_generation_failed' # Target state on failure
+        if not error_message: # Store the exception if not already set
+             error_message = f"SpriteGen Task Error: {type(e).__name__}: {str(e)[:450]}"
+
+        # Attempt to update DB state to failed outside the main transaction
+        if conn: conn.rollback() # Rollback any partial work from try block
+        error_conn = None
+        try:
+             # Get a new connection or reuse if pool handles recovery
+             error_conn = get_db_connection()
+             error_conn.autocommit = True # Use autocommit for simple error update
+             with error_conn.cursor() as err_cur:
+                 err_cur.execute(
+                     """
+                     UPDATE clips SET ingest_state = %s, last_error = %s, updated_at = NOW()
+                     WHERE id = %s AND ingest_state IN ('generating_sprite', 'pending_sprite_generation');
+                     """,
+                     (final_db_state, error_message, clip_id)
+                 )
+             logger.info(f"Attempted to set clip {clip_id} state to '{final_db_state}' after error.")
+        except Exception as db_err_update:
+             logger.error(f"CRITICAL: Failed to update error state in DB for clip {clip_id} after main task failure: {db_err_update}")
+        finally:
+             if error_conn:
+                 release_db_connection(error_conn) # Release the error connection
+
+        # Reraise the original exception for Prefect to mark the task as failed
         raise e
+
     finally:
+        # --- Final Logging based on Outcome ---
+        log_message = f"TASK [SpriteGen] Result: clip_id={clip_id}, outcome={task_outcome}"
+        if task_outcome == "success":
+            log_message += f", new_state={final_db_state}, sprite_key={sprite_s3_key}"
+        elif task_outcome == "success_no_sprite":
+             log_message += f", new_state={final_db_state} (no sprite generated)"
+        elif task_outcome == "skipped":
+             log_message += " (skipped due to initial state check)"
+        elif task_outcome.startswith("failed"):
+             log_message += f", final_state_attempted={final_db_state}, error='{error_message}'"
+
+        if task_outcome.startswith("failed"):
+             logger.error(log_message)
+        elif task_outcome == "skipped":
+             logger.warning(log_message)
+        else: # Success variants
+             logger.info(log_message)
+
+
+        # --- Resource Cleanup ---
         if conn:
-             conn.autocommit = True # Ensure autocommit is back to default
-             conn.close()
-             logger.debug(f"DB connection closed for sprite gen task, clip_id: {clip_id}")
+             # Release connection obtained at the start
+             # Ensure autocommit is reset if necessary (though pool might handle this)
+             try:
+                 conn.autocommit = True # Reset before releasing
+             except psycopg2.ProgrammingError: # Handle case where connection might be closed
+                 pass
+             except AttributeError: # Handle case where conn object is None or unexpected type
+                  pass
+             release_db_connection(conn)
+             # logger.debug(f"DB connection released for sprite gen task, clip_id: {clip_id}") # Reduce noise
+
         if temp_dir_obj:
             try:
-                # Use ignore_errors=True for more resilience during cleanup
                 shutil.rmtree(temp_dir_obj.name, ignore_errors=True)
-                logger.info(f"Attempted cleanup of temporary directory: {temp_dir_obj.name}")
+                # logger.debug(f"Cleaned up temporary directory: {temp_dir_obj.name}") # Reduce noise
             except Exception as cleanup_err:
-                 # This shouldn't happen with ignore_errors=True, but log just in case
-                 logger.warning(f"Error during explicit cleanup of temp dir {temp_dir_obj.name}: {cleanup_err}")
+                 logger.warning(f"Error during cleanup of temp dir {temp_dir_obj.name}: {cleanup_err}")
 
-# --- END OF FILE tasks/sprite_generator.py ---
+    # Return a dictionary reflecting the outcome
+    return {"status": task_outcome, "sprite_sheet_key": sprite_s3_key, "final_db_state": final_db_state, "error": error_message}
