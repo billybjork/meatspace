@@ -1,19 +1,16 @@
-# --- START OF FILE flows/ingest_flows.py ---
-
 import sys
 import os
 from pathlib import Path
 import traceback
 import time
 
-# (Keep existing imports and path setup)
 project_root = Path(__file__).parent.parent.resolve()
 if str(project_root) not in sys.path:
     print(f"Adding project root to sys.path: {project_root}")
     sys.path.insert(0, str(project_root))
 
 from prefect import flow, get_run_logger, task
-from prefect.futures import wait # Import wait if choosing to track futures
+from prefect.futures import wait
 
 # --- Task Imports ---
 from tasks.intake import intake_task
@@ -26,13 +23,12 @@ from tasks.split import split_clip_task
 
 # --- DB Util Imports ---
 from utils.db_utils import (
-    # get_items_by_state, # Replace with new function
-    get_items_for_processing, # Import the new function
+    get_items_for_processing,
     get_source_input_from_db,
     get_pending_merge_pairs,
     get_pending_split_jobs,
-    initialize_db_pool, # Import pool initializer
-    close_db_pool # Import pool closer
+    initialize_db_pool,
+    close_db_pool
 )
 
 # --- Configuration ---
@@ -45,7 +41,6 @@ EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900)) # 15 minutes defaul
 
 # --- Flows ---
 
-# (Keep process_clip_post_review as is)
 @flow(log_prints=True)
 def process_clip_post_review(
     clip_id: int,
@@ -335,5 +330,3 @@ if __name__ == "__main__":
         # close_db_pool() # Clean up pool after local test
         pass
     print("Local test cycle finished.")
-
-# --- END OF FILE flows/ingest_flows.py ---

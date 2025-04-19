@@ -1,10 +1,10 @@
 import os
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import RealDictCursor # To get results as dictionaries
-from psycopg2 import pool # Import connection pooling
+from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
 from dotenv import load_dotenv
-from prefect import get_run_logger # Import Prefect logger
+from prefect import get_run_logger
 import time # For retry logic
 
 try:

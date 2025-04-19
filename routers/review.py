@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 import asyncpg
 from asyncpg.exceptions import UniqueViolationError, PostgresError
 import psycopg2
-import httpx # Used for potential async background tasks if needed
+import httpx # For potential async background tasks if needed
 
 from config import log, CLOUDFRONT_DOMAIN
 from database import get_db_connection

@@ -7,12 +7,11 @@ import json
 import math
 from prefect import task, get_run_logger
 import psycopg2
-from psycopg2 import sql, extras # Keep DictCursor
+from psycopg2 import sql, extras
 from botocore.exceptions import ClientError
 
 # Use the pooled connection from db_utils
 try:
-    # Adjust path if needed based on your structure - tasks/ vs utils/
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
     import sys
@@ -29,7 +28,6 @@ except ImportError:
 
 # Reuse existing components where possible (ensure imports work)
 try:
-    # Assuming splice.py is in the same 'tasks' directory
     from .splice import (
         s3_client, S3_BUCKET_NAME, FFMPEG_PATH, run_ffmpeg_command,
         sanitize_filename
