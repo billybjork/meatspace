@@ -1,7 +1,8 @@
 document.addEventListener('DOMContentLoaded', () => {
     const reviewQueue = document.getElementById('review-queue');
-    const players = {}; // Store SpritePlayer instances { clipId: playerInstance }
-    const splitModeState = {}; // Store split mode UI state { clipId: { isActive: boolean } }
+    window.spritePlayers = {}; // Store globally
+    const players = window.spritePlayers; // Use the global object
+    const splitModeState = {};
 
     // --- Initialization ---
     document.querySelectorAll('.clip-review-item').forEach(clipItem => {
@@ -98,7 +99,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
     }); // End of initialization loop
 
-
     // --- Split Mode UI Management ---
     function activateSplitMode(clipId, clipItem, player) {
         if (!player || !player.meta?.isValid) {
@@ -173,7 +173,6 @@ document.addEventListener('DOMContentLoaded', () => {
         splitFeedback.style.color = isDisabled ? '#d00' : '#080';
     }
 
-
     // --- Main Event Listener for Actions ---
     reviewQueue.addEventListener('click', async (event) => {
         const target = event.target;
@@ -185,7 +184,6 @@ document.addEventListener('DOMContentLoaded', () => {
         const feedbackDiv = clipItem.querySelector('.action-feedback');
         const undoButton = clipItem.querySelector('.undo-button');
         const splitControls = clipItem.querySelector('.split-controls');
-
 
         // --- Player Controls ---
         if (target.matches('.sprite-play-pause-btn')) {
@@ -301,4 +299,4 @@ document.addEventListener('DOMContentLoaded', () => {
          }
      }); // End keydown listener
 
-}); // End DOMContentLoaded
+});
