@@ -26,7 +26,7 @@ except ImportError:
         def release_db_connection(conn): raise NotImplementedError("Dummy DB connection releaser")
 
 
-# Reuse existing components where possible (ensure imports work)
+# Reuse existing components where possible
 try:
     from .splice import (
         s3_client, S3_BUCKET_NAME, FFMPEG_PATH, run_ffmpeg_command,
@@ -46,7 +46,6 @@ except ImportError as e:
      FFMPEG_PATH = "ffmpeg"
      if not S3_BUCKET_NAME: raise ValueError("S3_BUCKET_NAME environment variable not set.")
      if not s3_client:
-         # Basic Boto3 client init as fallback example
          try:
              import boto3
              s3_client = boto3.client('s3')

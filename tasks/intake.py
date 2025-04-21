@@ -98,46 +98,112 @@ def run_external_command(cmd_list, step_name="Command", cwd=None):
 
 # --- S3 Upload Progress Callback Class ---
 class S3TransferProgress:
-    """Callback for boto3 to report S3 transfer progress via Prefect logger."""
+    """
+    Callback for boto3 to report S3 transfer progress via Prefect logger,
+    with robust type handling and throttled logging.
+    """
     def __init__(self, total_size, filename, logger, throttle_percentage=5):
+        """
+        Initializes the progress tracker.
+
+        Args:
+            total_size: The total size of the file in bytes.
+            filename: The name of the file being transferred.
+            logger: The Prefect logger instance to use for reporting.
+            throttle_percentage: Log progress roughly every N percent (default 5).
+                                 Must be between 1 and 100.
+        """
         self._filename = filename
         self._total_size = total_size
         self._seen_so_far = 0
-        self._lock = threading.Lock()
-        self._logger = logger
-        # Ensure throttle is between 1 and 100
-        self._throttle_percentage = max(1, min(throttle_percentage, 100))
-        self._last_logged_percentage = -1 # Initialize to ensure first log happens
+        self._lock = threading.Lock() # Lock for thread safety if callback is invoked concurrently
+        self._logger = logger or get_run_logger() # Fallback to Prefect logger if none provided
+
+        # Ensure throttle is a valid integer percentage
+        try:
+            self._throttle_percentage = max(1, min(int(throttle_percentage), 100))
+        except (ValueError, TypeError):
+            self._logger.warning(f"Invalid throttle_percentage '{throttle_percentage}', defaulting to 5.")
+            self._throttle_percentage = 5
+
+        # Initialize last logged percentage to ensure the first meaningful log happens
+        self._last_logged_percentage = -1
 
     def __call__(self, bytes_amount):
-        with self._lock:
-            self._seen_so_far += bytes_amount
-            percentage = 0 # Default percentage
-            if self._total_size > 0:
-                # Calculate percentage carefully to avoid division by zero
-                percentage = int((self._seen_so_far / self._total_size) * 100)
+        """
+        Callback function invoked by boto3 during transfer.
 
-            # Throttle logging: Only log if percentage increased significantly or is 100%
-            # The check `percentage >= self._last_logged_percentage + self._throttle_percentage` handles increases.
-            # The check `percentage == 100 and self._last_logged_percentage != 100` specifically ensures 100% is logged once.
-            should_log = (
-                (percentage >= self._last_logged_percentage + self._throttle_percentage and percentage < 100) or
-                (percentage == 100 and self._last_logged_percentage != 100)
-            )
+        Args:
+            bytes_amount: The number of bytes transferred since the last call.
+        """
+        try:
+            with self._lock:
+                self._seen_so_far += bytes_amount
+                current_percentage = 0  # Default percentage
 
-            if should_log:
-                size_mb = self._seen_so_far / (1024 * 1024)
-                total_size_mb = self._total_size / (1024 * 1024) if self._total_size > 0 else 0
-                self._logger.info(
-                    f"S3 Upload: {self._filename} - {percentage}% complete "
-                    f"({size_mb:.2f}/{total_size_mb:.2f} MiB)"
-                )
-                self._last_logged_percentage = percentage # Update last logged percentage
+                # Ensure total_size is numeric and positive before division
+                if isinstance(self._total_size, (int, float)) and self._total_size > 0:
+                    try:
+                        # Calculate percentage carefully
+                        current_percentage = int((self._seen_so_far / self._total_size) * 100)
+                    except TypeError:
+                        self._logger.warning(f"S3 Progress ({self._filename}): Could not calculate percentage ({self._seen_so_far} / {self._total_size}). Using 0.")
+                        current_percentage = 0  # Fallback
+                    except Exception as calc_err:
+                         self._logger.warning(f"S3 Progress ({self._filename}): Unexpected error calculating percentage: {calc_err}")
+                         current_percentage = 0 # Fallback
+                elif self._total_size == 0:
+                    # Handle zero-byte file: it's 100% done immediately
+                    current_percentage = 100
 
-            # Handle edge case for zero-byte files explicitly after the first call
-            elif self._total_size == 0 and self._seen_so_far == 0 and self._last_logged_percentage == -1:
-                 self._logger.info(f"S3 Upload: {self._filename} - 100% complete (0.00/0.00 MiB)")
-                 self._last_logged_percentage = 100
+                # --- Robust Comparison Logic ---
+                should_log = False
+                try:
+                    # Ensure all parts of the comparison are integers
+                    last_logged_int = int(self._last_logged_percentage)
+                    throttle_int = int(self._throttle_percentage) # Already validated in init, but cast for safety
+
+                    # Determine if logging is needed based on throttle and completion
+                    should_log = (
+                        # Check if percentage increased by at least the throttle amount AND not yet 100%
+                        (current_percentage >= last_logged_int + throttle_int and current_percentage < 100) or
+                        # Check if it just reached 100% and wasn't logged as 100% before
+                        (current_percentage == 100 and last_logged_int != 100)
+                    )
+                except (ValueError, TypeError) as comp_err:
+                    self._logger.warning(
+                        f"S3 Progress ({self._filename}): Error during logging comparison: {comp_err}. "
+                        f"Current%: {current_percentage}, LastLogged: {self._last_logged_percentage}",
+                        exc_info=False
+                    )
+                    # Don't log if comparison fails, but don't crash
+                    should_log = False
+                # --- End Robust Comparison Logic ---
+
+                if should_log:
+                    try:
+                        # Ensure values used for formatting are numeric
+                        size_mb = float(self._seen_so_far) / (1024 * 1024)
+                        total_size_mb = float(self._total_size) / (1024 * 1024) if isinstance(self._total_size, (int, float)) and self._total_size > 0 else 0.0
+
+                        self._logger.info(
+                            f"S3 Upload: {self._filename} - {current_percentage}% complete "
+                            f"({size_mb:.2f}/{total_size_mb:.2f} MiB)"
+                        )
+                        # Update last logged percentage *only* if logging occurred
+                        self._last_logged_percentage = current_percentage
+                    except Exception as log_fmt_err:
+                        self._logger.warning(f"S3 Progress ({self._filename}): Error formatting log message: {log_fmt_err}")
+
+                # Special case logging for zero-byte file completion (only once)
+                elif self._total_size == 0 and self._seen_so_far == 0 and self._last_logged_percentage == -1:
+                    self._logger.info(f"S3 Upload: {self._filename} - 100% complete (0.00/0.00 MiB)")
+                    self._last_logged_percentage = 100 # Mark as logged
+
+        except Exception as callback_err:
+            # Catch any unexpected errors within the callback itself
+            self._logger.error(f"S3 Progress ({self._filename}): Unexpected error in progress callback: {callback_err}", exc_info=True)
+            # Do not re-raise from callback, as it might interfere with the transfer process itself
 
 
 # --- Prefect Task ---
