@@ -193,6 +193,19 @@
         .skip-btn:hover:not([disabled]) { background-color: #eea236; }
         .merge-previous-btn { background-color: #5bc0de; color: white; border-color: #46b8da;}
         .merge-previous-btn:hover:not([disabled]) { background-color: #46b8da; }
+        .group-previous-btn {
+            background-color: #7a5bc0; /* Example purple color */
+            color: white;
+            border-color: #6a4db0;
+        }
+        .group-previous-btn:hover:not([disabled]) { background-color: #6a4db0; }
+        .group-previous-btn.btn-active { /* For keydown feedback */
+            background-color: #4a2d90 !important;
+            color: white !important;
+            border-color: #3a1d70 !important;
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3);
+            transition: none;
+        }
         .split-mode-btn { background-color: #777; color: white; border-color: #666;}
         .split-mode-btn:hover:not([disabled]) { background-color: #666; }
         .confirm-split-btn { background-color: dodgerblue; color: white; border-color: #157fcc;}
@@ -280,6 +293,7 @@
                     <button class="action-btn skip-btn" data-action="skip" title="Skip (S + Enter)">⏭️ Skip</button>
                     <button class="action-btn archive-btn" data-action="archive" title="Archive (D + Enter)">🗑️ Archive</button>
                     <button class="action-btn merge-previous-btn" data-action="merge_previous" {% if not clip.can_merge_previous %}disabled title="Previous clip not available or not in a mergeable state"{% else %}title="Merge WITH Previous (Cmd/Ctrl + F + Enter)"{% endif %}>🖇️ Merge w/ Prev</button>
+                    <button class="action-btn group-previous-btn" data-action="group_previous" {% if not clip.can_merge_previous %}disabled title="Previous clip not available or not in a groupable state"{% else %}title="Group WITH Previous (G + Enter)"{% endif %}>🔗 Group w/ Prev</button>
 
                     <button class="action-btn split-mode-btn"
                             data-action="enter_split_mode"
@@ -332,6 +346,7 @@
          <kbd>S</kbd>+<kbd>Enter</kbd>: Skip |
          <kbd>D</kbd>+<kbd>Enter</kbd>: Archive |
          <kbd>⌘/Ctrl</kbd>+<kbd>F</kbd>+<kbd>Enter</kbd>: Merge w/ Prev |
+         <kbd>G</kbd>+<kbd>Enter</kbd>: Group w/ Prev |
          <kbd>←</kbd>/<kbd>→</kbd>: Split Mode/Scrub |
          <kbd>Space</kbd>: Play/Pause |
          <kbd>Enter</kbd>: Confirm Split |

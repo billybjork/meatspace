@@ -15,7 +15,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Keyboard state tracking
     let keyState = {
-        'a': false, 's': false, 'd': false, 'f': false, // Action keys
+        'a': false, 's': false, 'd': false, 'f': false, 'g': false, // Action keys
         'meta': false,    // Cmd on Mac - Still track for potential future use or other shortcuts
         'control': false, // Ctrl on Win/Linux - Still track
         // We don't need to track Enter/Space/Arrows/Escape state, just their event triggers
@@ -45,6 +45,7 @@ document.addEventListener('DOMContentLoaded', () => {
             skip: clipItem.querySelector('.skip-btn'),
             archive: clipItem.querySelector('.archive-btn'),
             merge_previous: clipItem.querySelector('.merge-previous-btn'),
+            group_previous: clipItem.querySelector('.group-previous-btn'),
         };
 
 
@@ -158,11 +159,8 @@ document.addEventListener('DOMContentLoaded', () => {
             if (keyState.a) activeAction = 'approve';
             else if (keyState.s) activeAction = 'skip';
             else if (keyState.d) activeAction = 'archive';
-            // --- USE UPDATED CONDITION FOR MERGE (only 'f' key) ---
-            else if (keyState.f) {
-                 activeAction = 'merge_previous';
-            }
-            // --- END UPDATED CONDITION ---
+            else if (keyState.f) activeAction = 'merge_previous';
+            else if (keyState.g) activeAction = 'group_previous';
 
             for (const action in actionButtons) {
                 const button = actionButtons[action];
@@ -230,7 +228,8 @@ document.addEventListener('DOMContentLoaded', () => {
 
             allActionButtons.forEach(btn => {
                  const mergeBtn = actionButtons['merge_previous']; // Use cached button
-                 if(btn === mergeBtn) {
+                 const groupBtn = actionButtons['group_previous'];
+                 if(btn === mergeBtn || btn === groupBtn) { 
                      const templateDisabled = mergeBtn.getAttribute('disabled') !== null;
                      btn.disabled = templateDisabled;
                  } else if (btn.classList.contains('retry-sprite-btn')) {
@@ -352,7 +351,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (keyState.a) actionToPerform = 'approve';
                 else if (keyState.s) actionToPerform = 'skip';
                 else if (keyState.d) actionToPerform = 'archive';
-                // --- USE UPDATED CONDITION FOR MERGE ---
                 else if (keyState.f) {
                     const mergeBtn = actionButtons['merge_previous'];
                     if (mergeBtn && !mergeBtn.disabled) {
@@ -364,7 +362,16 @@ document.addEventListener('DOMContentLoaded', () => {
                          updateActiveButtonState(); // Update UI as F key is no longer effectively down
                     }
                 }
-                // --- END UPDATED CONDITION ---
+                else if (keyState.g) {
+                    const groupBtn = actionButtons['group_previous'];
+                    if (groupBtn && !groupBtn.disabled) { actionToPerform = 'group_previous'; }
+                    else {
+                         showFeedback(feedbackDiv, "Group with previous is not available.", true);
+                         setTimeout(() => { if(feedbackDiv) feedbackDiv.textContent = ''; }, 3000);
+                         keyState.g = false; // Reset g state if button disabled
+                         updateActiveButtonState();
+                    }
+               }
 
                 // Handle Split confirmation FIRST if in split mode
                 if (splitModeActive) {
@@ -447,7 +454,7 @@ document.addEventListener('DOMContentLoaded', () => {
                  if (player) player.pause('buttonClick');
 
                  switch (action) {
-                     case 'approve': case 'skip': case 'archive': case 'retry_sprite_gen': case 'merge_previous':
+                     case 'approve': case 'skip': case 'archive': case 'retry_sprite_gen': case 'merge_previous': case 'group_previous':
                          setProcessingState(clipItem, true);
                          await performApiAction(currentClipId, action, clipItem, feedbackDiv);
                          break;
