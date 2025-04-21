@@ -3,7 +3,7 @@ from fastapi import APIRouter, Request, Depends, Query, Path, Body, HTTPExceptio
 from fastapi.responses import HTMLResponse, JSONResponse
 import asyncpg
 from asyncpg.exceptions import UniqueViolationError, PostgresError
-import psycopg2 # Keep for error type checking if needed, though asyncpg errors are primary here
+import psycopg2
 
 from config import log, CLOUDFRONT_DOMAIN
 from database import get_db_connection # Using the asyncpg pool dependency
@@ -12,7 +12,7 @@ from schemas import ClipActionPayload, SplitActionPayload
 
 # --- S3 Configuration Check (Best practice) ---
 try:
-    from tasks.splice import s3_client, S3_BUCKET_NAME, ClientError # Import ClientError too
+    from tasks.splice import s3_client, S3_BUCKET_NAME, ClientError
     if not S3_BUCKET_NAME:
         raise ImportError("S3_BUCKET_NAME not configured")
     log.info("S3 client config imported successfully for review router (context).")
@@ -63,12 +63,12 @@ async def review_clips_ui(
             FROM ClipWithLag
             WHERE ingest_state IN (
                 -- States that REQUIRE immediate user attention in THIS queue:
-                'pending_review',           # Primary state for review
-                'sprite_generation_failed', # Needs review/retry
-                'merge_failed',             # Needs re-review after failed merge
-                'split_failed',             # Needs re-review after failed split
-                'keyframe_failed',          # Needs review/retry (post-approval failure)
-                'embedding_failed'          # Needs review/retry (post-approval failure)
+                'pending_review',           -- Primary state for review
+                'sprite_generation_failed', -- Needs review/retry
+                'merge_failed',             -- Needs re-review after failed merge
+                'split_failed',             -- Needs re-review after failed split
+                'keyframe_failed',          -- Needs review/retry (post-approval failure)
+                'embedding_failed'          -- Needs review/retry (post-approval failure)
                 -- 'review_skipped' is intentionally EXCLUDED here.
             )
             ORDER BY source_video_id, start_time_seconds, id -- Ensure consistent ordering

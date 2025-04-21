@@ -44,7 +44,7 @@ class SpritePlayer {
         this.viewerElement.style.height = `${this.meta.tile_height_calculated}px`;
 
         this.viewerElement.textContent = ''; // Clear any loading/error message
-        this.viewerElement.classList.remove('no-sprite'); // Ensure error class is removed
+        this.viewerElement.classList.remove('no-sprite');
 
         // Setup scrub bar
         if (this.scrubElement) {
@@ -91,7 +91,6 @@ class SpritePlayer {
              this._handleScrubEnd = () => {
                  // console.log(`[Player ${this.clipId}] Scrub End (mouseup/touchend)`);
                  this.isScrubbing = false;
-                 // Optional: Resume playback if it was playing before scrub? Maybe not desired.
              };
              this._handleScrubInput = (e) => {
                  const frame = parseInt(e.target.value, 10);
@@ -266,14 +265,12 @@ class SpritePlayer {
         this.playbackInterval = setInterval(() => {
             // Use try-catch inside interval to prevent it from stopping silently on error
             try {
-                // --- CORRECTED VALIDITY CHECK ---
                 // Check if this specific instance should still be playing and has valid metadata.
                 if (!this.isPlaying || !this.meta?.isValid) {
                      console.log(`[Player ${this.clipId}] Interval stopping (Internal Check: isPlaying=${this.isPlaying}, metaValid=${this.meta?.isValid})`);
                      this.pause("intervalCheck"); // Call pause on 'this' player instance
                      return; // Stop this interval iteration
                 }
-                // --- END CORRECTION ---
 
                 // Calculate the next frame number
                 let nextFrame = this.currentFrame + 1;

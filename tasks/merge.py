@@ -17,7 +17,6 @@ except ImportError:
     # Provide a dummy implementation for basic loading, but it won't work
     def get_db_connection(): raise NotImplementedError("Dummy DB connection - db_utils not found")
 
-# Assuming these are correctly configured and importable from splice
 try:
     from .splice import (
         s3_client, S3_BUCKET_NAME, FFMPEG_PATH, CLIP_S3_PREFIX,
@@ -101,7 +100,7 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                     raise ValueError("Clips do not belong to the same source video.")
                 source_video_id = clip_target_data['source_video_id'] # Store for potential future use/locking
 
-                # Check expected states (adjust if your states differ slightly)
+                # Check expected states
                 expected_target_state = 'pending_merge_target'
                 expected_source_state = 'marked_for_merge_into_previous'
 
@@ -113,7 +112,7 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                      logger.warning(f"Source clip {clip_id_source} has unexpected state: '{clip_source_data['ingest_state']}' (expected '{expected_source_state}')")
                      # raise ValueError("Source clip state not ready for merge.")
 
-                # Verify metadata link (optional but recommended)
+                # Verify metadata link
                 target_meta = clip_target_data['processing_metadata'] or {}
                 source_meta = clip_source_data['processing_metadata'] or {}
                 if target_meta.get('merge_source_clip_id') != clip_id_source or \

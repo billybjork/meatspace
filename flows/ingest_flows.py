@@ -21,14 +21,14 @@ from tasks.splice import splice_video_task
 from tasks.sprite_generator import generate_sprite_sheet_task
 from tasks.keyframe import extract_keyframes_task
 from tasks.embed import generate_embeddings_task
-from tasks.merge import merge_clips_task # Task signature updated to (clip_id_target, clip_id_source)
+from tasks.merge import merge_clips_task
 from tasks.split import split_clip_task
 
 # --- DB Util Imports ---
 from utils.db_utils import (
     get_items_for_processing,
     get_source_input_from_db,
-    get_pending_merge_pairs, # <--- NEW: Assumes this function exists in db_utils.py
+    get_pending_merge_pairs,
     get_pending_split_jobs,
     get_db_connection
 )
