@@ -23,8 +23,9 @@ MEDIA_BASE_DIR = os.getenv("MEDIA_BASE_DIR")
 
 # --- Connection Pooling for psycopg2 (Crucial for Prefect Tasks) ---
 db_pool = None
+# TODO: Change to environment variables?
 MIN_POOL_CONN = int(os.getenv("PREFECT_DB_MIN_POOL", 1)) # Allow tuning pool size
-MAX_POOL_CONN = int(os.getenv("PREFECT_DB_MAX_POOL", 5)) # Allow tuning pool size
+MAX_POOL_CONN = int(os.getenv("PREFECT_DB_MAX_POOL", 15)) # Allow tuning pool size
 
 def initialize_db_pool():
     """Initializes the psycopg2 connection pool."""

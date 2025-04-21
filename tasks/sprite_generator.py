@@ -83,24 +83,21 @@ SPRITE_FPS = 24
 SPRITE_COLS = 5
 
 # Add concurrency limit example if needed for resource management
-@task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45) # Add task_run_concurrency_limit=N here if needed
+@task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45)
 def generate_sprite_sheet_task(clip_id: int):
-    """
-    Generates a sprite sheet for a given clip, uploads it to S3,
-    and updates the clip's DB record with the path and metadata.
-    Transitions state from 'pending_sprite_generation' to 'pending_review'.
-    Uses advisory lock and handles skips gracefully.
-    """
     logger = get_run_logger()
     logger.info(f"TASK [SpriteGen]: Starting for clip_id: {clip_id}")
     conn = None
     temp_dir_obj = None
     clip_data = {}
     task_outcome = "failed" # Default outcome status
-    final_db_state = "sprite_generation_failed" # Default DB state on failure
-    error_message = None # Store error message for DB update
-    sprite_s3_key = None # Keep track of generated key
-    task_skipped = False # Flag to indicate early skip
+    # Define intended state *on success* separately
+    intended_success_state = "pending_review"
+    # Keep default failure state for error handling
+    default_failure_state = "sprite_generation_failed"
+    error_message = None
+    sprite_s3_key = None
+    task_skipped = False
 
     # --- Dependency Checks ---
     if not s3_client:
@@ -113,27 +110,21 @@ def generate_sprite_sheet_task(clip_id: int):
          logger.warning("ffprobe command not found in PATH. Metadata extraction will be limited.")
          # Decide if this is fatal or just a warning based on requirements
 
-
     try:
-        # Use pooled connection
-        conn = get_db_connection(cursor_factory=extras.DictCursor) # Use DictCursor for easier access
-        conn.autocommit = False # Manual transaction control
-
+        conn = get_db_connection(cursor_factory=extras.DictCursor)
+        conn.autocommit = False
         temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_spritegen_{clip_id}_")
         temp_dir = Path(temp_dir_obj.name)
-        # logger.debug(f"Using temporary directory: {temp_dir}") # Reduce noise
 
         # === DB Check, Lock, and State Update ===
         try:
-            with conn.cursor() as cur: # Use the connection's cursor directly
+            with conn.cursor() as cur:
                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
-                # logger.debug(f"Acquired lock for clip {clip_id}") # Reduce noise
                 cur.execute(
                     """
                     SELECT clip_filepath, clip_identifier, start_time_seconds, end_time_seconds,
                            source_video_id, ingest_state, start_frame, end_frame
-                    FROM clips
-                    WHERE id = %s FOR UPDATE;
+                    FROM clips WHERE id = %s FOR UPDATE;
                     """, (clip_id,)
                 )
                 clip_data = cur.fetchone()
@@ -143,26 +134,21 @@ def generate_sprite_sheet_task(clip_id: int):
                 current_state = clip_data['ingest_state']
                 if current_state != 'pending_sprite_generation':
                     logger.warning(f"Clip {clip_id} not in 'pending_sprite_generation' state (state: {current_state}). Skipping.")
-                    task_skipped = True # Set the skip flag
-                    task_outcome = "skipped"
-                    conn.rollback() # Release lock, no changes needed
-                    # No need to set final_db_state here, as we are skipping DB update
-                    return {"status": "skipped", "reason": f"Incorrect state: {current_state}"} # Early exit
+                    task_skipped = True
+                    task_outcome = "skipped" # Set outcome for finally block
+                    conn.rollback()
+                    return {"status": "skipped", "reason": f"Incorrect state: {current_state}"}
 
                 if not clip_data['clip_filepath']: raise ValueError("Clip filepath missing.")
-
-                # Set state to 'generating_sprite'
                 cur.execute("UPDATE clips SET ingest_state = 'generating_sprite', updated_at = NOW() WHERE id = %s", (clip_id,))
                 logger.info(f"Set clip {clip_id} state to 'generating_sprite'")
-            conn.commit() # Commit state change
-            # logger.debug("Initial check/state update committed.") # Reduce noise
-
+            conn.commit()
         except (ValueError, psycopg2.DatabaseError) as db_err:
             logger.error(f"DB Error during initial check/update for sprite gen: {db_err}", exc_info=True)
             if conn: conn.rollback()
             error_message = f"DB Init Error: {db_err}"
-            # final_db_state remains 'sprite_generation_failed'
-            raise # Re-raise to fail the task immediately
+            # task_outcome remains 'failed'
+            raise
 
         # === Main Processing ===
         clip_s3_key = clip_data['clip_filepath']
@@ -264,16 +250,18 @@ def generate_sprite_sheet_task(clip_id: int):
 
 
         # --- Generate Sprite Sheet ---
-        # (Keep sprite sheet generation logic, ffmpeg command construction)
         num_sprite_frames = math.ceil(duration * SPRITE_FPS)
-        # logger.info(f"Targeting {num_sprite_frames} frames for sprite sheet (Duration: {duration:.2f}s, Sprite FPS: {SPRITE_FPS})")
+        sprite_metadata = None # Initialize sprite_metadata
+        current_target_state = default_failure_state # Assume failure unless explicitly successful
 
         if num_sprite_frames <= 0:
-            logger.warning(f"Clip {clip_id} duration too short or calculated sprite frames zero ({num_sprite_frames}). Skipping sprite sheet generation.")
-            final_db_state = "pending_review" # Move to review without sprite
+            logger.warning(f"Clip {clip_id} duration too short ({num_sprite_frames} frames). Skipping sprite sheet generation.")
+            # Set state for the final DB update
+            current_target_state = intended_success_state # Will move to review without sprite
             sprite_s3_key = None
             sprite_metadata = None
-            task_outcome = "success_no_sprite" # Indicate success but no sprite generated
+            # Set outcome for the finally block
+            task_outcome = "success_no_sprite"
         else:
             # (Keep filename, path, S3 key generation)
             sprite_filename = f"{sanitize_filename(clip_identifier)}_sprite_{SPRITE_FPS}fps_c{SPRITE_COLS}.jpg"
@@ -358,105 +346,114 @@ def generate_sprite_sheet_task(clip_id: int):
                 calculated_tile_height = None # Store actual NULL
 
             sprite_metadata = {
-                "tile_width": SPRITE_TILE_WIDTH, # The target width for scaling
-                "tile_height_calculated": calculated_tile_height, # Store validated height or NULL
-                "cols": SPRITE_COLS, # Store the config value used
-                "rows": num_rows,
-                "total_sprite_frames": num_sprite_frames, # Frames *in the sprite*
-                "clip_fps": fps, # Original clip FPS
-                "clip_total_frames": total_frames_in_clip # Frames *in the original clip*
-            }
-            logger.info(f"Final sprite metadata for DB: {json.dumps(sprite_metadata)}") # Log the JSON being sent
-
+                 "tile_width": SPRITE_TILE_WIDTH,
+                 "tile_height_calculated": calculated_tile_height, # Already handles None case
+                 "cols": SPRITE_COLS,
+                 "rows": num_rows,
+                 "total_sprite_frames": num_sprite_frames,
+                 "clip_fps": fps,
+                 "clip_total_frames": total_frames_in_clip
+             }
+            logger.info(f"Final sprite metadata for DB: {json.dumps(sprite_metadata)}")
             logger.info(f"Sprite sheet generated and uploaded for clip {clip_id}.")
-            final_state = "pending_review" # Success state
+            # Set state for the final DB update
+            current_target_state = intended_success_state # Set to success state
+
+            # IMPORTANT: task_outcome is set *after* successful commit below
 
         # === Final DB Update (only if not skipped) ===
         try:
             with conn.cursor() as cur:
-                 # No need to re-lock if transaction is still active
-                 # cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,)) # Lock already held if not skipped
-
                  # Update state, sprite path, metadata, clear error
+                 # Use the determined current_target_state
                  cur.execute(
                      """
                      UPDATE clips
-                     SET ingest_state = %s,
+                     SET ingest_state = %s,  -- Use the correct target state
                          sprite_sheet_filepath = %s,
                          sprite_metadata = %s::jsonb,
                          updated_at = NOW(),
-                         last_error = NULL -- Clear error on success/no_sprite
-                     WHERE id = %s AND ingest_state = 'generating_sprite'; -- Ensure we only update if still generating
+                         last_error = NULL
+                     WHERE id = %s AND ingest_state = 'generating_sprite';
                      """,
-                     (final_db_state, sprite_s3_key, json.dumps(sprite_metadata) if sprite_metadata else None, clip_id)
+                     (current_target_state, sprite_s3_key, json.dumps(sprite_metadata) if sprite_metadata else None, clip_id)
                  )
                  rows_updated = cur.rowcount
                  if rows_updated == 0:
                       logger.warning(f"Final DB update affected 0 rows for clip {clip_id}. State might have changed unexpectedly.")
-                      # This could happen if another process somehow changed the state after 'generating_sprite'
-                      # Rollback this attempt? Or let it commit nothing? Let's rollback to be safe.
                       conn.rollback()
-                      task_outcome = "failed_db_update_state_mismatch"
+                      # Keep task_outcome as 'failed' (or previous state if success_no_sprite)
                       error_message = "DB state changed before final update"
+                      # If it was 'success_no_sprite', revert outcome? Let's keep it simple: if update fails, it's a failure.
+                      task_outcome = "failed_db_update_state_mismatch"
                  else:
                       conn.commit() # Commit the final successful update
-                      logger.info(f"Successfully updated clip {clip_id} to state '{final_db_state}' with sprite key '{sprite_s3_key}'.")
+                      logger.info(f"Successfully updated clip {clip_id} to state '{current_target_state}' with sprite key '{sprite_s3_key}'.")
+                      # ** Set task outcome ONLY AFTER successful commit **
+                      if task_outcome != "success_no_sprite": # Don't overwrite success_no_sprite
+                          task_outcome = "success"
 
         except (psycopg2.DatabaseError, psycopg2.OperationalError) as db_err:
             logger.error(f"DB Error during final update for sprite gen: {db_err}", exc_info=True)
             if conn: conn.rollback()
-            task_outcome = "failed_db_update"
-            final_db_state = 'sprite_generation_failed' # Ensure DB reflects failure if possible
+            task_outcome = "failed_db_update" # Mark as specific failure
             error_message = f"DB Final Update Error: {db_err}"
-            # We need to try and update the state to failed outside this failed transaction
-            # This is handled by the main except block below
+            # Let the main error handler below deal with setting DB state to failure
+            raise # Re-raise to trigger main error handler
 
 
     # === Main Error Handling ===
     except Exception as e:
         logger.error(f"TASK FAILED [SpriteGen]: clip_id {clip_id} - {e}", exc_info=True)
         task_outcome = "failed" # Ensure outcome is marked as failed
-        final_db_state = 'sprite_generation_failed' # Target state on failure
-        if not error_message: # Store the exception if not already set
+        # Use the default failure state for the DB update attempt
+        db_state_on_failure = default_failure_state
+        if not error_message:
              error_message = f"SpriteGen Task Error: {type(e).__name__}: {str(e)[:450]}"
 
-        # Attempt to update DB state to failed outside the main transaction
-        if conn: conn.rollback() # Rollback any partial work from try block
+        # Attempt to update DB state to failed
+        if conn: conn.rollback() # Rollback any partial work
         error_conn = None
         try:
-             # Get a new connection or reuse if pool handles recovery
              error_conn = get_db_connection()
-             error_conn.autocommit = True # Use autocommit for simple error update
+             error_conn.autocommit = True
              with error_conn.cursor() as err_cur:
                  err_cur.execute(
                      """
                      UPDATE clips SET ingest_state = %s, last_error = %s, updated_at = NOW()
                      WHERE id = %s AND ingest_state IN ('generating_sprite', 'pending_sprite_generation');
                      """,
-                     (final_db_state, error_message, clip_id)
+                     (db_state_on_failure, error_message, clip_id)
                  )
-             logger.info(f"Attempted to set clip {clip_id} state to '{final_db_state}' after error.")
+             logger.info(f"Attempted to set clip {clip_id} state to '{db_state_on_failure}' after error.")
         except Exception as db_err_update:
-             logger.error(f"CRITICAL: Failed to update error state in DB for clip {clip_id} after main task failure: {db_err_update}")
+             logger.error(f"CRITICAL: Failed to update error state in DB for clip {clip_id}: {db_err_update}")
         finally:
              if error_conn:
-                 release_db_connection(error_conn) # Release the error connection
+                 release_db_connection(error_conn)
 
-        # Reraise the original exception for Prefect to mark the task as failed
+        # Reraise the original exception for Prefect
         raise e
 
     finally:
         # --- Final Logging based on Outcome ---
+        # Use the *actual final* task_outcome for logging decision
         log_message = f"TASK [SpriteGen] Result: clip_id={clip_id}, outcome={task_outcome}"
-        if task_outcome == "success":
-            log_message += f", new_state={final_db_state}, sprite_key={sprite_s3_key}"
-        elif task_outcome == "success_no_sprite":
-             log_message += f", new_state={final_db_state} (no sprite generated)"
+
+        # Determine the state that *should* be in the DB based on the outcome
+        final_state_logged = ""
+        if task_outcome == "success" or task_outcome == "success_no_sprite":
+            final_state_logged = intended_success_state # Should be pending_review
+            log_message += f", new_state={final_state_logged}"
+            if task_outcome == "success": log_message += f", sprite_key={sprite_s3_key}"
+            else: log_message += " (no sprite generated)"
         elif task_outcome == "skipped":
              log_message += " (skipped due to initial state check)"
-        elif task_outcome.startswith("failed"):
-             log_message += f", final_state_attempted={final_db_state}, error='{error_message}'"
+        else: # All failure types
+             final_state_logged = default_failure_state # Should be sprite_generation_failed
+             log_message += f", final_state_attempted={final_state_logged}, error='{error_message}'"
 
+        # Log with appropriate level
         if task_outcome.startswith("failed"):
              logger.error(log_message)
         elif task_outcome == "skipped":
@@ -467,23 +464,13 @@ def generate_sprite_sheet_task(clip_id: int):
 
         # --- Resource Cleanup ---
         if conn:
-             # Release connection obtained at the start
-             # Ensure autocommit is reset if necessary (though pool might handle this)
-             try:
-                 conn.autocommit = True # Reset before releasing
-             except psycopg2.ProgrammingError: # Handle case where connection might be closed
-                 pass
-             except AttributeError: # Handle case where conn object is None or unexpected type
-                  pass
+             try: conn.autocommit = True
+             except: pass
              release_db_connection(conn)
-             # logger.debug(f"DB connection released for sprite gen task, clip_id: {clip_id}") # Reduce noise
-
         if temp_dir_obj:
-            try:
-                shutil.rmtree(temp_dir_obj.name, ignore_errors=True)
-                # logger.debug(f"Cleaned up temporary directory: {temp_dir_obj.name}") # Reduce noise
-            except Exception as cleanup_err:
-                 logger.warning(f"Error during cleanup of temp dir {temp_dir_obj.name}: {cleanup_err}")
+            try: shutil.rmtree(temp_dir_obj.name, ignore_errors=True)
+            except Exception as cleanup_err: logger.warning(f"Error during cleanup: {cleanup_err}")
 
-    # Return a dictionary reflecting the outcome
-    return {"status": task_outcome, "sprite_sheet_key": sprite_s3_key, "final_db_state": final_db_state, "error": error_message}
+
+    # Return outcome dictionary
+    return {"status": task_outcome, "sprite_sheet_key": sprite_s3_key, "final_db_state": final_state_logged, "error": error_message}
