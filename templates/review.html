@@ -16,9 +16,19 @@
             opacity: 1;
             transition: opacity 0.5s ease-out;
         }
-        .clip-review-item.processing, .clip-review-item.done {
+        .clip-review-item.processing { /* Keep pointer-events for processing */
             opacity: 0.5;
-            pointer-events: none; /* Disable interactions when processing/done */
+            pointer-events: none; /* Disable interactions ONLY when actively processing */
+        }
+        .clip-review-item.done { /* Only apply visual indication for done */
+            opacity: 0.6; /* Slightly faded to show it's 'done' */
+            /* REMOVE pointer-events: none; from here */
+        }
+        .clip-review-item.done .undo-button {
+             /* Explicitly allow interaction AND make it fully visible */
+             pointer-events: auto; /* Allow clicks on the undo button */
+             opacity: 1;           /* Ensure it's not faded like the rest */
+             cursor: pointer;      /* Ensure correct cursor */
         }
         .clip-info { margin-bottom: 10px; font-size: 0.9em; color: #555; }
         .clip-actions button { margin: 5px; padding: 8px 12px; cursor: pointer; }

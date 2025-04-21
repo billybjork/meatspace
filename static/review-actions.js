@@ -1,14 +1,31 @@
 /**
  * Makes API calls for clip actions and provides basic UI feedback.
+ * Manages UI states like 'processing' and 'done'.
  */
 
-// Helper to show feedback and manage button state
+// Note: The `lastUndoableClipId` state itself is now managed in review-main.js
+// This file receives the `setLastUndoableClipId` function as an argument where needed.
+
+// --- Helper Functions ---
+
+/**
+ * Displays feedback messages in the designated area for a clip item.
+ * @param {HTMLElement} feedbackDiv - The DOM element to display feedback in.
+ * @param {string} message - The message to display.
+ * @param {boolean} [isError=false] - Whether the message represents an error.
+ */
 function showFeedback(feedbackDiv, message, isError = false) {
     if (!feedbackDiv) return;
     feedbackDiv.textContent = message;
     feedbackDiv.className = `action-feedback ${isError ? 'error' : 'success'}`;
 }
 
+/**
+ * Adds or removes the 'processing' class to visually indicate activity.
+ * Disables interactions via CSS while processing.
+ * @param {HTMLElement} clipItem - The main container element for the clip review item.
+ * @param {boolean} isProcessing - Whether the item is currently being processed.
+ */
 function setProcessingState(clipItem, isProcessing) {
     if (!clipItem) return;
     if (isProcessing) {
@@ -18,6 +35,12 @@ function setProcessingState(clipItem, isProcessing) {
     }
 }
 
+/**
+ * Adds or removes the 'done' class to visually indicate completion.
+ * Used for styling and potentially hiding the undo button after a delay.
+ * @param {HTMLElement} clipItem - The main container element for the clip review item.
+ * @param {boolean} isDone - Whether the action on the item is considered done.
+ */
 function setDoneState(clipItem, isDone) {
      if (!clipItem) return;
      if (isDone) {
@@ -29,14 +52,31 @@ function setDoneState(clipItem, isDone) {
 
 // --- API Action Handlers ---
 
-async function handleAction(clipId, action, clipItem, feedbackDiv, undoButton) {
-    if (!clipItem || !feedbackDiv || !undoButton) return;
+/**
+ * Handles standard clip actions like approve, skip, archive, merge, retry.
+ * Now makes ALL successful actions undoable via the UI button.
+ * @param {string} clipId - The database ID of the clip.
+ * @param {string} action - The action being performed (e.g., 'skip', 'archive').
+ * @param {HTMLElement} clipItem - The clip item's container element.
+ * @param {HTMLElement} feedbackDiv - The element for displaying feedback messages.
+ * @param {HTMLElement} undoButton - The undo button element for this clip.
+ * @param {function(string|null)} setLastUndoableClipId - Function to update the globally tracked undoable clip ID.
+ * @returns {Promise<{success: boolean, result?: any, error?: Error}>} - Promise resolving with action result.
+ */
+async function handleAction(clipId, action, clipItem, feedbackDiv, undoButton, setLastUndoableClipId) {
+    // Validate essential arguments
+    if (!clipId || !action || !clipItem || !feedbackDiv || !undoButton || typeof setLastUndoableClipId !== 'function') {
+         console.error("handleAction called with missing or invalid arguments.", { clipId, action, clipItem, feedbackDiv, undoButton, setLastUndoableClipId });
+         if(feedbackDiv) showFeedback(feedbackDiv, "Internal error: Missing arguments for action.", true);
+         return { success: false, error: new Error("Missing arguments for handleAction") };
+    }
 
-    console.log(`Action API: ${action} on Clip ID: ${clipId}`);
+    // console.log(`Action API: ${action} on Clip ID: ${clipId}`); // Debugging removed
     setProcessingState(clipItem, true);
-    setDoneState(clipItem, false); // Ensure not marked done initially
+    setDoneState(clipItem, false);
     showFeedback(feedbackDiv, 'Processing...');
-    undoButton.style.display = 'none'; // Hide undo during processing
+    undoButton.style.display = 'none'; // Ensure hidden initially
+    setLastUndoableClipId(null); // Clear previous undo target
 
     const payload = { action: action };
 
@@ -50,45 +90,63 @@ async function handleAction(clipId, action, clipItem, feedbackDiv, undoButton) {
         if (!response.ok) throw new Error(result.detail || `HTTP error! status: ${response.status}`);
 
         let feedbackMsg = `Success: Marked as ${result.new_state}.`;
-        if (action === 'approve' || action === 'archive') {
-            feedbackMsg += ' Item will disappear on refresh.';
-        }
+        // Removed specific feedback message change for approve/archive as they are now undoable too
         showFeedback(feedbackDiv, feedbackMsg, false);
         setDoneState(clipItem, true); // Mark as done on success
 
-        // Show undo only if not archived or approved
-        if (action !== 'approve' && action !== 'archive') {
-            undoButton.style.display = 'inline-block';
-             setTimeout(() => {
-                 // Check if still 'done' before hiding (might have been undone)
-                 if (clipItem.classList.contains('done') && undoButton.style.display !== 'none') {
-                    undoButton.style.display = 'none';
-                }
-              }, 15000); // 15 sec undo window
-        }
+        // --- Modified Logic: Show Undo for ALL successful actions ---
+        undoButton.style.display = 'inline-block'; // Attempt to show
+        setLastUndoableClipId(clipId); // Track this clip for potential Ctrl+Z undo
+        // --- End Modified Logic ---
+
+        // Set timeout to hide the undo button after a delay
+        setTimeout(() => {
+            const currentClipItem = document.getElementById(`clip-${clipId}`);
+            if (currentClipItem && currentClipItem.classList.contains('done')) {
+                 const currentUndoButton = currentClipItem.querySelector('.undo-button');
+                 // Check computed style for visibility
+                 if (currentUndoButton && window.getComputedStyle(currentUndoButton).display !== 'none') {
+                      // console.log(`Hiding undo button for clip ${clipId} after timeout.`); // Debugging removed
+                      currentUndoButton.style.display = 'none'; // Hide it again
+                 }
+            }
+         }, 15000); // 15 second undo window
+
         return { success: true, result: result };
 
     } catch (error) {
         console.error(`Action API failed for ${action} on ${clipId}:`, error);
         showFeedback(feedbackDiv, `Error: ${error.message}`, true);
-        setDoneState(clipItem, false); // Ensure not marked done on error
-        // Optionally allow undo again on failure?
-        // undoButton.style.display = 'inline-block';
-         return { success: false, error: error };
+        setDoneState(clipItem, false);
+        return { success: false, error: error };
     } finally {
         setProcessingState(clipItem, false);
     }
 }
 
+/**
+ * Handles the Undo action for a clip.
+ * @param {string} clipId - The database ID of the clip to undo.
+ * @param {HTMLElement} clipItem - The clip item's container element.
+ * @param {HTMLElement} feedbackDiv - The element for displaying feedback messages.
+ * @param {HTMLElement} undoButton - The undo button element for this clip.
+ * @param {function(string|null)} setLastUndoableClipId - Function to update the globally tracked undoable clip ID.
+ * @returns {Promise<{success: boolean, result?: any, error?: Error}>} - Promise resolving with undo result.
+ */
+async function handleUndo(clipId, clipItem, feedbackDiv, undoButton, setLastUndoableClipId) {
+     // Validate essential arguments
+    if (!clipId || !clipItem || !feedbackDiv || !undoButton || typeof setLastUndoableClipId !== 'function') {
+         console.error("handleUndo called with missing or invalid arguments.", { clipId, clipItem, feedbackDiv, undoButton, setLastUndoableClipId });
+          if(feedbackDiv) showFeedback(feedbackDiv, "Internal error: Missing arguments for undo.", true);
+         return { success: false, error: new Error("Missing arguments for handleUndo") };
+    }
 
-async function handleUndo(clipId, clipItem, feedbackDiv, undoButton) {
-    if (!clipItem || !feedbackDiv || !undoButton) return;
-
-    console.log(`Undo API on Clip ID: ${clipId}`);
+    // console.log(`Undo API on Clip ID: ${clipId}`); // Debugging removed
     setProcessingState(clipItem, true);
-    setDoneState(clipItem, false); // Remove done state during undo
+    setDoneState(clipItem, false);
     showFeedback(feedbackDiv, 'Undoing...');
-    undoButton.style.display = 'none';
+    undoButton.style.display = 'none'; // Hide undo button immediately
+    setLastUndoableClipId(null); // Clear the global undo target
 
     try {
         const response = await fetch(`/api/clips/${clipId}/undo`, {
@@ -98,33 +156,47 @@ async function handleUndo(clipId, clipItem, feedbackDiv, undoButton) {
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || `HTTP error! status: ${response.status}`);
 
-        showFeedback(feedbackDiv, `Success: Reverted to ${result.new_state}. Refresh page.`, false);
-        // Don't re-add 'done' class after undo
-        // Undo button remains hidden
+        showFeedback(feedbackDiv, `Success: Reverted to ${result.new_state}. Refresh page recommended.`, false);
+        // Undo button remains hidden.
 
         return { success: true, result: result };
 
     } catch (error) {
         console.error(`Undo API failed for ${clipId}:`, error);
         showFeedback(feedbackDiv, `Undo Error: ${error.message}`, true);
-        // Show undo button again if undo fails?
-         undoButton.style.display = 'inline-block';
-         return { success: false, error: error };
+        return { success: false, error: error };
     } finally {
         setProcessingState(clipItem, false);
     }
 }
 
-async function queueSplit(clipId, frame, clipItem, feedbackDiv, splitControlsElement) {
-    if (!clipItem || !feedbackDiv || !splitControlsElement) return;
+/**
+ * Handles the action of queueing a clip for splitting. (Already treated as undoable)
+ * @param {string} clipId - The database ID of the clip.
+ * @param {number} frame - The frame number at which to split the clip.
+ * @param {HTMLElement} clipItem - The clip item's container element.
+ * @param {HTMLElement} feedbackDiv - The main feedback element for the clip item.
+ * @param {HTMLElement} splitControlsElement - The container for the split controls UI.
+ * @param {HTMLElement} undoButton - The undo button element for this clip.
+ * @param {function(string|null)} setLastUndoableClipId - Function to update the globally tracked undoable clip ID.
+ * @returns {Promise<{success: boolean, result?: any, error?: Error}>} - Promise resolving with split queue result.
+ */
+async function queueSplit(clipId, frame, clipItem, feedbackDiv, splitControlsElement, undoButton, setLastUndoableClipId) {
+    // Validate essential arguments
+    if (!clipId || typeof frame !== 'number' || !clipItem || !feedbackDiv || !splitControlsElement || !undoButton || typeof setLastUndoableClipId !== 'function') {
+        console.error("queueSplit called with missing or invalid arguments.", { clipId, frame, clipItem, feedbackDiv, splitControlsElement, undoButton, setLastUndoableClipId });
+        if(feedbackDiv) showFeedback(feedbackDiv, "Internal error: Missing arguments for split.", true);
+         return { success: false, error: new Error("Missing arguments for queueSplit") };
+    }
 
-    console.log(`Split API on Clip ID: ${clipId} at frame: ${frame}`);
+    // console.log(`Split API on Clip ID: ${clipId} at frame: ${frame}`); // Debugging removed
     setProcessingState(clipItem, true);
     setDoneState(clipItem, false);
-    showFeedback(feedbackDiv, 'Queueing split...'); // Main feedback
+    showFeedback(feedbackDiv, 'Queueing split...');
     const splitFeedback = splitControlsElement.querySelector('.split-feedback');
     if (splitFeedback) splitFeedback.textContent = 'Queueing split...';
-
+    undoButton.style.display = 'none'; // Ensure hidden initially
+    setLastUndoableClipId(null); // Clear previous undo target
 
     const payload = { split_request_at_frame: frame };
 
@@ -137,17 +209,38 @@ async function queueSplit(clipId, frame, clipItem, feedbackDiv, splitControlsEle
         const result = await response.json();
         if (!response.ok) throw new Error(result.detail || `HTTP error! status: ${response.status}`);
 
-        showFeedback(feedbackDiv, `Success: Queued for splitting (state: ${result.new_state}). Refresh page.`, false);
-        if (splitFeedback) splitFeedback.textContent = ''; // Clear split feedback
+        showFeedback(feedbackDiv, `Success: Queued for splitting (state: ${result.new_state}). Refresh recommended.`, false);
+        if (splitFeedback) splitFeedback.textContent = '';
         setDoneState(clipItem, true);
-        splitControlsElement.style.display = 'none'; // Hide split controls on success
+        splitControlsElement.style.display = 'none';
+
+        // --- Undo Logic for Split (No Debugging) ---
+        undoButton.style.display = 'inline-block'; // Attempt to show
+        setLastUndoableClipId(clipId); // Track this clip for potential Ctrl+Z undo
+
+        // Set timeout to hide the undo button after a delay
+         setTimeout(() => {
+             const currentClipItem = document.getElementById(`clip-${clipId}`);
+             if (currentClipItem && currentClipItem.classList.contains('done')) {
+                 const currentUndoButton = currentClipItem.querySelector('.undo-button');
+                 // Check computed style for visibility
+                 if (currentUndoButton && window.getComputedStyle(currentUndoButton).display !== 'none') {
+                      // console.log(`Hiding undo button for clip ${clipId} after split timeout.`); // Debugging removed
+                      currentUndoButton.style.display = 'none'; // Hide it again
+                 }
+             }
+         }, 15000); // 15 second undo window
+        // --- END: Undo Logic for Split ---
 
         return { success: true, result: result };
 
     } catch (error) {
-        console.error('Split API failed:', error);
-        showFeedback(feedbackDiv, `Split Error: ${error.message}`, true); // Show in main feedback
-        if (splitFeedback) splitFeedback.textContent = `Error: ${error.message}`; // Show in split feedback too
+        console.error(`Split API failed for clip ${clipId}:`, error);
+        showFeedback(feedbackDiv, `Split Error: ${error.message}`, true);
+        if (splitFeedback) {
+             splitFeedback.textContent = `Error: ${error.message}`;
+             splitFeedback.style.color = '#d00';
+         }
         setDoneState(clipItem, false);
          return { success: false, error: error };
     } finally {
