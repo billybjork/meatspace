@@ -699,8 +699,13 @@ def intake_task(source_video_id: int,
 
     finally:
         # --- Final Logging and Cleanup ---
-        log_level = "info" if task_outcome == "success" else "error"
-        logger.log(log_level, f"TASK [Intake] finished for ID {source_video_id}. Outcome: {task_outcome}.")
+        import logging
+
+        # Determine the correct integer log level
+        numeric_log_level = logging.INFO if task_outcome == "success" else logging.ERROR
+
+        # Use the numeric level with logger.log
+        logger.log(numeric_log_level, f"TASK [Intake] finished for ID {source_video_id}. Outcome: {task_outcome}.")
 
         # Release initial connection if obtained and not closed
         if conn:
