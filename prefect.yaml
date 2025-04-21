@@ -27,17 +27,18 @@ deployments:
   # --- NEW DEPLOYMENT FOR CLEANUP ---
   - name: scheduled-clip-cleanup
     description: Periodically cleans up sprites for approved/archived clips after a delay.
-    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Path to the new flow function
+    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Path to the new ASYNC flow function
     work_pool:
       name: default-agent-pool # Target the same pool (or a different one if needed)
       work_queue_name: default
       # job_variables: # Optional overrides
         # image: "your-dockerhub-username/meatspace-ingest:latest"
     schedule:
-      # Example Cron: Run every 15 minutes
+      # Example Cron: Run every 15 minutes (adjust as needed)
       cron: "*/15 * * * *"
       # Example Interval: Run every 900 seconds (15 minutes)
       # interval: 900
-      # timezone: "UTC" # Optional, but recommended
+      timezone: "UTC" # Recommended
     tags: ["cleanup", "scheduled", "maintenance"]
     parameters: {} # Add parameters here if you make `cleanup_delay_minutes` a flow parameter
+    # is_async: True # Prefect detects async flows automatically based on the function definition
