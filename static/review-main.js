@@ -223,27 +223,27 @@ document.addEventListener('DOMContentLoaded', () => {
             if (splitControls) splitControls.style.display = 'none';
             if (splitModeBtn) {
                 splitModeBtn.style.display = 'inline-block';
+                // Re-enable based on sprite validity, assuming it doesn't change while in split mode
                 splitModeBtn.disabled = !(window.spritePlayer?.meta?.isValid);
             }
 
+            // Re-enable buttons, respecting their *initial* disabled state from the template
+            // Re-enable buttons, respecting their *initial* disabled state from the template
             allActionButtons.forEach(btn => {
-                 const mergeBtn = actionButtons['merge_previous']; // Use cached button
-                 const groupBtn = actionButtons['group_previous'];
-                 if(btn === mergeBtn || btn === groupBtn) { 
-                     const templateDisabled = mergeBtn.getAttribute('disabled') !== null;
-                     btn.disabled = templateDisabled;
-                 } else if (btn.classList.contains('retry-sprite-btn')) {
-                     const spriteErrorMsg = clipItem.querySelector('.clip-info strong[style*="color:orange"]');
-                     btn.disabled = !spriteErrorMsg;
-                 }
-                 else {
-                     btn.disabled = false;
-                 }
-            });
+                // Check if the button was likely disabled by the template's logic
+                // by checking the specific 'title' attribute text.
+                const isDisabledByTemplate = btn.disabled &&
+                   (btn.title.includes("not available or not in an actionable state") || // Check for the combined title
+                    btn.title.includes("Sprite unavailable or failed")); // Check for sprite issue title
+
+                if (!isDisabledByTemplate) {
+                    btn.disabled = false; // Only re-enable if it wasn't disabled by template logic
+                }
+           });
 
             window.spritePlayer?.viewerElement?.focus();
             console.log(`[Main ${currentClipId}] Split mode cancelled.`);
-            updateActiveButtonState(); // Update button state
+            updateActiveButtonState(); // Update button active visual state
         }
 
         function updateSplitUI(clipId, frameNumber, meta) {

@@ -83,48 +83,55 @@ async def review_clips_ui(
             prev_state = record_dict.get('previous_clip_state')
             log.info(f"Checking merge/group for clip {record_dict['id']}: Previous ID = {prev_id}, Previous State = '{prev_state}'")
 
-            # Define states the *previous* clip must be in to allow merging or grouping
-            valid_previous_action_states = {'pending_review', 'review_skipped'} # Keep simple for now
+            # Define states the *previous* clip must be in for EITHER MERGING OR GROUPING
+            # Use the EXPANDED set now for both actions as requested
+            valid_previous_action_states = {
+                'pending_review', 'review_skipped',
+                'approved_pending_deletion', 'review_approved', # If you use review_approved
+                'archived_pending_deletion', 'archived',         # If you use archived
+                'grouped_complete' # Can group/merge with an already grouped clip
+            }
 
+            # Calculate ONE flag based on the unified logic
             can_action_previous = (
                  prev_id is not None and
                  prev_state in valid_previous_action_states
             )
-            log.info(f"Result: can_action_previous = {can_action_previous} (Prev ID exists: {prev_id is not None}, Prev State valid: {prev_state in valid_previous_action_states})")
-            record_dict['can_action_previous'] = can_action_previous # Used by both merge and group buttons
+
+            log.info(f"Result: can_action_previous = {can_action_previous}")
+            # Add the single flag to the dictionary
+            record_dict['can_action_previous'] = can_action_previous
 
             formatted = format_clip_data(record_dict, request)
             if formatted:
                  sprite_path = record_dict.get('sprite_sheet_filepath')
                  formatted['sprite_sheet_url'] = f"https://{CLOUDFRONT_DOMAIN}/{sprite_path}" if CLOUDFRONT_DOMAIN and sprite_path else sprite_path
-                 # Ensure sprite_metadata is passed as a dictionary if it exists
                  sprite_meta_db = record_dict.get('sprite_metadata')
-                 if isinstance(sprite_meta_db, str): # Handle if stored as string accidentally
+                 if isinstance(sprite_meta_db, str):
                      try: formatted['sprite_metadata'] = json.loads(sprite_meta_db)
                      except json.JSONDecodeError: formatted['sprite_metadata'] = None
-                 else: formatted['sprite_metadata'] = sprite_meta_db # Assume it's dict/None
+                 else: formatted['sprite_metadata'] = sprite_meta_db
 
                  formatted['sprite_error'] = record_dict['ingest_state'] == 'sprite_generation_failed'
-                 formatted['can_action_previous'] = can_action_previous # Add flag for merge/group buttons
+                 # Pass the single flag to the template context
+                 formatted['can_action_previous'] = can_action_previous
                  formatted['current_state'] = record_dict['ingest_state']
-                 formatted['previous_clip_id'] = record_dict.get('previous_clip_id') # Pass previous ID if needed by JS/template
+                 formatted['previous_clip_id'] = record_dict.get('previous_clip_id')
                  clip_to_review = formatted
 
     except asyncpg.exceptions.UndefinedTableError as e:
          log.error(f"ERROR accessing DB tables fetching review clips: {e}", exc_info=True)
          error_message = f"Database table error: {e}. Please check application setup."
-    # Specific catch for syntax errors during development is helpful
     except asyncpg.exceptions.PostgresSyntaxError as e:
          log.error(f"ERROR in SQL syntax fetching review clips: {e}", exc_info=True)
          error_message = f"Database syntax error: {e}. Please check the SQL query in review.py."
     except Exception as e:
-        # Log the full error and traceback
         log.error(f"Error fetching clip for review: {e}", exc_info=True)
         error_message = "Failed to load clip for review due to a server error."
 
     return templates.TemplateResponse("review.html", {
         "request": request,
-        "clip": clip_to_review, # Pass single clip or None
+        "clip": clip_to_review, # Pass single clip or None (contains the single flag)
         "error": error_message,
         "CLOUDFRONT_DOMAIN": CLOUDFRONT_DOMAIN
     })
@@ -168,8 +175,14 @@ async def handle_clip_action(
     if action == 'retry_sprite_gen':
          allowed_source_states = ['sprite_generation_failed']
 
-    # States the PREVIOUS clip must be in to allow merging or grouping into/with it
-    valid_previous_action_states = {'pending_review', 'review_skipped'}
+    # States the PREVIOUS clip must be in to allow merging OR grouping into/with it
+    # ***** THIS IS THE KEY FIX FOR THE 409 ERROR *****
+    valid_previous_action_states = {
+        'pending_review', 'review_skipped',
+        'approved_pending_deletion', 'review_approved', # If you use review_approved
+        'archived_pending_deletion', 'archived',         # If you use archived
+        'grouped_complete' # Can group/merge with an already grouped clip
+    }
 
     lock_id_current = 2 # Advisory lock category for current clip
     lock_id_previous = 3 # Advisory lock category for previous clip (use different category)
@@ -192,7 +205,7 @@ async def handle_clip_action(
             current_source_video_id = current_clip_data['source_video_id']
             current_start_time = current_clip_data['start_time_seconds']
 
-            # --- Check Allowed Source State ---
+            # --- Check Allowed Source State (for current clip) ---
             if current_state not in allowed_source_states:
                  log.warning(f"Action '{action}' rejected for clip {clip_db_id}. Current state '{current_state}'.")
                  raise HTTPException(status_code=409, detail=f"Action '{action}' cannot be performed from state '{current_state}'.")
@@ -221,26 +234,25 @@ async def handle_clip_action(
                 await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id_previous, previous_clip_id)
                 log.debug(f"Acquired lock ({lock_id_previous}, {previous_clip_id}) for {action} target.")
 
-                # Re-verify previous clip state *after* lock
+                # Re-verify previous clip state *after* lock using the CORRECT (expanded) set of states
                 previous_clip_state_locked = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1 FOR UPDATE", previous_clip_id)
-                if previous_clip_state_locked not in valid_previous_action_states:
-                     log.warning(f"{action.capitalize()} rejected: Previous clip {previous_clip_id} is in state '{previous_clip_state_locked}'.")
+                if previous_clip_state_locked not in valid_previous_action_states: # *** USES THE CORRECT SET NOW ***
+                     log.warning(f"{action.capitalize()} rejected: Previous clip {previous_clip_id} is in state '{previous_clip_state_locked}'. Allowed: {valid_previous_action_states}")
                      raise HTTPException(status_code=409, detail=f"Cannot {action.split('_')[0]}: The previous clip is in state '{previous_clip_state_locked}'.")
 
                 # === Handle MERGE Previous ===
                 if action == "merge_previous":
+                    # ... (merge logic remains the same) ...
                     current_metadata = {"merge_target_clip_id": previous_clip_id}
                     previous_metadata = {"merge_source_clip_id": clip_db_id}
                     target_state_previous_clip = "pending_merge_target"
 
-                    # Update CURRENT clip (N) to 'marked_for_merge_into_previous'
                     result_current = await conn.execute(
                          """UPDATE clips SET ingest_state = $1, updated_at = NOW(), last_error = NULL,
                             processing_metadata = $2::jsonb, reviewed_at = NOW()
                             WHERE id = $3 AND ingest_state = ANY($4::text[])""",
                          target_state, current_metadata, clip_db_id, allowed_source_states
                     )
-                    # Update PREVIOUS clip (N-1) to 'pending_merge_target'
                     result_previous = await conn.execute(
                         """UPDATE clips SET ingest_state = $1, updated_at = NOW(), last_error = NULL,
                            processing_metadata = $2::jsonb
@@ -261,7 +273,6 @@ async def handle_clip_action(
                             WHERE id = $3 AND ingest_state = ANY($4::text[])""",
                          target_state_for_group, previous_clip_id, clip_db_id, allowed_source_states
                     )
-                    # Update PREVIOUS clip (N-1) to 'grouped_complete'
                     result_previous = await conn.execute(
                         """UPDATE clips SET
                                ingest_state = $1, updated_at = NOW(),
@@ -271,21 +282,18 @@ async def handle_clip_action(
                         target_state_for_group, previous_clip_id, previous_clip_state_locked
                     )
 
-                # Check results for both merge and group
+                # Check results (remains the same)
                 rows_affected_current = int(result_current.split()[-1])
                 rows_affected_previous = int(result_previous.split()[-1])
 
                 if rows_affected_current > 0:
-                    updated_id = clip_db_id # Mark current clip update as successful
+                    updated_id = clip_db_id
                     update_succeeded = True
                     if rows_affected_previous == 0:
                         log.warning(f"Previous clip {previous_clip_id} state changed during {action} action. Current clip {clip_db_id} was updated.")
-                        # Don't raise an error, the primary action succeeded
                 else:
-                    # Current clip update failed (state changed concurrently?)
                     current_state_after = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id) or "NOT FOUND"
                     log.warning(f"Failed to update current clip {clip_db_id} for {action} action. State might have changed concurrently. Current: {current_state_after}")
-                    # Let the final check below raise the 409
 
             # --- Handle Other Actions (Approve, Skip, Archive, Retry) ---
             else:

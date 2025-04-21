@@ -292,8 +292,10 @@
                     <button class="action-btn approve-btn" data-action="approve" title="Approve (A + Enter)">✅ Approve</button>
                     <button class="action-btn skip-btn" data-action="skip" title="Skip (S + Enter)">⏭️ Skip</button>
                     <button class="action-btn archive-btn" data-action="archive" title="Archive (D + Enter)">🗑️ Archive</button>
-                    <button class="action-btn merge-previous-btn" data-action="merge_previous" {% if not clip.can_merge_previous %}disabled title="Previous clip not available or not in a mergeable state"{% else %}title="Merge WITH Previous (Cmd/Ctrl + F + Enter)"{% endif %}>🖇️ Merge w/ Prev</button>
-                    <button class="action-btn group-previous-btn" data-action="group_previous" {% if not clip.can_merge_previous %}disabled title="Previous clip not available or not in a groupable state"{% else %}title="Group WITH Previous (G + Enter)"{% endif %}>🔗 Group w/ Prev</button>
+                    {# Use SINGLE flag for Merge button #}
+                    <button class="action-btn merge-previous-btn" data-action="merge_previous" {% if not clip.can_action_previous %}disabled title="Previous clip not available or not in an actionable state"{% else %}title="Merge WITH Previous (F + Enter)"{% endif %}>🖇️ Merge w/ Prev</button>
+                    {# Use SINGLE flag for Group button #}
+                    <button class="action-btn group-previous-btn" data-action="group_previous" {% if not clip.can_action_previous %}disabled title="Previous clip not available or not in an actionable state"{% else %}title="Group WITH Previous (G + Enter)"{% endif %}>🔗 Group w/ Prev</button>
 
                     <button class="action-btn split-mode-btn"
                             data-action="enter_split_mode"
