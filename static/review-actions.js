@@ -3,9 +3,6 @@
  * Manages UI states like 'processing' and 'done'.
  */
 
-// Note: The `lastUndoableClipId` state itself is now managed in review-main.js
-// This file receives the `setLastUndoableClipId` function as an argument where needed.
-
 // --- Helper Functions ---
 
 /**
@@ -54,7 +51,7 @@ function setDoneState(clipItem, isDone) {
 
 /**
  * Handles standard clip actions like approve, skip, archive, merge, retry.
- * Now makes ALL successful actions undoable via the UI button.
+ * Makes ALL successful actions undoable via the UI button.
  * @param {string} clipId - The database ID of the clip.
  * @param {string} action - The action being performed (e.g., 'skip', 'archive').
  * @param {HTMLElement} clipItem - The clip item's container element.
@@ -71,7 +68,6 @@ async function handleAction(clipId, action, clipItem, feedbackDiv, undoButton, s
          return { success: false, error: new Error("Missing arguments for handleAction") };
     }
 
-    // console.log(`Action API: ${action} on Clip ID: ${clipId}`); // Debugging removed
     setProcessingState(clipItem, true);
     setDoneState(clipItem, false);
     showFeedback(feedbackDiv, 'Processing...');
@@ -90,14 +86,11 @@ async function handleAction(clipId, action, clipItem, feedbackDiv, undoButton, s
         if (!response.ok) throw new Error(result.detail || `HTTP error! status: ${response.status}`);
 
         let feedbackMsg = `Success: Marked as ${result.new_state}.`;
-        // Removed specific feedback message change for approve/archive as they are now undoable too
         showFeedback(feedbackDiv, feedbackMsg, false);
         setDoneState(clipItem, true); // Mark as done on success
 
-        // --- Modified Logic: Show Undo for ALL successful actions ---
         undoButton.style.display = 'inline-block'; // Attempt to show
         setLastUndoableClipId(clipId); // Track this clip for potential Ctrl+Z undo
-        // --- End Modified Logic ---
 
         // Set timeout to hide the undo button after a delay
         setTimeout(() => {
@@ -106,7 +99,6 @@ async function handleAction(clipId, action, clipItem, feedbackDiv, undoButton, s
                  const currentUndoButton = currentClipItem.querySelector('.undo-button');
                  // Check computed style for visibility
                  if (currentUndoButton && window.getComputedStyle(currentUndoButton).display !== 'none') {
-                      // console.log(`Hiding undo button for clip ${clipId} after timeout.`); // Debugging removed
                       currentUndoButton.style.display = 'none'; // Hide it again
                  }
             }
@@ -141,7 +133,6 @@ async function handleUndo(clipId, clipItem, feedbackDiv, undoButton, setLastUndo
          return { success: false, error: new Error("Missing arguments for handleUndo") };
     }
 
-    // console.log(`Undo API on Clip ID: ${clipId}`); // Debugging removed
     setProcessingState(clipItem, true);
     setDoneState(clipItem, false);
     showFeedback(feedbackDiv, 'Undoing...');
@@ -189,7 +180,6 @@ async function queueSplit(clipId, frame, clipItem, feedbackDiv, splitControlsEle
          return { success: false, error: new Error("Missing arguments for queueSplit") };
     }
 
-    // console.log(`Split API on Clip ID: ${clipId} at frame: ${frame}`); // Debugging removed
     setProcessingState(clipItem, true);
     setDoneState(clipItem, false);
     showFeedback(feedbackDiv, 'Queueing split...');
@@ -214,7 +204,7 @@ async function queueSplit(clipId, frame, clipItem, feedbackDiv, splitControlsEle
         setDoneState(clipItem, true);
         splitControlsElement.style.display = 'none';
 
-        // --- Undo Logic for Split (No Debugging) ---
+        // --- Undo Logic for Split ---
         undoButton.style.display = 'inline-block'; // Attempt to show
         setLastUndoableClipId(clipId); // Track this clip for potential Ctrl+Z undo
 
@@ -225,12 +215,10 @@ async function queueSplit(clipId, frame, clipItem, feedbackDiv, splitControlsEle
                  const currentUndoButton = currentClipItem.querySelector('.undo-button');
                  // Check computed style for visibility
                  if (currentUndoButton && window.getComputedStyle(currentUndoButton).display !== 'none') {
-                      // console.log(`Hiding undo button for clip ${clipId} after split timeout.`); // Debugging removed
                       currentUndoButton.style.display = 'none'; // Hide it again
                  }
              }
          }, 15000); // 15 second undo window
-        // --- END: Undo Logic for Split ---
 
         return { success: true, result: result };
 

@@ -55,11 +55,10 @@ try:
     print(f"Successfully initialized S3 client for bucket: {S3_BUCKET_NAME} in region: {AWS_REGION or 'default'}")
 except NoCredentialsError:
     print("ERROR: AWS credentials not found. Configure AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, or use IAM roles/profiles.")
-    # Consider if you want to raise here or let the task fail later
-    # raise RuntimeError("AWS credentials not found.")
+    raise RuntimeError("AWS credentials not found.")
 except Exception as e:
     print(f"ERROR initializing S3 client: {e}")
-    # raise RuntimeError(f"Failed to initialize S3 client: {e}")
+    raise RuntimeError(f"Failed to initialize S3 client: {e}")
 
 
 # --- Helper Function for External Commands ---
@@ -328,7 +327,7 @@ def intake_task(source_video_id: int,
                 def error(self, msg): logger.error(f"yt-dlp error: {msg}")
                 def info(self, msg): logger.info(f"yt-dlp: {msg}") # Add prefix for clarity
 
-            # --- Enhanced Progress Hook ---
+            # --- Progress Hook ---
             def ytdlp_progress_hook(d):
                 if d['status'] == 'downloading':
                     percent_str = d.get('_percent_str', '').strip()
@@ -635,7 +634,22 @@ def intake_task(source_video_id: int,
 
         # === Successful Completion ===
         logger.info(f"TASK [Intake]: Successfully processed source_video_id: {source_video_id}. Final S3 key: {s3_object_key}")
-        return {"status": "success", "s3_key": s3_object_key, "metadata": metadata}
+
+        # --- ADD DETAILED LOGGING OF RETURN VALUE ---
+        logger.info(f"--- Inspecting return value for ID {source_video_id} ---")
+        logger.info(f"Status: '{task_outcome}' (Type: {type(task_outcome)})")
+        logger.info(f"S3 Key: '{s3_object_key}' (Type: {type(s3_object_key)})")
+        logger.info("Metadata Contents:")
+        final_return_value = {"status": task_outcome, "s3_key": s3_object_key, "metadata": metadata}
+        if metadata is not None:
+            for k, v in metadata.items():
+                logger.info(f"  Meta Key: '{k}', Value: '{v}', Type: {type(v)}")
+        else:
+            logger.info("  Metadata is None.")
+        logger.info("--- End Inspection ---")
+        # --- END DETAILED LOGGING ---
+
+        return final_return_value # Return the constructed dict
 
     # === Main Exception Handling ===
     except Exception as e:

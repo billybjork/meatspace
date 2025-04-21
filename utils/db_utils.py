@@ -5,7 +5,7 @@ from psycopg2.extras import RealDictCursor
 from psycopg2 import pool
 from dotenv import load_dotenv
 from prefect import get_run_logger
-import time # For retry logic
+import time
 
 try:
     dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
@@ -56,7 +56,7 @@ def get_db_connection(cursor_factory=None):
         initialize_db_pool() # Attempt lazy initialization
         if db_pool is None: # Check again after attempt
              logger.error("DB Pool initialization failed. Cannot get connection.")
-             raise ConnectionError("Database connection pool is not available.") # Use a more specific error
+             raise ConnectionError("Database connection pool is not available.") # TODO: Use a more specific error
 
     conn = None
     retries = 3
@@ -101,27 +101,8 @@ def release_db_connection(conn):
             except Exception as close_err:
                  logger.error(f"Failed to close problematic connection {id(conn)}: {close_err}")
 
-# --- Query Logic ---
 
-def get_items_by_state(table: str, state: str) -> list[int]:
-    """DEPRECATED (potentially): Use get_items_for_processing instead to avoid race conditions."""
-    logger = get_run_logger()
-    logger.warning(f"Calling deprecated get_items_by_state for table '{table}', state '{state}'. Consider using get_items_for_processing.")
-    # Keep original logic for now if needed elsewhere, but log warning
-    items = []
-    conn = None
-    try:
-        conn = get_db_connection()
-        with conn.cursor() as cur:
-            query = sql.SQL("SELECT id FROM {} WHERE ingest_state = %s ORDER BY id ASC").format(sql.Identifier(table))
-            cur.execute(query, (state,))
-            items = [row[0] for row in cur.fetchall()]
-    except Exception as e:
-        logger.error(f"DB Error in get_items_by_state ('{table}', '{state}'): {e}", exc_info=True)
-    finally:
-        if conn:
-            release_db_connection(conn) # Use pool release
-    return items
+# --- Query Logic ---
 
 def get_items_for_processing(table: str, ready_state: str, processing_states: list[str]) -> list[int]:
     """
@@ -183,7 +164,6 @@ def get_pending_merge_pairs() -> list[tuple[int, int]]:
     logger = get_run_logger()
     merge_pairs = []
     conn = None
-    # logger.debug("Querying for pending merge pairs...") # Reduce noise
     try:
         conn = get_db_connection() # Get from pool
         with conn.cursor() as cur:
@@ -234,7 +214,6 @@ def get_pending_split_jobs() -> list[tuple[int, int]]:
     logger = get_run_logger()
     split_jobs = []
     conn = None
-    # logger.debug("Querying for pending split jobs...") # Reduce noise
     try:
         # Use RealDictCursor to easily access JSON field by name
         conn = get_db_connection(cursor_factory=RealDictCursor) # Get from pool

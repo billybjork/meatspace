@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import traceback
 import time
-from datetime import timedelta # Import timedelta for cleanup flow
+from datetime import timedelta
 
 # --- Project Root Setup ---
 project_root = Path(__file__).parent.parent.resolve()
@@ -16,7 +16,6 @@ from prefect import flow, get_run_logger, task
 from prefect.futures import wait
 
 # --- Task Imports ---
-# Ensure all task modules are correctly referenced based on your project structure
 from tasks.intake import intake_task
 from tasks.splice import splice_video_task
 from tasks.sprite_generator import generate_sprite_sheet_task
@@ -26,15 +25,12 @@ from tasks.merge import merge_clips_task
 from tasks.split import split_clip_task
 
 # --- DB Util Imports ---
-# Ensure all DB utils are correctly referenced
 from utils.db_utils import (
     get_items_for_processing,
     get_source_input_from_db,
     get_pending_merge_pairs,
     get_pending_split_jobs,
-    get_db_connection, # Import get_db_connection for direct use
-    initialize_db_pool, # Potentially needed for standalone execution
-    close_db_pool       # Potentially needed for standalone execution
+    get_db_connection
 )
 
 # --- S3 Import (Needed for cleanup flow) ---
@@ -58,14 +54,13 @@ except ImportError as e:
 
 
 # --- Configuration ---
-# Fetch configuration from environment variables with defaults
+#TODO: Add as env variables
 DEFAULT_KEYFRAME_STRATEGY = os.getenv("DEFAULT_KEYFRAME_STRATEGY", "midpoint")
 DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "openai/clip-vit-base-patch32")
 DEFAULT_EMBEDDING_STRATEGY_LABEL = f"keyframe_{DEFAULT_KEYFRAME_STRATEGY}"
 TASK_SUBMIT_DELAY = float(os.getenv("TASK_SUBMIT_DELAY", 0.1)) # Delay between submitting tasks
 KEYFRAME_TIMEOUT = int(os.getenv("KEYFRAME_TIMEOUT", 600)) # 10 minutes default timeout
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900)) # 15 minutes default timeout
-# --- New Config for Cleanup ---
 CLIP_CLEANUP_DELAY_MINUTES = int(os.getenv("CLIP_CLEANUP_DELAY_MINUTES", 30)) # Wait time before cleaning up
 
 
@@ -244,10 +239,8 @@ def scheduled_ingest_initiator():
             logger.info(f"[{stage_name}] Found {len(clips_to_process)} finalized approved clips. Initiating post-review flows...")
             for cid in clips_to_process:
                 try:
-                    # --- MODIFIED LINE ---
                     # Submit the WRAPPER TASK instead of the flow directly
                     submit_post_review_flow_task.submit(clip_id=cid)
-                    # --- END MODIFIED LINE ---
 
                     logger.debug(f"[{stage_name}] Submitted task to trigger process_clip_post_review sub-flow for clip_id: {cid}")
                     time.sleep(TASK_SUBMIT_DELAY)
