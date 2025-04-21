@@ -1,19 +1,43 @@
 # Generic project metadata
 name: meatspace-ingest
-prefect-version: 3
+prefect-version: 3 # Specify your Prefect version
 
-# Define how deployments are built (currently using default)
+# Define how deployments are built (can be null if using `prefect deploy --all`)
 build: null
 
 # Define deployments
 deployments:
   - name: scheduled-ingest-dispatcher
+    description: Periodically checks DB for new ingest work and triggers tasks/flows.
     entrypoint: flows/ingest_flows.py:scheduled_ingest_initiator # Path to file:flow_function
     work_pool:
-      name: default-agent-pool # Target work pool
-      work_queue_name: default # Target work queue
+      name: default-agent-pool # Target work pool for your agent
+      work_queue_name: default # Target work queue (optional, defaults often work)
+      # job_variables: # Optional: Define infrastructure overrides, like image name for Docker
+        # image: "your-dockerhub-username/meatspace-ingest:latest"
     schedule:
-      interval: 60 # Run every 1 minute
-    tags: ["ingest", "scheduled"]
-    description: Periodically checks DB for new ingest work and triggers tasks.
-    parameters: {} # Add if the flow takes parameters (later)
+      # Run every minute
+      interval: 60
+      # Example Cron: Run every 5 minutes
+      # cron: "*/5 * * * *"
+      # timezone: "UTC" # Optional, but recommended
+    tags: ["ingest", "scheduled", "dispatcher"]
+    parameters: {} # Flow parameters (if any)
+
+  # --- NEW DEPLOYMENT FOR CLEANUP ---
+  - name: scheduled-clip-cleanup
+    description: Periodically cleans up sprites for approved/archived clips after a delay.
+    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Path to the new flow function
+    work_pool:
+      name: default-agent-pool # Target the same pool (or a different one if needed)
+      work_queue_name: default
+      # job_variables: # Optional overrides
+        # image: "your-dockerhub-username/meatspace-ingest:latest"
+    schedule:
+      # Example Cron: Run every 15 minutes
+      cron: "*/15 * * * *"
+      # Example Interval: Run every 900 seconds (15 minutes)
+      # interval: 900
+      # timezone: "UTC" # Optional, but recommended
+    tags: ["cleanup", "scheduled", "maintenance"]
+    parameters: {} # Add parameters here if you make `cleanup_delay_minutes` a flow parameter
