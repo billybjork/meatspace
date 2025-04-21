@@ -38,219 +38,264 @@ api_router = APIRouter(
 @ui_router.get("/review", response_class=HTMLResponse, name="review_clips")
 async def review_clips_ui(
     request: Request,
-    conn: asyncpg.Connection = Depends(get_db_connection),
-    limit: int = Query(10, ge=1, le=50) # Limit how many clips to review at once
+    conn: asyncpg.Connection = Depends(get_db_connection)
 ):
-    """Serves the HTML page for reviewing clips."""
+    """Serves the HTML page for reviewing a single clip."""
     templates = request.app.state.templates
-    clips_to_review = []
+    clip_to_review = None
     error_message = None
+
     try:
-        # Fetch clips for review. Included intermediate states for now,
-        # they will disappear once the cleanup task finalizes them.
-        # Adjust the WHERE clause based on exactly which states you want visible in the queue.
-        records = await conn.fetch(
+        # Fetch the *next* single clip for review, including previous clip info
+        record = await conn.fetchrow(
             """
-            WITH OrderedClips AS (
+            WITH ClipWithLag AS (
                 SELECT
                     c.id, c.clip_identifier, c.clip_filepath, c.keyframe_filepath,
                     c.start_time_seconds, c.end_time_seconds, c.source_video_id,
                     c.ingest_state, c.processing_metadata, c.last_error,
-                    c.sprite_sheet_filepath, c.sprite_metadata, -- Fetch sprite info
+                    c.sprite_sheet_filepath, c.sprite_metadata,
                     sv.title as source_title,
-                    -- Look ahead to the next clip in the sequence for merge context
-                    LEAD(c.id) OVER w as next_clip_id,
-                    LEAD(c.ingest_state) OVER w as next_clip_state
+                    -- Look *behind* to the previous clip in the sequence for merge context
+                    LAG(c.id) OVER w as previous_clip_id,
+                    LAG(c.ingest_state) OVER w as previous_clip_state
                 FROM clips c
                 JOIN source_videos sv ON c.source_video_id = sv.id
                 WINDOW w AS (PARTITION BY c.source_video_id ORDER BY c.start_time_seconds, c.id)
             )
             SELECT *
-            FROM OrderedClips
+            FROM ClipWithLag
             WHERE ingest_state IN (
-                'pending_review',           -- Primary state
-                'sprite_generation_failed', -- Needs review/retry
-                'review_skipped',           -- Still needs attention
-                'merge_failed',             -- Needs re-review
-                'split_failed',             -- Needs re-review
-                'keyframe_failed',          -- Needs review/retry
-                'embedding_failed'          -- Needs review/retry
-                -- Intermediate states are NOT included here by default,
-                -- so they disappear from the queue immediately after action,
-                -- but are still undoable before cleanup runs.
-                -- Add them below if you WANT them visible while pending deletion:
-                -- 'approved_pending_deletion',
-                -- 'archived_pending_deletion'
-             )
-            ORDER BY source_video_id, start_time_seconds, id
-            LIMIT $1;
-            """,
-            limit
+                'pending_review',
+                'sprite_generation_failed',
+                'merge_failed',
+                'split_failed',
+                'keyframe_failed',
+                'embedding_failed'
+                -- Exclude review_skipped, and intermediate/final states like pending_deletion, approved, archived
+            )
+            ORDER BY source_video_id, start_time_seconds, id -- Ensure consistent ordering
+            LIMIT 1;
+            """
         )
 
-        # States the *next* clip can be in for merging. Keep simple for now.
-        valid_merge_target_states = {'pending_review', 'review_skipped', 'sprite_generation_failed'}
+        if record:
+            record_dict = dict(record)
+            prev_id = record_dict.get('previous_clip_id')
+            prev_state = record_dict.get('previous_clip_state')
+            log.info(f"Checking merge for clip {record_dict['id']}: Previous ID = {prev_id}, Previous State = '{prev_state}'") # <-- ADD LOGGING
 
-        for record in records:
-            record_dict = dict(record) # Convert asyncpg record to dict
+            # Define states the *previous* clip must be in to allow merging
+            valid_merge_source_states = {'pending_review', 'review_skipped'}
 
-            # Determine merge possibility based on next clip's state
-            can_merge = (
-                 record_dict.get('next_clip_id') is not None and
-                 record_dict.get('next_clip_state') in valid_merge_target_states
+            can_merge_previous = (
+                prev_id is not None and
+                prev_state in valid_merge_source_states
             )
-            record_dict['can_merge_next'] = can_merge
+            log.info(f"Result: can_merge_previous = {can_merge_previous} (Prev ID exists: {prev_id is not None}, Prev State valid: {prev_state in valid_merge_source_states})") # <-- ADD DETAILED LOGGING
 
-            # Use the service function to format basic data
+            record_dict['can_merge_previous'] = can_merge_previous
+
             formatted = format_clip_data(record_dict, request)
             if formatted:
-                 # Add sprite-specific data
                  sprite_path = record_dict.get('sprite_sheet_filepath')
                  formatted['sprite_sheet_url'] = f"https://{CLOUDFRONT_DOMAIN}/{sprite_path}" if CLOUDFRONT_DOMAIN and sprite_path else sprite_path
-
-                 formatted['sprite_metadata'] = record_dict.get('sprite_metadata') # Pass metadata (should be dict if JSONB)
-                 formatted['sprite_error'] = record_dict['ingest_state'] == 'sprite_generation_failed' # Flag for UI / sprite failure
-                 formatted['can_merge_next'] = can_merge # Ensure merge flag is present
-                 # Add current state for potential UI indication (optional)
+                 formatted['sprite_metadata'] = record_dict.get('sprite_metadata')
+                 formatted['sprite_error'] = record_dict['ingest_state'] == 'sprite_generation_failed'
+                 formatted['can_merge_previous'] = can_merge_previous # Add merge flag
                  formatted['current_state'] = record_dict['ingest_state']
-                 clips_to_review.append(formatted)
+                 formatted['previous_clip_id'] = record_dict.get('previous_clip_id') # Pass previous ID if needed by JS/template
+                 clip_to_review = formatted
 
     except asyncpg.exceptions.UndefinedTableError as e:
          log.error(f"ERROR accessing DB tables fetching review clips: {e}", exc_info=True)
          error_message = f"Database table error: {e}. Please check application setup."
     except Exception as e:
-        log.error(f"Error fetching clips for review: {e}", exc_info=True)
-        error_message = "Failed to load clips for review due to a server error."
+        log.error(f"Error fetching clip for review: {e}", exc_info=True)
+        error_message = "Failed to load clip for review due to a server error."
 
     return templates.TemplateResponse("review.html", {
         "request": request,
-        "clips": clips_to_review,
+        "clip": clip_to_review, # Pass single clip or None
         "error": error_message,
-        "CLOUDFRONT_DOMAIN": CLOUDFRONT_DOMAIN # Pass domain for potential JS use
+        "CLOUDFRONT_DOMAIN": CLOUDFRONT_DOMAIN
     })
 
 
 # --- Clip Action API Routes ---
 
+# --- Clip Action API Route (Handles Merge Previous) ---
 @api_router.post("/{clip_db_id}/action", name="clip_action", status_code=200)
 async def handle_clip_action(
     clip_db_id: int = Path(..., description="Database ID of the clip", gt=0),
     payload: ClipActionPayload = Body(...),
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
-    """
-    Handles user actions: approve/archive now go to intermediate states
-    ('approved_pending_deletion', 'archived_pending_deletion') without
-    immediate sprite deletion. Other actions proceed as before.
-    """
     action = payload.action
     log.info(f"API: Received action '{action}' for clip_db_id: {clip_db_id}")
 
     target_state = None
+    previous_clip_id = None # Needed for merge_previous
 
-    # Map actions to target states, including intermediates
+    # Map actions to target states
     action_to_state = {
-        "approve": "approved_pending_deletion", # Intermediate state
+        "approve": "approved_pending_deletion",
         "skip": "review_skipped",
-        "archive": "archived_pending_deletion",   # Intermediate state
-        "merge_next": "pending_merge_with_next",
-        "retry_sprite_gen": "pending_sprite_generation", # Retry failed sprite generation
+        "archive": "archived_pending_deletion",
+        "merge_previous": "marked_for_merge_into_previous", # New state for current clip
+        "retry_sprite_gen": "pending_sprite_generation",
     }
     target_state = action_to_state.get(action)
 
     if not target_state:
         raise HTTPException(status_code=400, detail=f"Invalid action specified: {action}")
 
-    # Define states from which actions are allowed to start
     allowed_source_states = [
-        'pending_review', 'review_skipped',
-        'merge_failed', 'split_failed',
-        'keyframe_failed', 'embedding_failed',
-        'sprite_generation_failed' # Allow acting on failed sprite gen
+        'pending_review', 'review_skipped', 'merge_failed', 'split_failed',
+        'keyframe_failed', 'embedding_failed', 'sprite_generation_failed'
     ]
-
-    # Build SET clauses dynamically
-    set_clauses = ["ingest_state = $1", "updated_at = NOW()", "last_error = NULL"]
-    params = [target_state]
-
-    # Clear processing metadata unless specifically needed by the target state
-    if action not in ["merge_next", "pending_split"]: # Keep metadata for merge/split requests
-         set_clauses.append("processing_metadata = NULL")
-
-    # Handle specific actions
-    # Set reviewed_at timestamp for approve/archive, but DO NOT nullify sprite fields here
-    if action in ["approve", "archive"]:
-        set_clauses.append("reviewed_at = NOW()")
-
     if action == 'retry_sprite_gen':
-         # Only allow retry from the specific failed state
          allowed_source_states = ['sprite_generation_failed']
 
-    set_sql = ", ".join(set_clauses)
-    lock_id = 2 # Advisory lock category for clips
+    # States the PREVIOUS clip must be in to allow merging into it
+    valid_merge_source_states = {'pending_review', 'review_skipped'}
+
+    lock_id_current = 2 # Advisory lock category for current clip
+    lock_id_previous = 3 # Advisory lock category for previous clip (use different category)
 
     try:
         async with conn.transaction():
-            # Acquire advisory lock for the specific clip ID
-            await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id, clip_db_id)
-            log.debug(f"Acquired lock ({lock_id}, {clip_db_id}) for action '{action}'.")
+            # --- Acquire Lock(s) ---
+            await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id_current, clip_db_id)
+            log.debug(f"Acquired lock ({lock_id_current}, {clip_db_id}) for action '{action}'.")
 
-            # Verify current state *after* acquiring lock (don't need sprite path here anymore)
-            current_state = await conn.fetchval(
-                "SELECT ingest_state FROM clips WHERE id = $1 FOR UPDATE", # Add FOR UPDATE
+            # --- Fetch Current Clip State ---
+            current_clip_data = await conn.fetchrow(
+                """SELECT ingest_state, processing_metadata, source_video_id, start_time_seconds
+                   FROM clips WHERE id = $1 FOR UPDATE""", # Add FOR UPDATE
                 clip_db_id
             )
-
-            if not current_state:
+            if not current_clip_data:
                 raise HTTPException(status_code=404, detail="Clip not found.")
+            current_state = current_clip_data['ingest_state']
 
-            # Check if action is allowed from current state
+            # --- Check Allowed Source State ---
             if current_state not in allowed_source_states:
-                 log.warning(f"Action '{action}' rejected for clip {clip_db_id}. Current state '{current_state}' not in allowed states: {allowed_source_states}.")
-                 raise HTTPException(status_code=409, detail=f"Action '{action}' cannot be performed from the clip's current state ('{current_state}'). Please refresh.")
+                 log.warning(f"Action '{action}' rejected for clip {clip_db_id}. Current state '{current_state}'.")
+                 raise HTTPException(status_code=409, detail=f"Action '{action}' cannot be performed from state '{current_state}'.")
 
-            # Construct the final query
-            query_params = params + [clip_db_id, allowed_source_states]
-            query = f"""
-                UPDATE clips SET {set_sql}
-                WHERE id = ${len(params) + 1} AND ingest_state = ANY(${len(params) + 2}::text[])
-                RETURNING id;
-            """
-            log.debug(f"Executing Action Query: {query} with params: {query_params}")
-            updated_id = await conn.fetchval(query, *query_params)
+            updated_id = None
+            update_query = ""
+            query_params = []
 
-            if updated_id is None:
-                # Re-fetch state to confirm (optional, but good for logging)
+            # --- Handle Merge Previous Action ---
+            if action == "merge_previous":
+                # Find the previous clip's ID within the same source video
+                previous_clip_record = await conn.fetchrow(
+                    """
+                    SELECT id, ingest_state
+                    FROM clips
+                    WHERE source_video_id = $1 AND start_time_seconds < $2
+                    ORDER BY start_time_seconds DESC, id DESC
+                    LIMIT 1
+                    """, current_clip_data['source_video_id'], current_clip_data['start_time_seconds']
+                )
+
+                if not previous_clip_record:
+                    raise HTTPException(status_code=400, detail="No preceding clip found to merge with.")
+
+                previous_clip_id = previous_clip_record['id']
+                previous_clip_state = previous_clip_record['ingest_state']
+
+                # Lock the previous clip
+                await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id_previous, previous_clip_id)
+                log.debug(f"Acquired lock ({lock_id_previous}, {previous_clip_id}) for merge target.")
+
+                # Re-verify previous clip state *after* lock
+                previous_clip_state_locked = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1 FOR UPDATE", previous_clip_id)
+                if previous_clip_state_locked not in valid_merge_source_states:
+                     log.warning(f"Merge rejected: Previous clip {previous_clip_id} is in state '{previous_clip_state_locked}', not mergeable.")
+                     raise HTTPException(status_code=409, detail=f"Cannot merge: The previous clip is in state '{previous_clip_state_locked}'.")
+
+                # Prepare metadata for both clips
+                current_metadata = {"merge_target_clip_id": previous_clip_id}
+                previous_metadata = {"merge_source_clip_id": clip_db_id}
+                target_state_previous_clip = "pending_merge_target" # New state for the target
+
+                # Update CURRENT clip (N)
+                await conn.execute(
+                     """UPDATE clips SET ingest_state = $1, updated_at = NOW(), last_error = NULL,
+                        processing_metadata = $2::jsonb, reviewed_at = NOW()
+                        WHERE id = $3 AND ingest_state = ANY($4::text[])""",
+                     target_state, # marked_for_merge_into_previous
+                     json.dumps(current_metadata),
+                     clip_db_id,
+                     allowed_source_states
+                )
+                # Update PREVIOUS clip (N-1)
+                await conn.execute(
+                    """UPDATE clips SET ingest_state = $1, updated_at = NOW(), last_error = NULL,
+                       processing_metadata = $2::jsonb
+                       WHERE id = $3 AND ingest_state = $4""", # Be specific with prev state check
+                    target_state_previous_clip, # pending_merge_target
+                    json.dumps(previous_metadata),
+                    previous_clip_id,
+                    previous_clip_state_locked # Ensure it didn't change between fetch and update
+                )
+                updated_id = clip_db_id # Indicate success for the original clip
+
+            # --- Handle Other Actions ---
+            else:
+                set_clauses = ["ingest_state = $1", "updated_at = NOW()", "last_error = NULL"]
+                params = [target_state]
+                if action not in ["merge_previous", "pending_split"]: # Clear metadata unless needed
+                     set_clauses.append("processing_metadata = NULL")
+                if action in ["approve", "archive"]: # Keep reviewed_at logic
+                    set_clauses.append("reviewed_at = NOW()")
+
+                set_sql = ", ".join(set_clauses)
+                query_params = params + [clip_db_id, allowed_source_states]
+                query = f"""
+                    UPDATE clips SET {set_sql}
+                    WHERE id = ${len(params) + 1} AND ingest_state = ANY(${len(params) + 2}::text[])
+                    RETURNING id;
+                """
+                log.debug(f"Executing Action Query: {query} with params: {query_params}")
+                updated_id = await conn.fetchval(query, *query_params)
+
+
+            # --- Final Check and Response ---
+            if updated_id is None and action != 'merge_previous': # Merge updates manually checked
                 current_state_after = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id) or "NOT FOUND"
-                log.warning(f"Failed to update clip {clip_db_id} with action '{action}'. State might have changed. Current state: {current_state_after}")
-                raise HTTPException(status_code=409, detail="Clip state changed while processing the action. Please refresh and try again.")
+                log.warning(f"Failed to update clip {clip_db_id} with action '{action}'. Current state: {current_state_after}")
+                raise HTTPException(status_code=409, detail="Clip state changed. Please refresh.")
+            elif action == 'merge_previous' and not updated_id:
+                # This case indicates the update for clip N failed during merge setup, should be caught by transaction
+                log.error(f"Critical error during merge setup for clip {clip_db_id} and {previous_clip_id}. Transaction should roll back.")
+                raise HTTPException(status_code=500, detail="Failed to initiate merge.")
 
-            # If successful, the transaction commits automatically upon exiting 'async with'
+            # Transaction commits automatically
 
-        log.info(f"API: Successfully updated clip {clip_db_id} state to '{target_state}' via action '{action}'")
-        # Use JSONResponse (no background task needed)
+        log.info(f"API: Successfully processed action '{action}' for clip {clip_db_id}. New state: '{target_state}'.")
         return JSONResponse(
             content={"status": "success", "clip_id": clip_db_id, "new_state": target_state}
         )
 
-    except UniqueViolationError as e:
-         log.error(f"DB unique constraint error during clip action for {clip_db_id}: {e}", exc_info=True)
-         raise HTTPException(status_code=409, detail=f"Database constraint violated: {e}")
     except HTTPException:
-         raise # Re-raise HTTP exceptions directly
-    except (PostgresError, psycopg2.Error) as db_err: # Catch specific DB errors
+         raise # Re-raise HTTP exceptions
+    except (PostgresError, psycopg2.Error, asyncpg.PostgresError) as db_err:
          log.error(f"Database error during action '{action}' for clip {clip_db_id}: {db_err}", exc_info=True)
-         raise HTTPException(status_code=500, detail="Internal server error during database operation.")
+         raise HTTPException(status_code=500, detail="DB error.")
     except Exception as e:
         log.error(f"Unexpected error processing action '{action}' for clip {clip_db_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail=f"Internal server error processing action '{action}'.")
-    # Lock is automatically released when transaction ends (commit or rollback)
+        raise HTTPException(status_code=500, detail=f"Internal server error.")
+    # Locks released by transaction end
 
 
 @api_router.post("/{clip_db_id}/split", name="queue_clip_split", status_code=200)
 async def queue_clip_split(
-    clip_db_id: int = Path(..., description="Database ID of the clip to split", gt=0),
-    payload: SplitActionPayload = Body(...), # Use updated Pydantic model
+    clip_db_id: int = Path(..., gt=0),
+    payload: SplitActionPayload = Body(...),
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
     """
@@ -336,10 +381,10 @@ async def queue_clip_split(
                 current_state_after = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id) or "NOT FOUND"
                 raise HTTPException(status_code=409, detail="Clip state changed while queueing split. Please refresh.")
 
-            # Transaction commits automatically here
-
-        log.info(f"API: Clip {clip_db_id} successfully queued for splitting at frame {requested_split_frame}. New state: '{new_state}'.")
-        return {"status": "success", "clip_id": clip_db_id, "new_state": new_state, "message": "Clip queued for splitting."}
+            # On success:
+            log.info(f"API: Clip {clip_db_id} successfully queued for splitting at frame {payload.split_request_at_frame}. New state: 'pending_split'.")
+            return {"status": "success", "clip_id": clip_db_id, "new_state": "pending_split", "message": "Clip queued for splitting."}
+            # Frontend will reload the page
 
     except HTTPException:
         raise # Re-raise HTTP exceptions directly
@@ -352,42 +397,36 @@ async def queue_clip_split(
         raise HTTPException(status_code=500, detail="Internal server error processing split request.")
     # Lock is automatically released when transaction ends
 
+
+# --- Undo API Route (Handles Undoing Merge Previous) ---
 @api_router.post("/{clip_db_id}/undo", name="undo_clip_action", status_code=200)
 async def undo_clip_action(
     clip_db_id: int = Path(..., gt=0),
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
-    """
-    Attempts to revert a clip's state back to 'pending_review'.
-    Can now undo from the intermediate 'pending_deletion' states.
-    """
     log.info(f"API: Received UNDO request for clip_db_id: {clip_db_id}")
-
-    # Always target 'pending_review' for simplicity.
     target_state = "pending_review"
-
-    # Define states from which 'undo' is logically allowed
     allowed_undo_source_states = [
-        'review_skipped', 'pending_merge_with_next', 'pending_split',
-        'merge_failed', 'split_failed',
-        'keyframe_failed', 'embedding_failed',
-        'sprite_generation_failed',
-        'approved_pending_deletion',
-        'archived_pending_deletion',
+        'review_skipped', 'pending_split', 'merge_failed', 'split_failed',
+        'keyframe_failed', 'embedding_failed', 'sprite_generation_failed',
+        'approved_pending_deletion', 'archived_pending_deletion',
+        'marked_for_merge_into_previous', # Can undo this state
+        'pending_merge_target' # Should ideally be undone via the *other* clip
     ]
-    lock_id = 2 # Clip lock category
+    lock_id_current = 2
+    lock_id_previous = 3 # Needed if undoing merge
 
     try:
         async with conn.transaction():
-            await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id, clip_db_id)
-            log.debug(f"Acquired lock ({lock_id}, {clip_db_id}) for undo action.")
+            await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id_current, clip_db_id)
+            log.debug(f"Acquired lock ({lock_id_current}, {clip_db_id}) for undo.")
 
-            current_state = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1 FOR UPDATE", clip_db_id) # Add FOR UPDATE
+            clip_data = await conn.fetchrow("SELECT ingest_state, processing_metadata FROM clips WHERE id = $1 FOR UPDATE", clip_db_id)
 
-            if not current_state:
-                raise HTTPException(status_code=404, detail="Clip not found.")
+            if not clip_data: raise HTTPException(status_code=404, detail="Clip not found.")
+            current_state = clip_data['ingest_state']
+            current_metadata = clip_data['processing_metadata']
 
-            # Check if undo is allowed from the current state
             if current_state not in allowed_undo_source_states:
                  log.warning(f"Undo rejected for clip {clip_db_id}. Current state '{current_state}' not in allowed undo states: {allowed_undo_source_states}.")
                  # Provide more specific feedback based on state
@@ -398,44 +437,62 @@ async def undo_clip_action(
                       detail_msg = f"Clip is already in the '{target_state}' state."
                  else: # Other states like 'pending_download', etc.
                      detail_msg = f"Cannot undo from the clip's current state ('{current_state}')."
-                 raise HTTPException(status_code=409, detail=detail_msg)
+                 raise HTTPException(status_code=409, detail=f"Cannot undo from state '{current_state}'.")
 
-            # Clear specific fields when reverting, but leave sprite data intact
+            # --- Handle Undoing Merge ---
+            if current_state == 'marked_for_merge_into_previous':
+                previous_clip_id = current_metadata.get('merge_target_clip_id') if isinstance(current_metadata, dict) else None
+                if not previous_clip_id:
+                     log.error(f"Undo merge failed: Cannot find previous clip ID in metadata for clip {clip_db_id}")
+                     raise HTTPException(status_code=500, detail="Cannot undo merge: Missing data.")
+
+                # Lock previous clip
+                await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id_previous, previous_clip_id)
+                log.debug(f"Acquired lock ({lock_id_previous}, {previous_clip_id}) for undoing merge target.")
+
+                # Revert previous clip state (ensure it's still 'pending_merge_target')
+                prev_update_result = await conn.execute(
+                    """UPDATE clips SET ingest_state = $1, updated_at = NOW(), processing_metadata = NULL, last_error = $2
+                       WHERE id = $3 AND ingest_state = 'pending_merge_target'""",
+                    'pending_review', # Or potentially 'review_skipped' if we track original state? Simple for now.
+                    f'Merge cancelled by undo action on clip {clip_db_id}',
+                    previous_clip_id
+                )
+                if prev_update_result != "UPDATE 1":
+                    log.warning(f"Undo merge: Previous clip {previous_clip_id} state was not 'pending_merge_target' or update failed.")
+                    # Decide whether to proceed with undoing clip N anyway or fail the whole transaction
+                    # raise HTTPException(status_code=409, detail="Could not revert previous clip state during undo.") # Safer option
+
+            # --- Update Current Clip (Common Undo Logic) ---
+            undo_error_message = 'Reverted by user undo action'
+            if current_state == 'marked_for_merge_into_previous':
+                undo_error_message = f'Merge into clip {previous_clip_id} cancelled by user undo'
+
             updated_id = await conn.fetchval(
                 """
                 UPDATE clips
-                SET ingest_state = $1,
-                    updated_at = NOW(),
-                    reviewed_at = NULL,         -- Clear review timestamp regardless of previous state
-                    processing_metadata = NULL, -- Clear any pending action metadata
-                    last_error = $2             -- Set message indicating undo
-                    -- sprite_sheet_filepath and sprite_metadata are NOT changed
-                    -- If they existed before the action being undone, they still exist now.
-                WHERE id = $3 AND ingest_state = ANY($4::text[]) -- Use ANY for state check / Ensure state hasn't changed
+                SET ingest_state = $1, updated_at = NOW(), reviewed_at = NULL,
+                    processing_metadata = NULL, last_error = $2
+                WHERE id = $3 AND ingest_state = ANY($4::text[])
                 RETURNING id;
                 """,
-                target_state,                  # $1 'pending_review'
-                'Reverted to pending review by user undo action', # $2 last_error
-                clip_db_id,                    # $3 clip id
-                allowed_undo_source_states     # $4 allowed source states for undo
+                target_state, undo_error_message, clip_db_id, allowed_undo_source_states # Use ANY check
             )
 
             if updated_id is None:
                 current_state_after = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id) or "NOT FOUND"
-                log.warning(f"Undo failed for clip {clip_db_id}. State changed concurrently? Current state: {current_state_after}")
-                raise HTTPException(status_code=409, detail="Clip state changed while processing undo. Please refresh.")
+                raise HTTPException(status_code=409, detail="Undo failed. State changed concurrently?")
 
-            # Transaction commits automatically
+            # Transaction commits
 
         log.info(f"API: Successfully reverted clip {clip_db_id} to state '{target_state}' via undo.")
         return {"status": "success", "clip_id": clip_db_id, "new_state": target_state}
 
-    except HTTPException:
-        raise # Re-raise HTTP exceptions directly
-    except (PostgresError, psycopg2.Error) as db_err: # Catch specific DB errors
-         log.error(f"Database error during undo for clip {clip_db_id}: {db_err}", exc_info=True)
-         raise HTTPException(status_code=500, detail="Internal server error during database operation.")
+    except HTTPException: raise
+    except (PostgresError, psycopg2.Error, asyncpg.PostgresError) as db_err:
+        log.error(f"Database error during undo for clip {clip_db_id}: {db_err}", exc_info=True)
+        raise HTTPException(status_code=500, detail="DB error during undo.")
     except Exception as e:
         log.error(f"Unexpected error processing undo for clip {clip_db_id}: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="Internal server error processing undo request.")
-    # Lock is released when transaction ends
+        raise HTTPException(status_code=500, detail="Internal server error processing undo.")
+    # Locks released by transaction

@@ -3,55 +3,86 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Review Clips</title>
+    <title>Review Clip</title>
     <link rel="stylesheet" href="{{ url_for('static', path='/style.css') }}">
     <style>
-        .clip-review-item {
-            border: 1px solid #ccc;
-            margin-bottom: 20px;
-            padding: 15px;
-            background-color: #f9f9f9;
+        body {
             display: flex;
             flex-direction: column;
+            align-items: center;
+            font-family: sans-serif;
+            padding-top: 10px; /* Add some top padding */
+            background-color: #f4f4f4; /* Lighter page background */
+        }
+        .review-container {
+            max-width: 700px; /* Max width for content */
+            width: 95%; /* Responsive width */
+            margin-top: 10px;
+            background-color: #fff; /* White background for the review box */
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1); /* Subtle shadow */
+            border-radius: 5px; /* Slightly rounded corners */
+            padding: 20px; /* Inner padding */
+        }
+        .clip-review-item {
+            /* Removed border/padding here as it's now the main container */
             opacity: 1;
-            transition: opacity 0.5s ease-out;
+            transition: opacity 0.3s ease-out;
         }
-        .clip-review-item.processing { /* Keep pointer-events for processing */
-            opacity: 0.5;
-            pointer-events: none; /* Disable interactions ONLY when actively processing */
+        .clip-review-item.processing {
+            opacity: 0.5; /* Visual cue for processing */
+            /* pointer-events: none; still useful if actions aren't instant reloads */
         }
-        .clip-review-item.done { /* Only apply visual indication for done */
-            opacity: 0.6; /* Slightly faded to show it's 'done' */
+        /* Removed .done state style */
+
+        .clip-info {
+            margin-bottom: 15px; /* More space below info */
+            font-size: 0.9em;
+            color: #555;
+            border-bottom: 1px solid #eee; /* Separator line */
+            padding-bottom: 10px;
         }
-        .clip-review-item.done .undo-button {
-             /* Explicitly allow interaction AND make it fully visible */
-             pointer-events: auto; /* Allow clicks on the undo button */
-             opacity: 1;           /* Ensure it's not faded like the rest */
-             cursor: pointer;      /* Ensure correct cursor */
+        .clip-info strong { color: #333; } /* Darker title */
+        .clip-actions button {
+            margin: 5px 3px; /* Adjust margin slightly */
+            padding: 9px 14px; /* Slightly larger buttons */
+            cursor: pointer;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #f0f0f0; /* Default button color */
+            font-size: 0.95em;
+            transition: background-color 0.2s ease;
         }
-        .clip-info { margin-bottom: 10px; font-size: 0.9em; color: #555; }
-        .clip-actions button { margin: 5px; padding: 8px 12px; cursor: pointer; }
-        .action-feedback { font-style: italic; margin-top: 5px; font-size: 0.9em;}
-        .action-feedback.error { color: red; }
-        .action-feedback.success { color: green; }
-        .undo-button { background-color: #ffc107; color: black; }
+        .clip-actions button:hover:not([disabled]) {
+            background-color: #e0e0e0;
+            border-color: #bbb;
+        }
+        .action-feedback {
+            font-style: italic;
+            margin-top: 10px; /* More space above feedback */
+            font-size: 0.9em;
+            height: 1.2em; /* Reserve space */
+            text-align: center; /* Center feedback */
+        }
+        .action-feedback.error { color: #d9534f; } /* Bootstrap danger red */
+        .action-feedback.success { color: #5cb85c; } /* Bootstrap success green */
 
         /* --- Sprite Viewer Styles --- */
         .sprite-viewer {
-        background-size: cover; /* Keep default, JS overrides */
-        background-repeat: no-repeat;
-        border: 1px solid #aaa;
-        margin-bottom: 5px;
-        position: relative;
-        overflow: hidden; /* Clips the background image */
-        background-color: #222;
-        color: #eee;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-style: italic;
-        /* Add maybe a min-height just in case? */
-        /* min-height: 50px; */
+            background-size: cover; /* Keep default, JS overrides */
+            background-repeat: no-repeat;
+            border: 1px solid #aaa;
+            margin-bottom: 10px; /* More space below viewer */
+            position: relative;
+            overflow: hidden; /* Clips the background image */
+            background-color: #222; /* Dark background for contrast */
+            color: #eee;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-style: italic;
+            min-height: 90px; /* Ensure some height even when loading */
+            border-radius: 3px; /* Slight rounding */
+            /* Default size will be set by JS based on metadata */
         }
         .sprite-viewer:focus { /* Style when focused for keyboard input */
             outline: 2px solid dodgerblue;
@@ -59,157 +90,250 @@
         }
         .sprite-viewer.no-sprite {
             background-image: none !important;
-            /* Maybe give it a default size when no sprite? */
+            /* Give it a default size when no sprite */
             min-height: 100px;
             width: 160px;
+            border-style: dashed; /* Indicate missing sprite */
         }
+
+        /* --- Playback Controls --- */
         .playback-controls {
              display: flex;
              align-items: center;
              gap: 10px; /* Spacing between controls */
-             margin-bottom: 10px;
+             margin-bottom: 15px; /* More space below controls */
+        }
+        .playback-controls button {
+            padding: 5px 10px; /* Smaller play/pause */
+            font-size: 1.1em; /* Bigger icon */
         }
         .playback-controls input[type=range] {
             flex-grow: 1; /* Allow range slider to take up space */
             cursor: pointer;
+            height: 8px; /* Style the track */
+            background: #eee;
+            border-radius: 4px;
+        }
+        /* --- Style scrub bar thumb (cross-browser) --- */
+        .playback-controls input[type=range]::-webkit-slider-thumb {
+          -webkit-appearance: none;
+          appearance: none;
+          width: 16px;
+          height: 16px;
+          background: dodgerblue;
+          border-radius: 50%;
+          cursor: pointer;
+        }
+        .playback-controls input[type=range]::-moz-range-thumb {
+          width: 16px;
+          height: 16px;
+          background: dodgerblue;
+          border-radius: 50%;
+          cursor: pointer;
+          border: none;
         }
         .sprite-current-frame {
              font-family: monospace;
              font-size: 0.9em;
              min-width: 80px; /* Prevent layout shift */
              text-align: right;
+             color: #666;
         }
 
         /* --- Split Controls Styles --- */
         .split-controls {
              display: none; /* Hidden by default */
-             margin-top: 10px;
+             margin-top: 15px; /* More space above split */
              border: 1px dashed blue;
-             padding: 10px;
+             padding: 15px;
              background-color: #eef;
+             border-radius: 4px;
         }
         .split-controls .frame-info {
             font-family: monospace;
-            margin: 5px 0;
+            margin: 8px 0; /* More margin */
             background-color: #fff;
-            padding: 5px;
+            padding: 8px; /* More padding */
             border: 1px solid #ccc;
             display: inline-block; /* Fit content */
+            border-radius: 3px;
         }
         .split-feedback {
             margin-left: 10px;
             font-style: italic;
             color: #d00; /* Default to error color */
             font-size: 0.9em;
+            display: inline-block; /* Align with buttons */
+            vertical-align: middle;
         }
         .split-feedback:empty {
              display: none; /* Hide if no feedback */
         }
-        /* Style for disabled buttons */
+
+        /* --- General Button Styles --- */
         button[disabled] {
             opacity: 0.6;
             cursor: not-allowed;
-        }
-        .split-mode-btn[disabled] { /* Specific styling for disabled split button */
-            background-color: #eee;
+            background-color: #eee !important; /* Override hover/active states */
             color: #999;
             border-color: #ddd;
         }
+        .approve-btn { background-color: #5cb85c; color: white; border-color: #4cae4c;}
+        .approve-btn:hover:not([disabled]) { background-color: #4cae4c; }
+        .archive-btn { background-color: #d9534f; color: white; border-color: #d43f3a;}
+        .archive-btn:hover:not([disabled]) { background-color: #d43f3a; }
+        .skip-btn { background-color: #f0ad4e; color: white; border-color: #eea236;}
+        .skip-btn:hover:not([disabled]) { background-color: #eea236; }
+        .merge-previous-btn { background-color: #5bc0de; color: white; border-color: #46b8da;}
+        .merge-previous-btn:hover:not([disabled]) { background-color: #46b8da; }
+        .split-mode-btn { background-color: #777; color: white; border-color: #666;}
+        .split-mode-btn:hover:not([disabled]) { background-color: #666; }
+        .confirm-split-btn { background-color: dodgerblue; color: white; border-color: #157fcc;}
+        .confirm-split-btn:hover:not([disabled]) { background-color: #157fcc; }
+        .cancel-split-btn { background-color: #aaa; color: white; border-color: #999;}
+        .cancel-split-btn:hover:not([disabled]) { background-color: #999; }
         .retry-sprite-btn { /* Button to retry sprite gen */
             background-color: #ffae42; /* Orange */
             color: black;
+            border-color: #f09e2a;
         }
+        .retry-sprite-btn:hover:not([disabled]) { background-color: #f09e2a; }
+
+        /* --- Keyboard Shortcuts Hint --- */
+        .keyboard-shortcuts {
+            margin-top: 25px; /* Space below review container */
+            padding: 10px 15px;
+            border: 1px solid #ddd;
+            background-color: #f8f8f8;
+            font-size: 0.85em;
+            text-align: center;
+            color: #555;
+            border-radius: 4px;
+            width: 95%;
+            max-width: 700px;
+        }
+        .keyboard-shortcuts kbd {
+             background-color: #e1e1e1;
+             border: 1px solid #ccc;
+             border-radius: 3px;
+             padding: 2px 5px; /* Slightly more padding */
+             font-family: monospace;
+             margin: 0 3px; /* More margin */
+             box-shadow: 1px 1px 1px rgba(0,0,0,0.1); /* Subtle shadow */
+             font-size: 1.1em; /* Make kbd slightly bigger */
+        }
+        .keyboard-shortcuts strong { margin-right: 10px;}
     </style>
 </head>
 <body>
-    <h1>Review Clips</h1>
+    <h1>Review Clip</h1>
 
-    {% if error %}
-        <p style="color: red;">Error: {{ error }}</p>
-    {% endif %}
+    <div class="review-container">
+        {% if error %}
+            <p style="color: red; text-align: center;">Error loading clip: {{ error }}</p>
+        {% endif %}
 
-    <div id="review-queue">
-        {% if clips %}
-            {% for clip in clips %}
-            {# --- Main Clip Item Div --- #}
+        {% if clip %}
+            {# --- Single Clip Item Div --- #}
             <div class="clip-review-item"
                  id="clip-{{ clip.clip_db_id }}"
                  data-clip-id="{{ clip.clip_db_id }}"
-                 {# Pass necessary data for JS sprite handling #}
+                 data-autoplay="true" {# Signal for JS to autoplay #}
                  {% if clip.sprite_metadata and not clip.sprite_error %}
                  data-sprite-url="{{ clip.sprite_sheet_url }}"
-                 data-sprite-meta="{{ clip.sprite_metadata|tojson|forceescape }}" {# Pass JSON metadata safely #}
+                 data-sprite-meta="{{ clip.sprite_metadata|tojson|forceescape }}"
                  {% endif %}
-                 {# Pass FPS even if sprite failed, might be useful? #}
                  data-clip-fps="{{ clip.sprite_metadata.clip_fps if clip.sprite_metadata else '0' }}"
+                 data-previous-clip-id="{{ clip.previous_clip_id if clip.previous_clip_id else '' }}" {# Pass previous ID for context/merge checks #}
                  >
 
                 {# --- Clip Info Header --- #}
                 <div class="clip-info">
-                    <strong>{{ clip.title }}</strong> ({{ clip.source_title }})<br>
-                    ID: {{ clip.clip_db_id }} | Source ID: {{ clip.source_video_id }} | Time: {{ "%.3f"|format(clip.start_time) }}s - {{ "%.3f"|format(clip.end_time) }}s
+                    <strong>{{ clip.title }}</strong> (Source: {{ clip.source_title }})<br>
+                    Clip ID: {{ clip.clip_db_id }} | Source ID: {{ clip.source_video_id }} | Time: {{ "%.3f"|format(clip.start_time) }}s - {{ "%.3f"|format(clip.end_time) }}s
                      {% if clip.sprite_error %} | <strong style="color:orange;">Sprite Failed</strong> {% endif %}
+                     | Current State: <code style="background-color:#eee; padding: 1px 4px; border-radius: 3px;">{{ clip.current_state }}</code>
                 </div>
 
                 {# --- Sprite Viewer --- #}
                 <div class="sprite-viewer" id="sprite-viewer-{{ clip.clip_db_id }}" tabindex="0"> {# tabindex makes it focusable #}
-                     {# JS will populate background or show message #}
                      Loading sprite...
                  </div>
 
                 {# --- Playback Controls --- #}
                 <div class="playback-controls" id="controls-{{ clip.clip_db_id }}">
-                     <button class="sprite-play-pause-btn" data-clip-id="{{ clip.clip_db_id }}" title="Play/Pause (Spacebar when focused)">⏯️</button>
-                     <input type="range" class="sprite-scrub-bar" id="scrub-{{ clip.clip_db_id }}" value="0" min="0" max="100" title="Scrub through frames">
+                     <button class="sprite-play-pause-btn" data-clip-id="{{ clip.clip_db_id }}" title="Play/Pause (Spacebar)">⏯️</button>
+                     <input type="range" class="sprite-scrub-bar" id="scrub-{{ clip.clip_db_id }}" value="0" min="0" max="100" title="Scrub through frames (←/→ Arrows)">
                      <span class="sprite-current-frame" id="frame-display-{{ clip.clip_db_id }}">Frame: 0</span>
                 </div>
 
-                {# --- Action Buttons --- #}
+                {# --- Action Buttons (primarily visual feedback/backup) --- #}
                 <div class="clip-actions">
-                    <button class="action-btn approve-btn" data-action="approve" title="Approve for embedding">✅ Approve</button>
-                    <button class="action-btn skip-btn" data-action="skip" title="Skip review for now">⏭️ Skip</button>
-                    <button class="action-btn archive-btn" data-action="archive" title="Archive this clip (will be deleted)">🗑️ Archive</button>
-                    <button class="action-btn merge-next-btn" data-action="merge_next" {% if not clip.can_merge_next %}disabled title="No valid next clip available for merging"{% else %}title="Mark this clip to be merged with the next sequential clip"{% endif %}>🖇️ Merge w/ Next</button>
+                    <button class="action-btn approve-btn" data-action="approve" title="Approve (A + Enter)">✅ Approve</button>
+                    <button class="action-btn skip-btn" data-action="skip" title="Skip (S + Enter)">⏭️ Skip</button>
+                    <button class="action-btn archive-btn" data-action="archive" title="Archive (D + Enter)">🗑️ Archive</button>
+                    <button class="action-btn merge-previous-btn" data-action="merge_previous" {% if not clip.can_merge_previous %}disabled title="Previous clip not available or not in a mergeable state"{% else %}title="Merge WITH Previous (Cmd/Ctrl + F + Enter)"{% endif %}>🖇️ Merge w/ Prev</button>
 
-                    {# --- Split Button (conditionally enabled) --- #}
                     <button class="action-btn split-mode-btn"
                             data-action="enter_split_mode"
-                            {% if not clip.sprite_metadata or clip.sprite_error %}disabled title="Sprite sheet unavailable or failed, cannot split"{% else %}title="Enter mode to select a frame for splitting"{% endif %} >
+                            {% if not clip.sprite_metadata or clip.sprite_error %}disabled title="Sprite unavailable or failed, cannot split"{% else %}title="Split (Arrow Keys to enter mode & select frame, Enter to confirm)"{% endif %} >
                         ✂️ Split Clip
                     </button>
 
-                     {# --- Retry Sprite Button (only if failed) --- #}
                      {% if clip.sprite_error %}
                      <button class="action-btn retry-sprite-btn" data-action="retry_sprite_gen" title="Attempt to regenerate the sprite sheet">Retry Sprite</button>
                      {% endif %}
 
                     {# --- Split Controls Panel (hidden by default) --- #}
                     <div class="split-controls" id="split-controls-{{ clip.clip_db_id }}">
-                         <span>Use scrub bar or <strong>arrow keys</strong> (← →) when viewer is focused to select split frame. Press Enter to confirm.</span><br>
+                         <span>Select frame (<kbd>←</kbd> <kbd>→</kbd>), <kbd>Enter</kbd> to Confirm, <kbd>Esc</kbd> to Cancel</span><br>
                          <div class="frame-info">
-                             Selected Frame: <span class="split-confirm-frame">0</span> / <span class="split-total-frames">?</span> |
-                             Approx. Time: <span class="split-confirm-time">0.00</span>s
+                             Frame: <span class="split-confirm-frame">0</span>/<span class="split-total-frames">?</span> |
+                             Time: <span class="split-confirm-time">0.00</span>s
                          </div>
-                         <button class="action-btn confirm-split-btn" data-action="confirm_split" disabled>Confirm Split at Frame <span class="split-confirm-frame-btn-text">0</span></button>
-                         <button class="action-btn cancel-split-btn" data-action="cancel_split_mode" title="Cancel split (Escape key)">Cancel</button>
+                         <button class="action-btn confirm-split-btn" data-action="confirm_split" disabled>Confirm Split (<span class="split-confirm-frame-btn-text">0</span>)</button>
+                         <button class="action-btn cancel-split-btn" data-action="cancel_split_mode" title="Cancel split (Esc)">Cancel</button>
                          <br><span class="split-feedback"></span> {# Feedback message area #}
                     </div>
-
-                    {# --- Undo Button (conditionally shown by JS) --- #}
-                    <button class="undo-button" style="display: none;" title="Undo the last action">Undo</button>
+                    {# Undo Button Removed #}
                 </div>
 
                 {# --- Action Feedback Area --- #}
                 <div class="action-feedback"></div>
             </div>
-            {% endfor %}
+
         {% else %}
-            <p>No clips currently pending review.</p>
+             {# Message when no clips are left or initial load fails cleanly #}
+             <p style="text-align: center; padding: 40px 20px; color: #666;">
+                {% if error %}
+                     Could not load a clip for review. Please check server logs or try again later.
+                {% else %}
+                     No clips currently pending review. You're all caught up! 🎉
+                {% endif %}
+             </p>
+             {# Optionally add a button to trigger a manual Prefect initiator run or refresh #}
+             <div style="text-align: center; margin-top: 10px;">
+                 <button onclick="window.location.reload();">Refresh Page</button>
+             </div>
         {% endif %}
+    </div> {# End review-container #}
+
+    {# --- Keyboard Shortcuts Hint (outside the container) --- #}
+    <div class="keyboard-shortcuts">
+         <strong>Shortcuts:</strong>
+         <kbd>A</kbd>+<kbd>Enter</kbd>: Approve |
+         <kbd>S</kbd>+<kbd>Enter</kbd>: Skip |
+         <kbd>D</kbd>+<kbd>Enter</kbd>: Archive |
+         <kbd>⌘/Ctrl</kbd>+<kbd>F</kbd>+<kbd>Enter</kbd>: Merge w/ Prev |
+         <kbd>←</kbd>/<kbd>→</kbd>: Split Mode/Scrub |
+         <kbd>Space</kbd>: Play/Pause |
+         <kbd>Enter</kbd>: Confirm Split |
+         <kbd>Esc</kbd>: Cancel Split
     </div>
 
     {# --- Load Javascript --- #}
     <script src="{{ url_for('static', path='/sprite-player.js') }}"></script>
+    {# Load updated action handler and main logic JS #}
     <script src="{{ url_for('static', path='/review-actions.js') }}"></script>
     <script src="{{ url_for('static', path='/review-main.js') }}"></script>
 </body>

@@ -159,48 +159,86 @@ def get_source_input_from_db(source_video_id: int) -> str | None:
 
 def get_pending_merge_pairs() -> list[tuple[int, int]]:
     """
-    Finds pairs of clips ready for merging. (Updated to use pool)
+    Finds pairs of clips ready for backward merging.
+    Looks for a 'target' clip in 'pending_merge_target' state and verifies
+    its metadata points to a 'source' clip in the correct state.
+
+    Returns:
+        list[tuple[int, int]]: List of (target_clip_id, source_clip_id) tuples.
     """
     logger = get_run_logger()
     merge_pairs = []
     conn = None
+    # Use RealDictCursor to easily access JSON field by name
     try:
-        conn = get_db_connection() # Get from pool
+        conn = get_db_connection(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
+            # Find potential target clips and extract the expected source ID from metadata
             query = sql.SQL("""
-                WITH NumberedClips AS (
-                    SELECT
-                        id,
-                        source_video_id,
-                        start_frame,
-                        ingest_state,
-                        LEAD(id) OVER w AS next_clip_id,
-                        LEAD(ingest_state) OVER w AS next_clip_state
-                    FROM clips
-                    WINDOW w AS (PARTITION BY source_video_id ORDER BY start_frame ASC)
-                )
                 SELECT
-                    nc.id AS clip1_id,
-                    nc.next_clip_id AS clip2_id
-                FROM NumberedClips nc
-                WHERE nc.ingest_state = %s -- 'pending_merge_with_next'
-                  AND nc.next_clip_id IS NOT NULL
-                  AND nc.next_clip_state = ANY(%s); -- ['pending_review', 'review_skipped']
-                  -- Add check to ensure next clip isn't already merging?
-                  -- AND nc.next_clip_state NOT IN ('merging') -- Might be needed if merge task takes time
+                    t.id AS target_id,
+                    t.processing_metadata ->> 'merge_source_clip_id' AS source_id_text,
+                    s.id AS actual_source_id,
+                    s.ingest_state AS source_state
+                FROM
+                    clips t
+                LEFT JOIN -- Join based on the ID stored in the target's metadata
+                    clips s ON (t.processing_metadata ->> 'merge_source_clip_id')::int = s.id
+                WHERE
+                    t.ingest_state = %s -- 'pending_merge_target'
+                    AND t.processing_metadata IS NOT NULL
+                    AND jsonb_typeof(t.processing_metadata -> 'merge_source_clip_id') = 'number';
             """)
-            valid_next_states = ['pending_review', 'review_skipped']
-            cur.execute(query, ('pending_merge_with_next', valid_next_states))
+            cur.execute(query, ('pending_merge_target',))
             results = cur.fetchall()
-            merge_pairs = [(row[0], row[1]) for row in results]
+
+            valid_pairs = []
+            processed_targets = set() # Avoid processing the same target multiple times if join yields duplicates somehow
+            expected_source_state = 'marked_for_merge_into_previous'
+
+            for row in results:
+                target_id = row['target_id']
+                if target_id in processed_targets:
+                    continue
+
+                source_id_text = row['source_id_text']
+                actual_source_id = row['actual_source_id'] # ID found by the JOIN
+                source_state = row['source_state']
+
+                # Validate the extracted source ID
+                source_id = None
+                try:
+                    source_id = int(source_id_text)
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid non-integer 'merge_source_clip_id' ({source_id_text}) found in metadata for target clip {target_id}. Skipping.")
+                    continue
+
+                # Validate the JOIN result and source state
+                if actual_source_id is None:
+                     logger.warning(f"Target clip {target_id} metadata points to source clip {source_id}, but source clip was not found in DB. Skipping.")
+                     continue
+                if actual_source_id != source_id:
+                     # This case should be rare if the JOIN worked correctly based on the metadata ID
+                     logger.warning(f"Metadata/Join mismatch for target {target_id}. Meta source: {source_id}, Joined source: {actual_source_id}. Skipping.")
+                     continue
+
+                if source_state == expected_source_state:
+                    # Found a valid pair!
+                    valid_pairs.append((target_id, source_id))
+                    processed_targets.add(target_id)
+                    logger.debug(f"Found valid backward merge pair: Target={target_id}, Source={source_id}")
+                else:
+                    logger.warning(f"Target clip {target_id} points to source clip {source_id}, but source clip has wrong state ('{source_state}', expected '{expected_source_state}'). Skipping.")
+
+            merge_pairs = valid_pairs
             if merge_pairs:
-                logger.info(f"Found {len(merge_pairs)} potential merge pairs.")
+                logger.info(f"Found {len(merge_pairs)} valid backward merge pairs.")
 
     except (Exception, psycopg2.DatabaseError) as error:
-        logger.error(f"DB error fetching pending merge pairs: {error}", exc_info=True)
+        logger.error(f"DB error fetching pending backward merge pairs: {error}", exc_info=True)
     finally:
         if conn:
-            release_db_connection(conn) # Release back to pool
+            release_db_connection(conn)
     return merge_pairs
 
 
