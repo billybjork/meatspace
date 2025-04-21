@@ -89,8 +89,8 @@ def _load_model_and_processor_internal(model_name, device='cpu'):
             # Let's try loading directly first.
             model = CLIPModel.from_pretrained(
                 model_name,
+                low_cpu_mem_usage=True # For loading large models on CPU
                 # torch_dtype=torch.float16 # Optional: Use float16 if GPU supports and memory is tight
-                # low_cpu_mem_usage=True # Optional: If loading large models on CPU
                 # device_map="auto" # Optional: If using accelerate for multi-GPU/CPU offload
             ).to(device).eval() # Load first, then move
 
@@ -120,7 +120,8 @@ def _load_model_and_processor_internal(model_name, device='cpu'):
             processor = AutoImageProcessor.from_pretrained(model_name)
             # Load model directly
             model = AutoModel.from_pretrained(
-                model_name
+                model_name,
+                low_cpu_mem_usage=True
             ).to(device).eval()
 
             # Determine embedding dim (remains the same)
