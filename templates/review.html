@@ -46,8 +46,18 @@
             border: 1px solid #ccc;
             border-radius: 4px;
             background-color: #f0f0f0; /* Default button color */
+            color: #000000;
             font-size: 0.95em;
             transition: background-color 0.2s ease;
+        }
+        /* --- Style for button when corresponding key is held down --- */
+        .clip-actions button.btn-active {
+            background-color: #333 !important; /* Darker background */
+            color: white !important;          /* White text */
+            border-color: #222 !important;     /* Darker border */
+            box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.3); /* Inset shadow for pressed look */
+            /* Prevent transition for instant feedback */
+            transition: none;
         }
         .clip-actions button:hover:not([disabled]) {
             background-color: #e0e0e0;
