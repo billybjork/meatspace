@@ -1,125 +1,152 @@
 import os
+import sys
+import re
 import subprocess
 import tempfile
 from pathlib import Path
 import shutil
 import json
 import math
+from datetime import datetime # Added for timestamps
+
 from prefect import task, get_run_logger
 import psycopg2
-from psycopg2 import sql, extras
+from psycopg2 import sql, extras # Import extras for DictCursor and Json helper
+
 from botocore.exceptions import ClientError
 
-# Use the pooled connection from db_utils
+# --- Project Root Setup (Robust Import) ---
 try:
+    # Assuming tasks/sprite_generator.py relative to project root
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
-    import sys
-    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-    if project_root not in sys.path: sys.path.insert(0, project_root)
+    # Fallback if structure is different or running standalone
     try:
+        # Try direct import if utils is in the same directory or PYTHONPATH
         from utils.db_utils import get_db_connection, release_db_connection
     except ImportError as e:
-        print(f"ERROR importing db_utils in sprite_generator.py: {e}")
-        # Define dummies only if absolutely necessary for script loading, but prefer fixing imports
+        print(f"ERROR: Cannot find db_utils. Ensure script is run from project root or PYTHONPATH is set correctly. {e}", file=sys.stderr)
+        # Define dummies only if absolutely necessary for script loading
         def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB connection getter")
-        def release_db_connection(conn): raise NotImplementedError("Dummy DB connection releaser")
+        def release_db_connection(conn): pass # Dummy release
 
+# --- Import Shared Components (S3, FFMPEG) ---
+s3_client = None
+S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg") # Get FFMPEG path from env or default
 
-# Reuse existing components where possible
 try:
-    from .splice import (
-        s3_client, S3_BUCKET_NAME, FFMPEG_PATH, run_ffmpeg_command,
-        sanitize_filename
-    )
-    if not S3_BUCKET_NAME:
-        raise ImportError("S3_BUCKET_NAME not configured in splice module")
-    if not FFMPEG_PATH:
-        FFMPEG_PATH = "ffmpeg"
-        print("Warning: FFMPEG_PATH not imported from splice, defaulting to 'ffmpeg'")
+    # Attempt to import from splice first (might have pre-initialized client)
+    # Adjust the import path based on your actual project structure if needed
+    # Assuming splice.py is in the same 'tasks' directory: from .splice import ...
+    # If it's elsewhere, adjust: from other_module.splice import ...
+    from .splice import s3_client as splice_s3_client, run_ffmpeg_command, sanitize_filename
+    if splice_s3_client: s3_client = splice_s3_client # Use imported client if available
+    # FFMPEG_PATH might also be defined in splice, prefer env var or default 'ffmpeg'
+    # Keep run_ffmpeg_command and sanitize_filename from splice if available
+    print("INFO: Imported shared components (S3 client?, ffmpeg runner, sanitizer) from tasks.splice")
 
 except ImportError as e:
-     print(f"ERROR importing from .splice in sprite_generator.py: {e}")
-     # Define fallbacks or raise error
-     s3_client = None # Or initialize Boto3 client here directly if needed
-     S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-     FFMPEG_PATH = "ffmpeg"
-     if not S3_BUCKET_NAME: raise ValueError("S3_BUCKET_NAME environment variable not set.")
-     if not s3_client:
-         try:
-             import boto3
-             s3_client = boto3.client('s3')
-             print("Warning: Initialized default Boto3 S3 client in sprite_generator fallback.")
-         except ImportError:
-             raise ImportError("Boto3 required but not installed, and S3 client not imported.")
-         except Exception as boto_err:
-             raise RuntimeError(f"Failed to initialize fallback Boto3 client: {boto_err}")
-
+     print(f"INFO: Could not import components from .splice, using defaults/direct init. Error: {e}")
+     # Define fallbacks if splice import fails
      def run_ffmpeg_command(cmd, step, cwd=None):
-        # Basic fallback implementation if import fails
-        print(f"Executing Fallback FFMPEG Step: {step}")
-        print(f"Command: {' '.join(cmd)}")
-        try:
-            # Use shell=False for security unless absolutely necessary
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd, encoding='utf-8')
-            print(f"FFMPEG Output:\n{result.stdout[:500]}...") # Print partial output
-            return result
-        except FileNotFoundError:
-             print(f"ERROR: {cmd[0]} command not found.")
-             raise
-        except subprocess.CalledProcessError as e:
-             print(f"ERROR: {step} failed. Exit code: {e.returncode}")
-             print(f"Stderr:\n{e.stderr}")
-             raise
+         # Basic fallback implementation
+         logger = get_run_logger() # Get logger inside function if needed
+         logger.info(f"Executing Fallback FFMPEG Step: {step}")
+         logger.debug(f"Command: {' '.join(cmd)}")
+         try:
+             result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd, encoding='utf-8', errors='replace')
+             logger.debug(f"FFMPEG Output:\n{result.stdout[:500]}...") # Log partial output
+             if result.stderr: logger.warning(f"FFMPEG Stderr:\n{result.stderr[:500]}...")
+             return result
+         except FileNotFoundError:
+              logger.error(f"ERROR: {cmd[0]} command not found at path '{FFMPEG_PATH}'.")
+              raise
+         except subprocess.CalledProcessError as e:
+              logger.error(f"ERROR: {step} failed. Exit code: {e.returncode}")
+              logger.error(f"Stderr:\n{e.stderr}")
+              raise
      def sanitize_filename(name):
          # Basic fallback sanitization
-         return "".join(c if c.isalnum() or c in ('_', '-') else '_' for c in name)
+         name = re.sub(r'[^\w\.\-]+', '_', name)
+         name = re.sub(r'_+', '_', name).strip('_')
+         return name if name else "default_filename"
 
+# Initialize S3 client if not imported
+if not s3_client and S3_BUCKET_NAME:
+     try:
+         import boto3
+         s3_client = boto3.client('s3', region_name=os.getenv("AWS_REGION"))
+         print("INFO: Initialized default Boto3 S3 client in sprite_generator.")
+     except ImportError:
+         print("ERROR: Boto3 required but not installed.", file=sys.stderr)
+         s3_client = None # Ensure it's None
+     except Exception as boto_err:
+         print(f"ERROR: Failed to initialize fallback Boto3 client: {boto_err}", file=sys.stderr)
+         s3_client = None # Ensure it's None
 
-SPRITE_SHEET_S3_PREFIX = "sprite_sheets/"
-SPRITE_TILE_WIDTH = 480
-SPRITE_TILE_HEIGHT = -1
-SPRITE_FPS = 24
-SPRITE_COLS = 5
+# Final check for S3 client after potential initializations
+if not S3_BUCKET_NAME: print("WARNING: S3_BUCKET_NAME environment variable not set.")
+# S3 client check happens within the task function
 
-# Add concurrency limit example if needed for resource management
+# --- Constants ---
+SPRITE_SHEET_S3_PREFIX = os.getenv("SPRITE_SHEET_S3_PREFIX", "clip_artifacts/sprite_sheets/")
+SPRITE_TILE_WIDTH = int(os.getenv("SPRITE_TILE_WIDTH", 480))
+SPRITE_TILE_HEIGHT = int(os.getenv("SPRITE_TILE_HEIGHT", -1)) # -1 maintains aspect ratio
+SPRITE_FPS = int(os.getenv("SPRITE_FPS", 24))
+SPRITE_COLS = int(os.getenv("SPRITE_COLS", 5))
+ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet" # Constant for artifact type
+
 @task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45)
 def generate_sprite_sheet_task(clip_id: int):
+    """
+    Generates a sprite sheet for a given clip, uploads it to S3,
+    and records it as an artifact in the clip_artifacts table.
+    Updates the clip state upon success or failure.
+    """
     logger = get_run_logger()
     logger.info(f"TASK [SpriteGen]: Starting for clip_id: {clip_id}")
+
+    # --- Resource Management & State ---
     conn = None
     temp_dir_obj = None
+    temp_dir = None
     clip_data = {}
-    task_outcome = "failed" # Default outcome status
-    # Define intended state *on success* separately
-    intended_success_state = "pending_review"
-    # Keep default failure state for error handling
-    default_failure_state = "sprite_generation_failed"
+    task_outcome = "failed" # Default outcome status: 'success', 'success_no_sprite', 'skipped_state', 'failed', 'failed_db...'
+    intended_success_state = "pending_review" # State to set on success (with or without sprite)
+    failure_state = "sprite_generation_failed" # State to set on failure
     error_message = None
     sprite_s3_key = None
-    task_skipped = False
+    sprite_artifact_id = None # Store the ID of the created/updated artifact
 
     # --- Dependency Checks ---
     if not s3_client:
-        logger.error("S3 client not available.")
+        logger.error("S3 client is not available. Cannot proceed.")
+        # Fail fast if essential dependencies are missing
         raise RuntimeError("S3 client not initialized.")
     if not shutil.which(FFMPEG_PATH):
         logger.error(f"ffmpeg command ('{FFMPEG_PATH}') not found in PATH.")
-        raise FileNotFoundError(f"ffmpeg ('{FFMPEG_PATH}') not found.")
-    if not shutil.which("ffprobe"): # ffprobe is usually bundled with ffmpeg
-         logger.warning("ffprobe command not found in PATH. Metadata extraction will be limited.")
-         # Decide if this is fatal or just a warning based on requirements
+        raise FileNotFoundError(f"ffmpeg command not found at '{FFMPEG_PATH}'.")
+    if not shutil.which("ffprobe"):
+         logger.warning("ffprobe command not found in PATH. Metadata extraction may fail or be inaccurate.")
+         # Depending on robustness of ffprobe fallback logic, this might need to be an error.
 
     try:
-        conn = get_db_connection(cursor_factory=extras.DictCursor)
-        conn.autocommit = False
-        temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_spritegen_{clip_id}_")
-        temp_dir = Path(temp_dir_obj.name)
+        # === Phase 1: DB Check, Lock, and State Update ===
+        conn = get_db_connection(cursor_factory=extras.DictCursor) # Use DictCursor for easy column access
+        conn.autocommit = False # Manual transaction control
 
-        # === DB Check, Lock, and State Update ===
         try:
             with conn.cursor() as cur:
+                # 1. Acquire Lock (Use advisory lock within the transaction)
+                # Note: pg_advisory_xact_lock locks for the current transaction
                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
+                logger.info(f"Acquired DB lock for clip {clip_id} for duration of transaction.")
+
+                # 2. Fetch clip data (FOR UPDATE locks the row)
                 cur.execute(
                     """
                     SELECT clip_filepath, clip_identifier, start_time_seconds, end_time_seconds,
@@ -129,46 +156,74 @@ def generate_sprite_sheet_task(clip_id: int):
                 )
                 clip_data = cur.fetchone()
 
-                if not clip_data: raise ValueError(f"Clip {clip_id} not found.")
+                if not clip_data:
+                     raise ValueError(f"Clip {clip_id} not found.")
 
+                # 3. Check current state
                 current_state = clip_data['ingest_state']
-                if current_state != 'pending_sprite_generation':
-                    logger.warning(f"Clip {clip_id} not in 'pending_sprite_generation' state (state: {current_state}). Skipping.")
-                    task_skipped = True
-                    task_outcome = "skipped" # Set outcome for finally block
-                    conn.rollback()
-                    return {"status": "skipped", "reason": f"Incorrect state: {current_state}"}
+                # Allow running if pending OR if failed (for retries)
+                if current_state not in ['pending_sprite_generation', 'sprite_generation_failed']:
+                    logger.warning(f"Clip {clip_id} not in 'pending_sprite_generation' or 'sprite_generation_failed' state (state: {current_state}). Skipping sprite generation.")
+                    task_outcome = "skipped_state"
+                    conn.rollback() # Release lock and row lock by rolling back
+                    return {"status": task_outcome, "reason": f"Incorrect state: {current_state}", "clip_id": clip_id}
 
-                if not clip_data['clip_filepath']: raise ValueError("Clip filepath missing.")
-                cur.execute("UPDATE clips SET ingest_state = 'generating_sprite', updated_at = NOW() WHERE id = %s", (clip_id,))
+                # 4. Validate clip filepath
+                if not clip_data['clip_filepath']:
+                     raise ValueError(f"Clip {clip_id} is missing required 'clip_filepath'.")
+
+                # 5. Update state to 'generating_sprite'
+                cur.execute(
+                    "UPDATE clips SET ingest_state = 'generating_sprite', updated_at = NOW(), last_error = NULL WHERE id = %s",
+                    (clip_id,)
+                )
                 logger.info(f"Set clip {clip_id} state to 'generating_sprite'")
-            conn.commit()
-        except (ValueError, psycopg2.DatabaseError) as db_err:
-            logger.error(f"DB Error during initial check/update for sprite gen: {db_err}", exc_info=True)
-            if conn: conn.rollback()
-            error_message = f"DB Init Error: {db_err}"
-            # task_outcome remains 'failed'
-            raise
 
-        # === Main Processing ===
+            # Commit the state update and keep the transaction open if needed,
+            # or commit here to release the lock sooner if subsequent phases are long.
+            # Let's commit here to reduce lock duration.
+            conn.commit()
+            logger.debug("Phase 1 DB check/update transaction committed.")
+
+        except (ValueError, psycopg2.DatabaseError) as db_err:
+            logger.error(f"DB Error during initial check/update for sprite gen clip {clip_id}: {db_err}", exc_info=True)
+            if conn: conn.rollback() # Ensure rollback on error
+            error_message = f"DB Init Error: {str(db_err)[:500]}"
+            task_outcome = "failed_db_init"
+            raise # Re-raise to main handler
+
+
+        # === Phase 2: Main Processing (Download, Probe, Generate, Upload) ===
         clip_s3_key = clip_data['clip_filepath']
-        clip_identifier = clip_data['clip_identifier']
-        local_clip_path = temp_dir / Path(clip_s3_key).name
+        clip_identifier = clip_data['clip_identifier'] # Used for filename generation
+
+        temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_spritegen_{clip_id}_")
+        temp_dir = Path(temp_dir_obj.name)
+        local_clip_path = temp_dir / Path(clip_s3_key).name # Use Path object methods
 
         logger.info(f"Downloading clip s3://{S3_BUCKET_NAME}/{clip_s3_key} to {local_clip_path}...")
-        s3_client.download_file(S3_BUCKET_NAME, clip_s3_key, str(local_clip_path))
+        try:
+             s3_client.download_file(S3_BUCKET_NAME, clip_s3_key, str(local_clip_path))
+        except ClientError as s3_err:
+             logger.error(f"Failed to download clip {clip_s3_key} from S3: {s3_err}")
+             raise RuntimeError(f"S3 download failed for {clip_s3_key}") from s3_err
 
         # --- Get Video Duration/Frames using ffprobe ---
         duration = 0.0
         fps = 0.0
         total_frames_in_clip = 0
+        # Default sprite metadata in case probing fails partially
+        sprite_metadata = None
+
         try:
-             logger.info(f"Probing original clip: {local_clip_path}")
-             ffprobe_cmd = [ "ffprobe", "-v", "error", "-select_streams", "v:0",
-                             "-show_entries", "stream=duration,r_frame_rate,nb_read_frames", # Use nb_read_frames for more accuracy?
-                             "-count_frames", # Explicitly count frames
-                             "-of", "json", str(local_clip_path) ]
-             result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True, encoding='utf-8')
+             logger.info(f"Probing downloaded clip: {local_clip_path}")
+             ffprobe_cmd = [
+                 "ffprobe", "-v", "error", "-select_streams", "v:0",
+                 "-show_entries", "stream=duration,r_frame_rate,nb_frames", # Try nb_frames first
+                 "-count_frames", # Ensure frame count is attempted
+                 "-of", "json", str(local_clip_path)
+             ]
+             result = subprocess.run(ffprobe_cmd, capture_output=True, text=True, check=True, encoding='utf-8', errors='replace')
              probe_data = json.loads(result.stdout)['streams'][0]
              logger.debug(f"ffprobe result for clip {clip_id}: {probe_data}")
 
@@ -177,300 +232,347 @@ def generate_sprite_sheet_task(clip_id: int):
              if duration_str:
                  try: duration = float(duration_str)
                  except (ValueError, TypeError): logger.warning(f"Could not parse duration '{duration_str}' to float.")
-             else: logger.warning("ffprobe did not return duration for clip.")
-
              # Get FPS
              fps_str = probe_data.get('r_frame_rate', '0/1')
              if '/' in fps_str:
                  num_str, den_str = fps_str.split('/')
                  try:
-                     num = int(num_str)
-                     den = int(den_str)
+                     num, den = int(num_str), int(den_str)
                      if den > 0: fps = num / den
-                     else: logger.warning(f"Invalid denominator in r_frame_rate: {fps_str}")
-                 except (ValueError, TypeError): logger.warning(f"Could not parse r_frame_rate components: {fps_str}")
-             else: logger.warning(f"Unexpected r_frame_rate format: {fps_str}")
+                 except (ValueError, TypeError): logger.warning(f"Could not parse r_frame_rate: {fps_str}")
 
-             # Get Frame Count (Prefer nb_read_frames if available)
-             nb_frames_str = probe_data.get('nb_read_frames')
+             # Get Frame Count (Prefer nb_frames if available and looks valid)
+             nb_frames_str = probe_data.get('nb_frames')
              if nb_frames_str:
                  try:
                      total_frames_in_clip = int(nb_frames_str)
-                     logger.info(f"Using nb_read_frames: {total_frames_in_clip}")
-                 except (ValueError, TypeError): logger.warning(f"Could not parse nb_read_frames '{nb_frames_str}' to int.")
-             else: logger.warning("ffprobe did not return nb_read_frames.")
-
+                     logger.info(f"Using ffprobe nb_frames: {total_frames_in_clip}")
+                 except (ValueError, TypeError): logger.warning(f"Could not parse nb_frames '{nb_frames_str}' to int.")
 
              # Calculate total frames based on duration and fps if frame count is missing/invalid
              if total_frames_in_clip <= 0 and duration > 0 and fps > 0:
-                 total_frames_in_clip = math.ceil(duration * fps)
-                 logger.info(f"Calculated total frames from duration*fps: {total_frames_in_clip}")
+                 calc_frames = math.ceil(duration * fps)
+                 # Add a small tolerance - sometimes duration * fps slightly underestimates
+                 total_frames_in_clip = calc_frames + 1 if calc_frames > 0 else 0
+                 logger.info(f"Calculated total frames from duration*fps: {total_frames_in_clip} (using ceil+1)")
 
-             # Final sanity check on frames
-             if total_frames_in_clip <= 0:
-                 # Last resort: try calculating from DB start/end frames if available
-                 db_start = clip_data.get('start_frame')
-                 db_end = clip_data.get('end_frame')
-                 if db_start is not None and db_end is not None:
-                     calc_frames = db_end - db_start
-                     if calc_frames > 0:
-                         total_frames_in_clip = calc_frames
-                         logger.warning(f"Using frame count from DB start/end frame difference: {total_frames_in_clip}")
-                     else:
-                         raise ValueError(f"Cannot determine positive frame count for clip {clip_id} from ffprobe or DB frames.")
-                 else:
-                     raise ValueError(f"Cannot determine positive frame count for clip {clip_id}. ffprobe failed.")
-
-             # Recalculate duration/fps if needed and possible, based on the most reliable frame count
-             if duration <= 0 and total_frames_in_clip > 0 and fps > 0:
-                 duration = total_frames_in_clip / fps
-                 logger.info(f"Recalculated duration from frames/fps: {duration:.3f}s")
-             if fps <= 0 and total_frames_in_clip > 0 and duration > 0:
-                 fps = total_frames_in_clip / duration
-                 logger.info(f"Recalculated FPS from frames/duration: {fps:.3f}")
-
-             # Final check: need positive values for sprite generation
+             # Final validation and logging
              if duration <= 0 or fps <= 0 or total_frames_in_clip <= 0:
-                  raise ValueError(f"Unable to establish valid duration ({duration:.3f}), fps ({fps:.3f}), or total frames ({total_frames_in_clip}) for clip {clip_id}.")
-
-             logger.info(f"Final Clip {clip_id} Probe: Duration={duration:.3f}s, FPS={fps:.3f}, Total Frames={total_frames_in_clip}")
+                  raise ValueError(f"Unable to establish valid duration ({duration:.3f}s), fps ({fps:.3f}), or total frames ({total_frames_in_clip}) for clip {clip_id}.")
+             logger.info(f"Clip {clip_id} Probe Results: Duration={duration:.3f}s, FPS={fps:.3f}, Total Frames={total_frames_in_clip}")
 
         except subprocess.CalledProcessError as probe_err:
-             logger.error(f"ffprobe command failed for {local_clip_path}. Exit code: {probe_err.returncode}. Error: {probe_err.stderr}", exc_info=False) # Don't need full traceback for CalledProcessError usually
-             raise ValueError(f"ffprobe failed for clip {clip_id}, cannot generate sprite sheet.") from probe_err
-        except json.JSONDecodeError as json_err:
-             logger.error(f"Failed to parse ffprobe JSON output for {local_clip_path}: {json_err}", exc_info=True)
-             raise ValueError(f"ffprobe JSON parsing failed for clip {clip_id}") from json_err
-        except KeyError as key_err:
-            logger.error(f"Missing expected key in ffprobe output for {local_clip_path}: {key_err}", exc_info=True)
-            raise ValueError(f"ffprobe output structure unexpected for clip {clip_id}") from key_err
-        except Exception as probe_err:
-             logger.error(f"Unexpected error during ffprobe/metadata calculation for {local_clip_path}: {probe_err}", exc_info=True)
-             raise ValueError(f"Metadata calculation failed for clip {clip_id}") from probe_err
-
+             logger.error(f"ffprobe command failed for {local_clip_path}. Error: {probe_err.stderr}", exc_info=False)
+             raise ValueError(f"ffprobe failed, cannot generate sprite sheet.") from probe_err
+        except (json.JSONDecodeError, KeyError, IndexError) as parse_err:
+             logger.error(f"Failed to parse ffprobe JSON output for {local_clip_path}: {parse_err}", exc_info=True)
+             raise ValueError(f"ffprobe JSON parsing failed.") from parse_err
+        except ValueError as val_err: # Catch our specific validation error
+             logger.error(f"Metadata validation failed: {val_err}", exc_info=False)
+             raise # Re-raise the specific error
+        except Exception as probe_err: # Catch any other unexpected error
+             logger.error(f"Unexpected error during ffprobe/metadata calculation: {probe_err}", exc_info=True)
+             raise ValueError(f"Metadata calculation failed.") from probe_err
 
         # --- Generate Sprite Sheet ---
+        # Calculate required frames for the sprite sheet based on desired sprite FPS
         num_sprite_frames = math.ceil(duration * SPRITE_FPS)
-        sprite_metadata = None # Initialize sprite_metadata
-        current_target_state = default_failure_state # Assume failure unless explicitly successful
 
         if num_sprite_frames <= 0:
-            logger.warning(f"Clip {clip_id} duration too short ({num_sprite_frames} frames). Skipping sprite sheet generation.")
-            # Set state for the final DB update
-            current_target_state = intended_success_state # Will move to review without sprite
-            sprite_s3_key = None
-            sprite_metadata = None
-            # Set outcome for the finally block
-            task_outcome = "success_no_sprite"
+            logger.warning(f"Clip {clip_id} duration too short ({duration:.3f}s) or SPRITE_FPS ({SPRITE_FPS}) too low. Skipping sprite sheet generation ({num_sprite_frames} frames calculated).")
+            task_outcome = "success_no_sprite" # Mark as success, but indicate no sprite generated
+            sprite_s3_key = None # Ensure key is None
+            sprite_metadata = None # Ensure metadata is None
         else:
-            # (Keep filename, path, S3 key generation)
-            sprite_filename = f"{sanitize_filename(clip_identifier)}_sprite_{SPRITE_FPS}fps_c{SPRITE_COLS}.jpg"
+            # Construct sprite sheet filename and S3 key
+            safe_identifier = sanitize_filename(clip_identifier)
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S") # Add timestamp to avoid collisions
+            sprite_filename = f"{safe_identifier}_sprite_{SPRITE_FPS}fps_w{SPRITE_TILE_WIDTH}_c{SPRITE_COLS}_{timestamp}.jpg"
             local_sprite_path = temp_dir / sprite_filename
-            sprite_s3_key = f"{SPRITE_SHEET_S3_PREFIX}{sprite_filename}" # Store for later use
+            # Ensure S3 prefix ends with /
+            s3_prefix = SPRITE_SHEET_S3_PREFIX.strip('/') + '/'
+            sprite_s3_key = f"{s3_prefix}{sprite_filename}"
 
-            # Calculate number of rows needed based on the NEW SPRITE_COLS, ensure at least 1
+            # Calculate grid dimensions
             num_rows = max(1, math.ceil(num_sprite_frames / SPRITE_COLS))
 
-            # Construct ffmpeg command using the vf (video filter) complex filtergraph
+            # Construct ffmpeg command using vf filtergraph
             vf_filter = f"fps={SPRITE_FPS},scale={SPRITE_TILE_WIDTH}:{SPRITE_TILE_HEIGHT}:flags=neighbor,tile={SPRITE_COLS}x{num_rows}"
-            # Added flags=neighbor for scaling - might preserve sharpness better for pixel art / text, test if needed. Default is bilinear.
             ffmpeg_sprite_cmd = [
-                FFMPEG_PATH, '-y',              # Overwrite output without asking
-                '-i', str(local_clip_path),     # Input file
-                '-vf', vf_filter,               # Apply the filtergraph
-                '-an',                          # No audio in output
-                '-qscale:v', '3',               # Quality scale for JPG (2-5 is good range, 3 is often a good balance)
-                '-frames:v', str(num_sprite_frames), # Explicitly limit frames to avoid potential extra frame from ceil()
-                str(local_sprite_path)          # Output file path
+                FFMPEG_PATH, '-y', '-i', str(local_clip_path),
+                '-vf', vf_filter, '-an', '-qscale:v', '3',
+                # Use -vframes instead of -frames:v for limiting output frames
+                '-vframes', str(num_sprite_frames),
+                str(local_sprite_path)
             ]
 
-            logger.info(f"Generating {SPRITE_COLS}x{num_rows} sprite sheet ({num_sprite_frames} frames expected) for clip {clip_id}...")
-            # Ensure run_ffmpeg_command is robust
+            logger.info(f"Generating {SPRITE_COLS}x{num_rows} sprite sheet ({num_sprite_frames} frames) for clip {clip_id}...")
             try:
                 run_ffmpeg_command(ffmpeg_sprite_cmd, "ffmpeg Generate Sprite Sheet")
             except Exception as ffmpeg_err:
                  logger.error(f"ffmpeg sprite generation failed: {ffmpeg_err}", exc_info=True)
                  raise RuntimeError("FFmpeg sprite generation failed") from ffmpeg_err
 
+            # Verify output file exists before upload
+            if not local_sprite_path.is_file() or local_sprite_path.stat().st_size == 0:
+                 raise RuntimeError(f"FFmpeg completed but output sprite file is missing or empty: {local_sprite_path}")
 
             logger.info(f"Uploading sprite sheet to s3://{S3_BUCKET_NAME}/{sprite_s3_key}")
-            with open(local_sprite_path, "rb") as f:
-                s3_client.upload_fileobj(f, S3_BUCKET_NAME, sprite_s3_key)
+            try:
+                with open(local_sprite_path, "rb") as f:
+                    s3_client.upload_fileobj(f, S3_BUCKET_NAME, sprite_s3_key)
+            except ClientError as s3_upload_err:
+                 logger.error(f"Failed to upload sprite sheet {sprite_s3_key}: {s3_upload_err}")
+                 raise RuntimeError(f"S3 upload failed for sprite sheet {sprite_s3_key}") from s3_upload_err
 
             # --- Prepare and Validate Metadata (Probe the generated sprite sheet) ---
-            calculated_tile_height = 0
+            calculated_tile_height = None # Initialize
             try:
                 logger.info(f"Probing generated sprite sheet: {local_sprite_path}")
                 probe_sprite_cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "json", str(local_sprite_path)]
-                result_sprite = subprocess.run(probe_sprite_cmd, capture_output=True, text=True, check=True, encoding='utf-8')
+                result_sprite = subprocess.run(probe_sprite_cmd, capture_output=True, text=True, check=True, encoding='utf-8', errors='replace')
                 sprite_dims = json.loads(result_sprite.stdout)['streams'][0]
-                logger.debug(f"ffprobe result for sprite {clip_id}: {sprite_dims}")
 
                 total_sprite_height = int(sprite_dims.get('height', 0))
-                total_sprite_width = int(sprite_dims.get('width', 0))
-
-                # Calculate tile height based on probed sprite dimensions and expected rows
                 if total_sprite_height > 0 and num_rows > 0:
-                     probed_tile_height = math.floor(total_sprite_height / num_rows)
-                     logger.info(f"Calculated sprite tile height from probe: {probed_tile_height} (Total Height: {total_sprite_height}, Rows: {num_rows})")
-                     calculated_tile_height = probed_tile_height # Use this more reliable value
-                else:
-                     logger.warning(f"Could not calculate valid tile height from sprite dimensions: {sprite_dims}, Rows: {num_rows}")
+                     calculated_tile_height = math.floor(total_sprite_height / num_rows)
+                     logger.info(f"Calculated sprite tile height from probe: {calculated_tile_height}")
+                else: logger.warning("Could not calculate valid tile height from sprite probe.")
 
-                # Optional: Verify probed width consistency
-                if total_sprite_width > 0 and SPRITE_COLS > 0:
-                    probed_tile_width = math.floor(total_sprite_width / SPRITE_COLS)
-                    if abs(probed_tile_width - SPRITE_TILE_WIDTH) > 2: # Allow slight tolerance
-                        logger.warning(f"Probed tile width ({probed_tile_width}) differs significantly from target ({SPRITE_TILE_WIDTH}). Sprite layout might be unexpected.")
-
-            except subprocess.CalledProcessError as sprite_probe_err:
-                logger.error(f"ffprobe failed for generated sprite sheet {local_sprite_path}. Error: {sprite_probe_err.stderr}", exc_info=False)
-                # Decide if this is fatal. Let's proceed but log a warning, height might be inaccurate in JS.
-                logger.warning("Proceeding without validated tile height from sprite probe.")
             except Exception as sprite_probe_err:
-                logger.error(f"Could not probe sprite sheet dimensions: {sprite_probe_err}", exc_info=True)
-                logger.warning("Proceeding without validated tile height from sprite probe.")
+                logger.warning(f"Could not probe generated sprite sheet dimensions: {sprite_probe_err}. Tile height will be null.")
+                # Proceed without calculated height, frontend might need fallback logic
 
-
-            # --- Final Metadata Validation ---
-            # Ensure all essential values are positive numbers before storing
-            if not (isinstance(fps, (int, float)) and fps > 0):
-                raise ValueError(f"Invalid final FPS value ({fps}) for clip {clip_id}. Cannot save metadata.")
-            if not (isinstance(total_frames_in_clip, int) and total_frames_in_clip > 0):
-                raise ValueError(f"Invalid final total_frames_in_clip value ({total_frames_in_clip}) for clip {clip_id}. Cannot save metadata.")
-            if not (isinstance(num_sprite_frames, int) and num_sprite_frames > 0):
-                raise ValueError(f"Invalid final num_sprite_frames value ({num_sprite_frames}) for clip {clip_id}. Cannot save metadata.")
-            if not (isinstance(calculated_tile_height, int) and calculated_tile_height > 0):
-                # Allow saving NULL if calculation failed, but log warning for JS side.
-                logger.warning(f"Final calculated_tile_height ({calculated_tile_height}) is invalid. Storing null. Sprite display might be incorrect.")
-                calculated_tile_height = None # Store actual NULL
-
+            # Final Metadata object for clip_artifacts.metadata
             sprite_metadata = {
                  "tile_width": SPRITE_TILE_WIDTH,
-                 "tile_height_calculated": calculated_tile_height, # Already handles None case
+                 "tile_height_calculated": calculated_tile_height, # Can be None
                  "cols": SPRITE_COLS,
                  "rows": num_rows,
-                 "total_sprite_frames": num_sprite_frames,
-                 "clip_fps": fps,
-                 "clip_total_frames": total_frames_in_clip
+                 "total_sprite_frames": num_sprite_frames, # Frames *in* the sprite
+                 "clip_fps_source": round(fps, 3), # Original clip FPS used for calcs
+                 "clip_total_frames_source": total_frames_in_clip # Original clip frames
              }
-            logger.info(f"Final sprite metadata for DB: {json.dumps(sprite_metadata)}")
-            logger.info(f"Sprite sheet generated and uploaded for clip {clip_id}.")
-            # Set state for the final DB update
-            current_target_state = intended_success_state # Set to success state
+            logger.info(f"Sprite sheet generated and uploaded for clip {clip_id}. Metadata: {json.dumps(sprite_metadata)}")
+            # Task outcome will be set to 'success' after DB commit
 
-            # IMPORTANT: task_outcome is set *after* successful commit below
 
-        # === Final DB Update (only if not skipped) ===
+        # === Phase 3: Final DB Update (Insert Artifact, Update Clip State) ===
+        # We committed Phase 1, so this needs its own transaction.
+        # Re-acquire the connection if necessary (though it should still be open if Phase 1 succeeded)
+        # Ensure autocommit is still False for this transaction block
+        conn.autocommit = False
         try:
+            # Use a cursor and manage transaction manually
             with conn.cursor() as cur:
-                 # Update state, sprite path, metadata, clear error
-                 # Use the determined current_target_state
-                 cur.execute(
-                     """
-                     UPDATE clips
-                     SET ingest_state = %s,  -- Use the correct target state
-                         sprite_sheet_filepath = %s,
-                         sprite_metadata = %s::jsonb,
-                         updated_at = NOW(),
-                         last_error = NULL
-                     WHERE id = %s AND ingest_state = 'generating_sprite';
-                     """,
-                     (current_target_state, sprite_s3_key, json.dumps(sprite_metadata) if sprite_metadata else None, clip_id)
-                 )
-                 rows_updated = cur.rowcount
-                 if rows_updated == 0:
-                      logger.warning(f"Final DB update affected 0 rows for clip {clip_id}. State might have changed unexpectedly.")
-                      conn.rollback()
-                      # Keep task_outcome as 'failed' (or previous state if success_no_sprite)
-                      error_message = "DB state changed before final update"
-                      # If it was 'success_no_sprite', revert outcome? Let's keep it simple: if update fails, it's a failure.
-                      task_outcome = "failed_db_update_state_mismatch"
-                 else:
-                      conn.commit() # Commit the final successful update
-                      logger.info(f"Successfully updated clip {clip_id} to state '{current_target_state}' with sprite key '{sprite_s3_key}'.")
-                      # ** Set task outcome ONLY AFTER successful commit **
-                      if task_outcome != "success_no_sprite": # Don't overwrite success_no_sprite
-                          task_outcome = "success"
+                 logger.debug(f"Starting final DB transaction for clip {clip_id}...")
 
-        except (psycopg2.DatabaseError, psycopg2.OperationalError) as db_err:
-            logger.error(f"DB Error during final update for sprite gen: {db_err}", exc_info=True)
-            if conn: conn.rollback()
-            task_outcome = "failed_db_update" # Mark as specific failure
-            error_message = f"DB Final Update Error: {db_err}"
-            # Let the main error handler below deal with setting DB state to failure
-            raise # Re-raise to trigger main error handler
+                 # 1. Insert/Update Artifact Record (only if sprite was generated)
+                 if sprite_s3_key and sprite_metadata:
+                     logger.info(f"Inserting/updating sprite artifact record for clip {clip_id}")
+                     artifact_insert_sql = sql.SQL("""
+                         INSERT INTO clip_artifacts (
+                             clip_id, artifact_type, strategy, tag, s3_key, metadata, created_at, updated_at
+                         ) VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+                         ON CONFLICT (clip_id, artifact_type, strategy, tag) DO UPDATE SET
+                             s3_key = EXCLUDED.s3_key,
+                             metadata = EXCLUDED.metadata,
+                             updated_at = NOW()
+                         RETURNING id; -- Return the ID of the inserted/updated row
+                     """)
+                     # Strategy and tag are null for sprite sheets currently
+                     artifact_strategy = None
+                     artifact_tag = None
+                     # Use extras.Json to wrap the metadata dict for psycopg2
+                     cur.execute(
+                         artifact_insert_sql,
+                         (clip_id, ARTIFACT_TYPE_SPRITE_SHEET, artifact_strategy, artifact_tag,
+                          sprite_s3_key, extras.Json(sprite_metadata)) # Use extras.Json
+                     )
+                     inserted_artifact = cur.fetchone() # Fetch the result (which is a DictRow)
+                     if inserted_artifact:
+                          sprite_artifact_id = inserted_artifact['id'] # Access by key
+                          logger.info(f"Successfully inserted/updated artifact record, ID: {sprite_artifact_id}")
+                     else:
+                          # This shouldn't happen with RETURNING id unless insert failed silently?
+                          logger.error("Artifact insert/update query did not return an ID.")
+                          raise psycopg2.DatabaseError("Artifact insert/update failed unexpectedly.")
+
+
+                 # 2. Update Clip Status
+                 logger.info(f"Updating clip {clip_id} state to '{intended_success_state}'")
+                 clip_update_sql = sql.SQL("""
+                     UPDATE clips
+                     SET ingest_state = %s,
+                         updated_at = NOW(),
+                         last_error = NULL -- Clear previous errors
+                     WHERE id = %s AND ingest_state = 'generating_sprite'; -- Concurrency check
+                 """)
+                 cur.execute(clip_update_sql, (intended_success_state, clip_id))
+
+                 # Check if the update was successful (important concurrency check)
+                 if cur.rowcount == 1 or cur.statusmessage == "UPDATE 1": # Check statusmessage or rowcount
+                      logger.info(f"Successfully updated clip {clip_id} state.")
+                      # Set task outcome to success variants *only after* successful commit is confirmed
+                      task_outcome = task_outcome if task_outcome == "success_no_sprite" else "success"
+                 else:
+                      logger.error(f"Final clip state update failed for clip {clip_id}. Status: '{cur.statusmessage}', Rowcount: {cur.rowcount}. State mismatch or row deleted? Rolling back transaction.")
+                      # Exception below will trigger rollback
+                      task_outcome = "failed_db_update_state_mismatch"
+                      raise RuntimeError(f"Failed to update clip {clip_id} final state (expected 1 row, got {cur.rowcount}).")
+
+            # If all operations within the 'with cur:' block succeed, commit.
+            conn.commit()
+            logger.debug(f"Final DB transaction committed for clip {clip_id}.")
+
+        except (psycopg2.DatabaseError, psycopg2.OperationalError, RuntimeError) as db_err:
+            logger.error(f"DB Error during final update/artifact insert for clip {clip_id}: {db_err}", exc_info=True)
+            if conn: conn.rollback() # Rollback the failed transaction
+            task_outcome = "failed_db_final_update"
+            error_message = f"DB Final Update Error: {str(db_err)[:500]}"
+            raise # Re-raise to main handler
 
 
     # === Main Error Handling ===
     except Exception as e:
-        logger.error(f"TASK FAILED [SpriteGen]: clip_id {clip_id} - {e}", exc_info=True)
-        task_outcome = "failed" # Ensure outcome is marked as failed
-        # Use the default failure state for the DB update attempt
-        db_state_on_failure = default_failure_state
-        if not error_message:
-             error_message = f"SpriteGen Task Error: {type(e).__name__}: {str(e)[:450]}"
+        logger.error(f"TASK FAILED [SpriteGen]: clip_id {clip_id} - {type(e).__name__}: {e}", exc_info=True)
+        # Ensure outcome reflects failure if not already set more specifically
+        if not task_outcome.startswith("failed"): task_outcome = "failed"
+        if not error_message: error_message = f"Task Error: {type(e).__name__}: {str(e)[:450]}"
 
-        # Attempt to update DB state to failed
-        if conn: conn.rollback() # Rollback any partial work
+        # Attempt to update DB state to failure state
+        if conn:
+            try:
+                conn.rollback() # Rollback any partial work before trying error update
+            except Exception as rb_err:
+                logger.warning(f"Error during rollback before failure update: {rb_err}")
         error_conn = None
         try:
+             # Use a separate connection with autocommit for error state update
+             # Ensure db_utils provides a fresh connection correctly
              error_conn = get_db_connection()
-             error_conn.autocommit = True
+             if not error_conn:
+                 logger.critical(f"CRITICAL: Failed to get separate DB connection to update error state for clip {clip_id}")
+                 raise RuntimeError("Cannot get error update DB connection") # Fail fast
+
+             error_conn.autocommit = True # Set autocommit for immediate execution
              with error_conn.cursor() as err_cur:
+                 logger.info(f"Attempting to set clip {clip_id} state to '{failure_state}' after error...")
                  err_cur.execute(
                      """
-                     UPDATE clips SET ingest_state = %s, last_error = %s, updated_at = NOW()
-                     WHERE id = %s AND ingest_state IN ('generating_sprite', 'pending_sprite_generation');
+                     UPDATE clips SET
+                         ingest_state = %s,
+                         last_error = %s,
+                         retry_count = COALESCE(retry_count, 0) + 1,
+                         updated_at = NOW()
+                     WHERE id = %s AND ingest_state = 'generating_sprite'; -- Only update if it was processing
                      """,
-                     (db_state_on_failure, error_message, clip_id)
+                     (failure_state, error_message, clip_id)
                  )
-             logger.info(f"Attempted to set clip {clip_id} state to '{db_state_on_failure}' after error.")
+                 logger.info(f"DB update executed to set clip {clip_id} to '{failure_state}'. Status: {err_cur.statusmessage}")
         except Exception as db_err_update:
-             logger.error(f"CRITICAL: Failed to update error state in DB for clip {clip_id}: {db_err_update}")
+             # Log critical error, but don't prevent the original exception from propagating
+             logger.critical(f"CRITICAL: Failed to update error state in DB for clip {clip_id}: {db_err_update}")
         finally:
              if error_conn:
                  release_db_connection(error_conn)
 
-        # Reraise the original exception for Prefect
+        # Reraise the original exception for Prefect to handle retries/failures
         raise e
 
     finally:
-        # --- Final Logging based on Outcome ---
-        # Use the *actual final* task_outcome for logging decision
+        # --- Final Logging ---
         log_message = f"TASK [SpriteGen] Result: clip_id={clip_id}, outcome={task_outcome}"
-
-        # Determine the state that *should* be in the DB based on the outcome
-        final_state_logged = ""
-        if task_outcome == "success" or task_outcome == "success_no_sprite":
-            final_state_logged = intended_success_state # Should be pending_review
-            log_message += f", new_state={final_state_logged}"
-            if task_outcome == "success": log_message += f", sprite_key={sprite_s3_key}"
-            else: log_message += " (no sprite generated)"
-        elif task_outcome == "skipped":
-             log_message += " (skipped due to initial state check)"
+        final_db_state_expected = ""
+        if task_outcome == "success":
+            final_db_state_expected = intended_success_state
+            log_message += f", new_state={final_db_state_expected}, artifact_id={sprite_artifact_id}, sprite_key={sprite_s3_key}"
+            logger.info(log_message)
+        elif task_outcome == "success_no_sprite":
+            final_db_state_expected = intended_success_state
+            log_message += f", new_state={final_db_state_expected} (no sprite generated)"
+            logger.info(log_message)
+        elif task_outcome == "skipped_state":
+            log_message += " (skipped due to initial state check)"
+            logger.warning(log_message)
         else: # All failure types
-             final_state_logged = default_failure_state # Should be sprite_generation_failed
-             log_message += f", final_state_attempted={final_state_logged}, error='{error_message}'"
-
-        # Log with appropriate level
-        if task_outcome.startswith("failed"):
-             logger.error(log_message)
-        elif task_outcome == "skipped":
-             logger.warning(log_message)
-        else: # Success variants
-             logger.info(log_message)
-
+            final_db_state_expected = failure_state
+            log_message += f", final_state_attempted={final_db_state_expected}, error='{error_message}'"
+            logger.error(log_message)
 
         # --- Resource Cleanup ---
         if conn:
-             try: conn.autocommit = True
-             except: pass
-             release_db_connection(conn)
+            try:
+                # Ensure connection is reset before releasing if necessary
+                conn.autocommit = True # Reset autocommit state
+                conn.rollback() # Rollback any potentially uncommitted changes if code ended unexpectedly
+            except Exception as conn_cleanup_err:
+                logger.warning(f"Exception during final connection cleanup for clip {clip_id}: {conn_cleanup_err}")
+            finally:
+                release_db_connection(conn)
+                logger.debug(f"DB connection released for clip {clip_id}.")
         if temp_dir_obj:
-            try: shutil.rmtree(temp_dir_obj.name, ignore_errors=True)
-            except Exception as cleanup_err: logger.warning(f"Error during cleanup: {cleanup_err}")
-
+            try:
+                shutil.rmtree(temp_dir_obj.name, ignore_errors=True)
+                logger.info(f"Cleaned up temporary directory: {temp_dir_obj.name}")
+            except Exception as cleanup_err:
+                 logger.warning(f"Error cleaning up temp dir {temp_dir_obj.name}: {cleanup_err}")
 
     # Return outcome dictionary
-    return {"status": task_outcome, "sprite_sheet_key": sprite_s3_key, "final_db_state": final_state_logged, "error": error_message}
+    return {
+        "status": task_outcome,
+        "clip_id": clip_id,
+        "sprite_sheet_key": sprite_s3_key,
+        "artifact_id": sprite_artifact_id,
+        "final_db_state": final_db_state_expected, # What the state *should* be based on outcome
+        "error": error_message
+    }
+
+# Example local run command (requires Prefect setup or direct call modification)
+# Assumes you have environment variables set (DB connection, S3 bucket etc.)
+# E.g., in your shell:
+# export S3_BUCKET_NAME=your-bucket-name
+# export DATABASE_URL=postgresql://user:pass@host:port/dbname
+# ... etc ...
+#
+# Then run via Prefect CLI (if flow is defined):
+# prefect run --path path/to/your/flow.py --param clip_id=123
+#
+# Or for testing the task directly (less common for Prefect tasks):
+# if __name__ == "__main__":
+#     # Basic setup for direct call (replace with actual ID)
+#     test_clip_id = 1 # Replace with a valid clip ID in 'pending_sprite_generation' or 'sprite_generation_failed' state
+#     if len(sys.argv) > 1:
+#         try:
+#             test_clip_id = int(sys.argv[1])
+#         except ValueError:
+#             print(f"Usage: python {__file__} [clip_id]")
+#             sys.exit(1)
+#
+#     print(f"Attempting direct task run for clip_id={test_clip_id}...")
+#     # Note: Prefect context (like logger) won't be fully available
+#     # You might need to mock get_run_logger or use basic print/logging
+#     try:
+#         # Mock logger if needed for standalone run
+#         class MockLogger:
+#             def info(self, msg, **kwargs): print(f"INFO: {msg}")
+#             def warning(self, msg, **kwargs): print(f"WARN: {msg}")
+#             def error(self, msg, **kwargs): print(f"ERROR: {msg}", file=sys.stderr)
+#             def debug(self, msg, **kwargs): print(f"DEBUG: {msg}")
+#             def critical(self, msg, **kwargs): print(f"CRITICAL: {msg}", file=sys.stderr)
+#
+#         if 'prefect.runtime.flow_run' not in sys.modules: # Avoid patching if running in Prefect
+#             from unittest.mock import patch
+#             with patch('sprite_generator.get_run_logger', return_value=MockLogger()):
+#                 result = generate_sprite_sheet_task.fn(test_clip_id) # Call the underlying function
+#                 print("\n--- Task Result ---")
+#                 print(json.dumps(result, indent=2))
+#         else: # Running within Prefect context already
+#              result = generate_sprite_sheet_task.fn(test_clip_id) # Call the underlying function
+#              print("\n--- Task Result ---")
+#              print(json.dumps(result, indent=2))
+#
+#     except Exception as main_err:
+#         print(f"\n--- Task Execution Failed ---", file=sys.stderr)
+#         import traceback
+#         traceback.print_exc()

@@ -24,7 +24,6 @@ deployments:
     tags: ["ingest", "scheduled", "dispatcher"]
     parameters: {} # Flow parameters (if any)
 
-  # --- NEW DEPLOYMENT FOR CLEANUP ---
   - name: scheduled-clip-cleanup
     description: Periodically cleans up sprites for approved/archived clips after a delay.
     entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Path to the new ASYNC flow function
