@@ -65,18 +65,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
                      // Basic validation and type conversion for essential metadata fields
                      const parsedMeta = {
-                         tile_width: parseFloat(meta.tile_width),
-                         tile_height_calculated: parseFloat(meta.tile_height_calculated),
-                         cols: parseInt(meta.cols, 10),
-                         rows: parseInt(meta.rows, 10),
-                         total_sprite_frames: parseInt(meta.total_sprite_frames, 10), // Frames in the sprite sheet itself
-                         clip_fps: parseFloat(meta.clip_fps),
-                         clip_total_frames: parseInt(meta.clip_total_frames, 10), // Actual frames in the video clip segment
-                         spriteUrl: spriteUrl // Include URL for the player
-                     };
+                        tile_width: parseFloat(meta.tile_width),
+                        tile_height_calculated: parseFloat(meta.tile_height_calculated),
+                        cols: parseInt(meta.cols, 10),
+                        rows: parseInt(meta.rows, 10),
+                        total_sprite_frames: parseInt(meta.total_sprite_frames, 10),
+                        clip_fps: parseFloat(meta.clip_fps_source), // Use clip_fps_source
+                        clip_total_frames: parseInt(meta.clip_total_frames_source, 10), // Use clip_total_frames_source
+                        spriteUrl: spriteUrl
+                    };
 
-                     // Validate that essential numeric properties are valid numbers > 0
-                     const requiredKeys = ['tile_width', 'tile_height_calculated', 'cols', 'rows', 'total_sprite_frames', 'clip_fps', 'clip_total_frames'];
+                    const requiredKeys = ['tile_width', 'tile_height_calculated', 'cols', 'rows', 'total_sprite_frames', 'clip_fps', 'clip_total_frames'];
                      let missingOrInvalidKey = null;
                      for (const key of requiredKeys) {
                          if (isNaN(parsedMeta[key]) || parsedMeta[key] <= 0) {

@@ -298,37 +298,46 @@ async def queue_clip_split(
     log.info(f"API: Received split request for clip_db_id: {clip_db_id} at relative frame: {requested_split_frame}")
 
     new_state = "pending_split"
-    allowed_source_states = ['pending_review', 'review_skipped']
-    lock_id = 2
+    allowed_source_states = ['pending_review', 'review_skipped', 'split_failed']
+    lock_id = 2 # Advisory lock category for the clip row
 
     try:
         async with conn.transaction():
+            # 1. Acquire Advisory Lock (prevents concurrent attempts on the same clip ID)
             await conn.execute("SELECT pg_advisory_xact_lock($1, $2)", lock_id, clip_db_id)
-            log.debug(f"Acquired lock ({lock_id}, {clip_db_id}) for split action.")
+            log.debug(f"Acquired advisory lock ({lock_id}, {clip_db_id}) for split action.")
 
-            # Fetch clip state AND the sprite artifact metadata for validation
-            clip_and_sprite_data = await conn.fetchrow(
+            # 2. Fetch and Lock the core clips row
+            clip_base_data = await conn.fetchrow(
                 """
-                SELECT
-                    c.ingest_state, c.processing_metadata,
-                    ss.metadata AS sprite_artifact_metadata -- Fetch metadata from artifact
-                FROM clips c
-                LEFT JOIN clip_artifacts ss ON c.id = ss.clip_id -- Join for sprite sheet
-                    AND ss.artifact_type = $2 -- ARTIFACT_TYPE_SPRITE_SHEET
-                WHERE c.id = $1 FOR UPDATE; -- Row lock within transaction
-                """, clip_db_id, ARTIFACT_TYPE_SPRITE_SHEET
+                SELECT ingest_state, processing_metadata
+                FROM clips
+                WHERE id = $1
+                FOR UPDATE; -- Lock the specific clips row
+                """, clip_db_id
             )
 
-            if not clip_and_sprite_data:
+            if not clip_base_data:
                 raise HTTPException(status_code=404, detail="Clip not found.")
 
-            current_state = clip_and_sprite_data['ingest_state']
+            current_state = clip_base_data['ingest_state']
+            # Note: We don't need current_processing_metadata fetched here, as we overwrite it later.
+
+            # 3. Check if the current state allows splitting
             if current_state not in allowed_source_states:
                  raise HTTPException(status_code=409, detail=f"Clip cannot be split from state '{current_state}'. Refresh?")
 
+            # 4. Fetch the sprite artifact metadata (separate query, no FOR UPDATE needed here)
+            sprite_meta_record = await conn.fetchrow(
+                """
+                SELECT metadata
+                FROM clip_artifacts
+                WHERE clip_id = $1 AND artifact_type = $2;
+                """, clip_db_id, ARTIFACT_TYPE_SPRITE_SHEET
+            )
+            sprite_meta = sprite_meta_record['metadata'] if sprite_meta_record else None
+
             # --- Sprite Metadata Validation ---
-            sprite_meta = clip_and_sprite_data['sprite_artifact_metadata']
-            # asyncpg decodes JSONB to dict, check it's a dict and has the key
             if not isinstance(sprite_meta, dict):
                 log.error(f"Split rejected for {clip_db_id}: Sprite artifact metadata missing or not a valid dictionary. Type: {type(sprite_meta)}")
                 raise HTTPException(status_code=400, detail="Sprite metadata missing or invalid, cannot validate split frame request.")
@@ -339,39 +348,60 @@ async def queue_clip_split(
                 raise HTTPException(status_code=400, detail="Cannot determine total frames for clip, cannot validate split.")
 
             # --- Frame Validation ---
-            min_frame_margin = 1 # Example margin
+            min_frame_margin = 1 # Example: Cannot split at the very first or very last frame
+            # Ensure split frame is within the valid range [margin, total_frames - margin - 1]
             if not (min_frame_margin <= requested_split_frame < (total_clip_frames - min_frame_margin)):
-                 err_msg = (f"Split frame ({requested_split_frame}) must be between {min_frame_margin} and {total_clip_frames - min_frame_margin - 1} (inclusive) for this clip (Total Frames: {total_clip_frames}).")
+                 err_msg = (f"Split frame ({requested_split_frame}) must be between "
+                            f"{min_frame_margin} and {total_clip_frames - min_frame_margin - 1} "
+                            f"(inclusive) for this clip (Total Frames: {total_clip_frames}).")
                  log.warning(f"Split rejected for {clip_db_id}: Invalid frame. {err_msg}")
-                 raise HTTPException(status_code=422, detail=err_msg)
+                 raise HTTPException(status_code=422, detail=err_msg) # Unprocessable Entity
 
             # --- Prepare Metadata Update for clips.processing_metadata ---
+            # Store the validated frame number for the split task
             metadata_to_store = {"split_request_at_frame": requested_split_frame}
 
             # --- Database Update ---
+            # Update the clips table (which is already locked FOR UPDATE)
+            # Pass the Python dictionary `metadata_to_store` directly
             updated_id = await conn.fetchval(
                 """
                 UPDATE clips
-                SET ingest_state = $1, processing_metadata = $2::jsonb, last_error = NULL, updated_at = NOW()
-                WHERE id = $3 AND ingest_state = ANY($4::text[])
+                SET ingest_state = $1,
+                    processing_metadata = $2::jsonb, -- Store split info
+                    last_error = NULL,
+                    updated_at = NOW()
+                WHERE id = $3 AND ingest_state = ANY($4::text[]) -- Concurrency check on state
                 RETURNING id;
-                """, new_state, metadata_to_store, clip_db_id, allowed_source_states
+                """,
+                new_state,
+                metadata_to_store, # Pass the dictionary
+                clip_db_id,
+                allowed_source_states
             )
 
             if updated_id is None:
+                # If update failed, check the current state again to provide a better error
                 current_state_after = await conn.fetchval("SELECT ingest_state FROM clips WHERE id = $1", clip_db_id) or "NOT FOUND"
+                log.warning(f"Split queue update failed for clip {clip_db_id}. Expected states {allowed_source_states}, found '{current_state_after}'.")
                 raise HTTPException(status_code=409, detail=f"Clip state changed to '{current_state_after}' while queueing split. Please refresh.")
+
+            # Transaction commits automatically upon exiting 'async with conn.transaction():'
 
         log.info(f"API: Clip {clip_db_id} successfully queued for splitting at frame {requested_split_frame}. New state: '{new_state}'.")
         return {"status": "success", "clip_id": clip_db_id, "new_state": new_state, "message": "Clip queued for splitting."}
 
-    except HTTPException: raise
-    except (PostgresError, asyncpg.PostgresError) as db_err:
-         log.error(f"Database error during split queue for clip {clip_db_id}: {db_err}", exc_info=True)
+    except HTTPException:
+        raise # Re-raise HTTP exceptions directly
+    except (PostgresError, asyncpg.PostgresError) as db_err: # Catch specific DB errors
+         # Log the specific DB error class
+         log.error(f"Database error during split queue for clip {clip_db_id}: {type(db_err).__name__} - {db_err}", exc_info=True)
+         # Provide a generic error message to the client
          raise HTTPException(status_code=500, detail="Internal server error during database operation.")
     except Exception as e:
         log.error(f"Unexpected error queueing clip {clip_db_id} for split: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Internal server error processing split request.")
+    # Advisory lock is released automatically when the transaction ends (commit or rollback)
 
 
 # --- Undo API Route ---

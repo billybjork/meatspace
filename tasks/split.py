@@ -108,16 +108,18 @@ def split_clip_task(clip_id: int):
                         c.clip_filepath, c.clip_identifier, c.start_time_seconds, c.end_time_seconds,
                         c.source_video_id, c.ingest_state, c.processing_metadata,
                         c.start_frame, c.end_frame,
-                        -- Get FPS from sprite artifact metadata first, fallback to source video FPS
-                        COALESCE((ss.metadata->>'clip_fps_source')::double precision, sv.fps) as effective_fps,
-                        ss.metadata AS sprite_artifact_metadata, -- Get the whole sprite metadata dict
-                        sv.filepath as source_video_filepath, sv.title as source_title
+                        COALESCE((ss.metadata->>'clip_fps_source')::double precision, sv.fps) AS effective_fps,
+                        ss.metadata AS sprite_artifact_metadata,
+                        sv.filepath AS source_video_filepath, sv.title AS source_title
                     FROM clips c
-                    JOIN source_videos sv ON c.source_video_id = sv.id
-                    LEFT JOIN clip_artifacts ss ON c.id = ss.clip_id -- Join for sprite sheet artifact
-                        AND ss.artifact_type = $2 -- ARTIFACT_TYPE_SPRITE_SHEET
-                    WHERE c.id = $1 FOR UPDATE;
-                    """, (clip_id, ARTIFACT_TYPE_SPRITE_SHEET)
+                    JOIN source_videos sv  ON c.source_video_id = sv.id
+                    LEFT JOIN clip_artifacts ss
+                        ON c.id = ss.clip_id
+                        AND ss.artifact_type = %s
+                    WHERE c.id = %s
+                    FOR UPDATE OF c, sv
+                    """,
+                    (ARTIFACT_TYPE_SPRITE_SHEET, clip_id)
                 )
                 original_clip_data = cur.fetchone()
 
@@ -279,18 +281,19 @@ def split_clip_task(clip_id: int):
                  final_error_message = f'Split at frame {relative_split_frame} into {len(new_clip_ids)} clip(s): {",".join(map(str, new_clip_ids))}'
                  logger.info(f"Archiving original clip {clip_id}...")
                  cur.execute(
-                     """
-                     UPDATE clips SET
-                        ingest_state = %s,
-                        last_error = %s,
-                        processing_metadata = NULL, -- Clear split request metadata
-                        clip_filepath = NULL, -- Nullify original video path
+                    """
+                    UPDATE clips
+                    SET ingest_state = %s,
+                        last_error   = %s,
+                        processing_metadata = NULL,
+                        -- clip_filepath = NULL,  -- remove this line
                         updated_at = NOW(),
-                        keyframed_at = NULL,      -- Clear timestamps
-                        embedded_at = NULL
-                     WHERE id = %s AND ingest_state = 'splitting'; -- Concurrency check
-                     """, (final_original_state, final_error_message, clip_id)
-                 )
+                        keyframed_at = NULL,
+                        embedded_at  = NULL
+                    WHERE id = %s AND ingest_state = 'splitting';
+                    """,
+                    (final_original_state, final_error_message, clip_id)
+                )
 
                  # Delete ALL artifacts associated with the original clip
                  delete_artifacts_sql = sql.SQL("DELETE FROM clip_artifacts WHERE clip_id = %s;")
