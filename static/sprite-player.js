@@ -61,7 +61,7 @@ class SpritePlayer {
 
         // Set the initial frame display and position
         this.updateFrame(0, true); // Initialize to frame 0 and force UI update
-        console.log(`[Player ${this.clipId}] UI setup complete. Dimensions: ${this.meta.tile_width}x${this.meta.tile_height_calculated}, Frames: ${this.meta.clip_total_frames}`);
+        // console.log(`[Player ${this.clipId}] UI setup complete. Dimensions: ${this.meta.tile_width}x${this.meta.tile_height_calculated}, Frames: ${this.meta.clip_total_frames}`);
     }
 
     _attachEventListeners() {
@@ -71,7 +71,7 @@ class SpritePlayer {
             this._handlePlayPauseClick = (event) => {
                 event.stopPropagation(); // Prevent click bubbling up (e.g., to clipItem listener)
                 if (!this.playPauseBtn.disabled) { // Check if button is enabled
-                    console.log(`[Player ${this.clipId}] Play/Pause BUTTON CLICKED`);
+                    // console.log(`[Player ${this.clipId}] Play/Pause BUTTON CLICKED`);
                     this.togglePlayback();
                 }
             };
@@ -212,7 +212,7 @@ class SpritePlayer {
     togglePlayback() {
         // Debounce rapid toggles using a flag and timeout
         if (this.isToggling) {
-            console.log(`[Player ${this.clipId}] Toggle ignored - already toggling (debounce).`);
+            // console.log(`[Player ${this.clipId}] Toggle ignored - already toggling (debounce).`);
             return;
         }
         this.isToggling = true;
@@ -224,7 +224,7 @@ class SpritePlayer {
             return;
         }
 
-        console.log(`[Player ${this.clipId}] togglePlayback called. Current state isPlaying: ${this.isPlaying}`);
+        // console.log(`[Player ${this.clipId}] togglePlayback called. Current state isPlaying: ${this.isPlaying}`);
 
         // Call play or pause based on current state
         if (this.isPlaying) {
@@ -252,7 +252,7 @@ class SpritePlayer {
 
         // Calculate interval time based on clip FPS
         const intervalTime = 1000 / this.meta.clip_fps;
-        console.log(`[Player ${this.clipId}] Playback STARTING (called from '${source}', Interval: ${intervalTime.toFixed(2)}ms, FPS: ${this.meta.clip_fps})`);
+        // console.log(`[Player ${this.clipId}] Playback STARTING (called from '${source}', Interval: ${intervalTime.toFixed(2)}ms, FPS: ${this.meta.clip_fps})`);
 
         // Clear any potentially orphaned interval before starting a new one
         if (this.playbackInterval) {
@@ -292,7 +292,7 @@ class SpritePlayer {
     pause(source = "unknown") {
         // Log only if it was actually playing to reduce noise
         if (this.isPlaying) {
-            console.log(`[Player ${this.clipId}] Playback PAUSING (called from '${source}')`);
+            // console.log(`[Player ${this.clipId}] Playback PAUSING (called from '${source}')`);
         }
 
         // Clear the interval if it exists

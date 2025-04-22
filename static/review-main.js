@@ -92,11 +92,11 @@ document.addEventListener('DOMContentLoaded', () => {
                      // --- Create and store the SpritePlayer instance ---
                      // The last argument is the callback function to update split UI on frame changes
                      window.spritePlayer = new SpritePlayer(currentClipId, viewer, scrubBar, playPauseBtn, frameDisplay, parsedMeta, updateSplitUI);
-                     console.log(`[Main Init ${currentClipId}] SpritePlayer initialized successfully.`);
+                     // console.log(`[Main Init ${currentClipId}] SpritePlayer initialized successfully.`);
 
                      // Autoplay if requested
                      if (shouldAutoplay && window.spritePlayer) {
-                         console.log(`[Main Init ${currentClipId}] Autoplaying sprite...`);
+                         // console.log(`[Main Init ${currentClipId}] Autoplaying sprite...`);
                          // Use a small delay to ensure the browser has rendered and is ready
                          setTimeout(() => window.spritePlayer?.play('autoplay'), 100);
                      }

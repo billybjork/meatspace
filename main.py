@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, FileResponse
 
 # --- Import application components ---
 from config import log
@@ -79,6 +79,10 @@ log.info("Included API routers.")
 async def root_redirect(request: Request):
     # Redirect to the named route 'index' from the search router
     return RedirectResponse(url=request.url_for('index'), status_code=303)
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return FileResponse(os.path.join(static_dir, "favicon.ico"))
 
 # --- Main Execution ---
 if __name__ == '__main__':
