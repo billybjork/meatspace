@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, FileResponse
 from config import log
 from database import connect_db, close_db, get_db_connection
 from routers.search import router as search_router
-from routers.review import ui_router as review_ui_router, api_router as review_api_router
+from routers.intake_review import ui_router as review_ui_router, api_router as review_api_router
 
 # --- Lifespan Management for Database Pool ---
 

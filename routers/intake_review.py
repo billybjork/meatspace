@@ -126,12 +126,12 @@ async def review_clips_ui(
          error_message = f"Database table error: {e}. Please check application setup."
     except PostgresSyntaxError as e:
          log.error(f"ERROR in SQL syntax fetching review clips: {e}", exc_info=True)
-         error_message = f"Database syntax error: {e}. Please check the SQL query in review.py."
+         error_message = f"Database syntax error: {e}. Please check the SQL query in intake_review.py."
     except Exception as e:
         log.error(f"Error fetching clip for review: {e}", exc_info=True)
         error_message = "Failed to load clip for review due to a server error."
 
-    return templates.TemplateResponse("review.html", {
+    return templates.TemplateResponse("intake_review.html", {
         "request": request,
         "clip": clip_to_review,
         "error": error_message,
@@ -342,7 +342,7 @@ async def queue_clip_split(
                 log.error(f"Split rejected for {clip_db_id}: Sprite artifact metadata missing or not a valid dictionary. Type: {type(sprite_meta)}")
                 raise HTTPException(status_code=400, detail="Sprite metadata missing or invalid, cannot validate split frame request.")
 
-            total_clip_frames = sprite_meta.get('clip_total_frames_source') # Use the key from sprite_generator
+            total_clip_frames = sprite_meta.get('clip_total_frames_source')
             if not isinstance(total_clip_frames, int) or total_clip_frames <= 1:
                 log.error(f"Split rejected for {clip_db_id}: Cannot determine total frames from sprite artifact metadata. Value: {total_clip_frames}")
                 raise HTTPException(status_code=400, detail="Cannot determine total frames for clip, cannot validate split.")

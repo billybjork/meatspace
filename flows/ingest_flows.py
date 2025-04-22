@@ -18,7 +18,7 @@ from prefect.futures import wait
 # --- Task Imports ---
 from tasks.intake import intake_task
 from tasks.splice import splice_video_task
-from tasks.sprite_generator import generate_sprite_sheet_task # Keep for initiator
+from tasks.sprite import generate_sprite_sheet_task
 from tasks.keyframe import extract_keyframes_task
 from tasks.embed import generate_embeddings_task
 from tasks.merge import merge_clips_task
