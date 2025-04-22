@@ -26,7 +26,6 @@ async def _init_connection(conn: asyncpg.Connection):
             schema='pg_catalog',
             format='text' # Use 'text' format for JSON string transfer
         )
-        # Optional: Also register for 'json' type if used
         await conn.set_type_codec(
             'json',
             encoder=json.dumps,
@@ -35,14 +34,14 @@ async def _init_connection(conn: asyncpg.Connection):
             format='text'
         )
         log.info(f"Registered JSON/JSONB type codecs for connection {id(conn)}.")
-        # Add any other per-connection initializations here if needed
+        # TODO: Add any other per-connection initializations here if needed
         # E.g., await conn.execute("SET TIME ZONE 'UTC';")
     except Exception as e:
         log.error(f"Error setting type codecs for connection {id(conn)}: {e}", exc_info=True)
-        # Depending on severity, you might want to raise an error here
 
 # --- Pool Management ---
 _pool: asyncpg.Pool | None = None # Module-level variable for the pool
+
 
 async def connect_db() -> asyncpg.Pool:
     """Creates and returns the asyncpg database connection pool."""
@@ -77,6 +76,7 @@ async def connect_db() -> asyncpg.Pool:
 
     return _pool
 
+
 async def close_db():
     """Closes the asyncpg database connection pool."""
     global _pool
@@ -89,6 +89,7 @@ async def close_db():
             log.error(f"Error closing asyncpg pool: {e}", exc_info=True)
         finally:
              _pool = None # Ensure pool variable is reset
+
 
 # --- FastAPI Dependency ---
 async def get_db_connection(request: Request) -> AsyncGenerator[asyncpg.Connection, None]:

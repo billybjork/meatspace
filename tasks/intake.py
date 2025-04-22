@@ -1,23 +1,23 @@
+import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
-import json
-from pathlib import Path
-import boto3
-from botocore.exceptions import NoCredentialsError, ClientError
-from datetime import datetime
 import threading
+from datetime import datetime
+from pathlib import Path
 
-from prefect import task, get_run_logger
-import psycopg2
-from psycopg2 import sql
+import boto3
+from botocore.exceptions import ClientError, NoCredentialsError
+
+from prefect import get_run_logger, task
 import yt_dlp
 
+# --- Local Imports (with fallback) ---
 try:
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
-    import sys
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
@@ -25,10 +25,10 @@ except ImportError:
         from utils.db_utils import get_db_connection, release_db_connection
     except ImportError as e:
         print(f"ERROR importing db_utils in intake.py: {e}")
-        # Define dummies only if absolutely necessary for script loading
-        def get_db_connection(): raise NotImplementedError("Dummy get_db_connection")
-        def release_db_connection(conn): raise NotImplementedError("Dummy release_db_connection")
-
+        def get_db_connection():
+            raise NotImplementedError("Dummy get_db_connection")
+        def release_db_connection(conn):
+            raise NotImplementedError("Dummy release_db_connection")
 
 # --- Task Configuration ---
 FINAL_SUFFIX = "_qt"
@@ -38,27 +38,30 @@ FFMPEG_ARGS = [
     "-c:a:0", "aac", "-b:a", "192k",
     "-c:s", "mov_text",
     "-c:d", "copy",
-    "-c:v:1", "copy", # Attempt to copy 2nd video stream (often thumbnail)
+    "-c:v:1", "copy",  # Attempt to copy 2nd video stream (e.g., thumbnail)
     "-movflags", "+faststart",
 ]
 
 # --- S3 Configuration ---
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-AWS_REGION = os.getenv("AWS_REGION")
+AWS_REGION = os.getenv("AWS_REGION", "us-west-1")
+S3_UPLOAD_PREFIX = os.getenv("S3_UPLOAD_PREFIX")
+S3_USE_MULTIPART = os.getenv("S3_USE_MULTIPART", "true").lower() in ("1", "true", "yes")  # Optional flag
 
+# Validate required env vars
 if not S3_BUCKET_NAME:
-    raise ValueError("S3_BUCKET_NAME environment variable not set.")
+    raise ValueError("Missing required environment variable: S3_BUCKET_NAME")
 
-s3_client = None
+# --- Initialize S3 Client ---
 try:
-    s3_client = boto3.client('s3', region_name=AWS_REGION)
-    print(f"Successfully initialized S3 client for bucket: {S3_BUCKET_NAME} in region: {AWS_REGION or 'default'}")
+    s3_client = boto3.client("s3", region_name=AWS_REGION)
+    print(f"Initialized S3 client for bucket: {S3_BUCKET_NAME} in region: {AWS_REGION}")
 except NoCredentialsError:
-    print("ERROR: AWS credentials not found. Configure AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, or use IAM roles/profiles.")
+    print("AWS credentials not found. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY or use IAM roles.")
     raise RuntimeError("AWS credentials not found.")
 except Exception as e:
-    print(f"ERROR initializing S3 client: {e}")
-    raise RuntimeError(f"Failed to initialize S3 client: {e}")
+    print(f"Failed to initialize S3 client: {e}")
+    raise RuntimeError(f"S3 client init error: {e}")
 
 
 # --- Helper Function for External Commands ---
@@ -155,7 +158,6 @@ class S3TransferProgress:
                     # Handle zero-byte file: it's 100% done immediately
                     current_percentage = 100
 
-                # --- Robust Comparison Logic ---
                 should_log = False
                 try:
                     # Ensure all parts of the comparison are integers
@@ -177,7 +179,6 @@ class S3TransferProgress:
                     )
                     # Don't log if comparison fails, but don't crash
                     should_log = False
-                # --- End Robust Comparison Logic ---
 
                 if should_log:
                     try:
@@ -351,8 +352,6 @@ def intake_task(source_video_id: int,
                 'merge_output_format': 'mp4',
                 'embedmetadata': True,
                 'embedthumbnail': True, # Keep thumbnail if possible
-                # Reduce postprocessors if thumbnails aren't strictly needed by intake
-                # 'postprocessors': [{'key': 'FFmpegThumbnailsConvertor', 'format': 'jpg'}],
                 'restrictfilenames': True,
                 'ignoreerrors': False, # Fail on first error
                 'logger': YtdlpLogger(),
@@ -635,7 +634,7 @@ def intake_task(source_video_id: int,
         # === Successful Completion ===
         logger.info(f"TASK [Intake]: Successfully processed source_video_id: {source_video_id}. Final S3 key: {s3_object_key}")
 
-        # --- ADD DETAILED LOGGING OF RETURN VALUE ---
+        # --- Detailed logging of return value ---
         logger.info(f"--- Inspecting return value for ID {source_video_id} ---")
         logger.info(f"Status: '{task_outcome}' (Type: {type(task_outcome)})")
         logger.info(f"S3 Key: '{s3_object_key}' (Type: {type(s3_object_key)})")
@@ -647,7 +646,6 @@ def intake_task(source_video_id: int,
         else:
             logger.info("  Metadata is None.")
         logger.info("--- End Inspection ---")
-        # --- END DETAILED LOGGING ---
 
         return final_return_value # Return the constructed dict
 

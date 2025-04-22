@@ -3,15 +3,13 @@ import os
 import re
 import shutil
 import tempfile
-import traceback
-import json # Added for metadata
 from pathlib import Path
-from datetime import datetime # Added for timestamps
+from datetime import datetime
 
 from prefect import task, get_run_logger
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import Json, execute_values # Added execute_values
+from psycopg2.extras import Json, execute_values
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
 import sys
@@ -21,7 +19,6 @@ project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 try:
-    # Import both connection getter and releaser
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError as e:
     print(f"Error importing DB utils in keyframe.py: {e}")
@@ -96,13 +93,10 @@ def _extract_and_save_frames_internal(
         # Handle cases where fps might be 0 or invalid
         if fps is None or fps <= 0:
              logger.warning(f"Invalid FPS ({fps}) detected for {local_temp_video_path}. Cannot calculate timestamps accurately. Check video integrity.")
-             # Decide on fallback: either use a default or raise error if timestamp is critical
-             # Option 1: Raise error
-             # raise ValueError(f"Invalid FPS ({fps}) detected for video {local_temp_video_path}")
-             # Option 2: Use default (less accurate)
              fps = 30.0 # Assume a reasonable default
+             # Alternatively, raise error instead of assuming default FPS:
+             # raise ValueError(f"Invalid FPS ({fps}) detected for video {local_temp_video_path}")
              logger.warning(f"Using default FPS {fps} for timestamp calculations.")
-
 
         logger.debug(f"Temp Video properties: Total Frames={total_frames}, FPS={fps:.2f}")
 
@@ -142,7 +136,6 @@ def _extract_and_save_frames_internal(
         else:
              logger.error(f"Unsupported keyframe strategy provided: '{strategy}'")
              raise ValueError(f"Unsupported keyframe strategy: {strategy}")
-
 
         # Generate a sanitized base filename part from clip_identifier
         scene_part = None
@@ -235,6 +228,7 @@ def _extract_and_save_frames_internal(
 
     return extracted_frames_data
 
+
 # --- Prefect Task ---
 @task(name="Extract Clip Keyframes", retries=1, retry_delay_seconds=45)
 def extract_keyframes_task(
@@ -310,7 +304,6 @@ def extract_keyframes_task(
                 title = re.sub(r'[^\w\-\.]+', '_', title).strip('_')
                 title = re.sub(r'_+', '_', title)
                 if not title: title = "untitled_clip" # Absolute fallback
-
 
                 # 3. Check if processing should proceed based on state and overwrite flag
                 artifacts_exist = False
@@ -452,7 +445,7 @@ def extract_keyframes_task(
 
                 except ClientError as s3_upload_err:
                     logger.error(f"Failed to upload keyframe {temp_local_path.name} to S3: {s3_upload_err}")
-                    # Decide if one failure should stop the whole process or just skip this frame
+                    # TODO: Decide if one failure should stop the whole process or just skip this frame
                     # For keyframes, maybe it's okay to proceed if at least one uploads? Depends on strategy.
                     # Let's choose to fail the task if any upload fails.
                     raise RuntimeError(f"S3 upload failed for {frame_s3_key}") from s3_upload_err
@@ -510,10 +503,9 @@ def extract_keyframes_task(
                          updated_at = NOW(); -- Update timestamp on conflict/update
                  """)
                  # Prepare data tuples for execute_values
-                 # Add updated_at timestamp to each tuple
                  now = datetime.now()
                  values_to_insert = [
-                     (*data_tuple[:-1], now) # Add 'now' for updated_at, assumes last element was created_at
+                     (*data_tuple[:-1], now)
                      for data_tuple in processed_artifact_data_for_db
                  ]
 
@@ -643,7 +635,7 @@ def extract_keyframes_task(
             raise RuntimeError(f"Keyframe task failed for clip {clip_id} with status {final_status}. Reason: {error_message_for_db or 'Unknown error'}")
 
 
-# Local run block for testing purposes (Optional)
+# Local run block for testing purposes
 if __name__ == "__main__":
     print("Running keyframe task locally for testing (requires DB/S3 setup)...")
     # Example: prefect run python tasks/keyframe.py extract_keyframes_task --param clip_id=YOUR_CLIP_ID --param strategy=multi --param overwrite=True

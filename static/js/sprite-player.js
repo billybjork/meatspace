@@ -351,6 +351,6 @@ class SpritePlayer {
         this.updateSplitUICallback = null; // Release callback reference
 
         console.log(`[Player ${this.clipId}] Cleanup finished.`);
-        // Note: Global listeners (keydown/keyup/beforeunload) are managed in review-main.js
+        // Note: Global listeners (keydown/keyup/beforeunload) are managed in intake-review.js
     }
 }

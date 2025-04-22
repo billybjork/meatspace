@@ -60,6 +60,7 @@ FFMPEG_CRF = os.getenv("FFMPEG_CRF", "23")
 FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "medium")
 FFMPEG_AUDIO_BITRATE = os.getenv("FFMPEG_AUDIO_BITRATE", "128k")
 
+
 def sanitize_filename(name):
     """Removes potentially problematic characters for filenames and S3 keys."""
     if not name: return "untitled"
@@ -96,6 +97,7 @@ def run_ffmpeg_command(cmd_list, step_name="ffmpeg command", cwd=None):
     except Exception as e:
         logger.error(f"An unexpected error occurred during '{step_name}': {e}", exc_info=True)
         raise
+
 
 # --- OpenCV Scene Detection Functions ---
 
@@ -210,6 +212,7 @@ def detect_scenes(video_path: str, threshold: float, hist_method: int):
 
     logger.info(f"Detected {len(scenes)} potential scenes.")
     return scenes, fps, (width, height), total_frames
+
 
 # --- Main Splice Task ---
 

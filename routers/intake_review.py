@@ -1,18 +1,13 @@
 import json
-from fastapi import APIRouter, Request, Depends, Query, Path, Body, HTTPException
+from fastapi import APIRouter, Request, Depends, Path, Body, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 import asyncpg
-from asyncpg.exceptions import UniqueViolationError, PostgresError, UndefinedTableError, PostgresSyntaxError
-import psycopg2 # Keep for type hints if needed
+from asyncpg.exceptions import PostgresError, UndefinedTableError, PostgresSyntaxError
 
 from config import log, CLOUDFRONT_DOMAIN
 from database import get_db_connection # Using the asyncpg pool dependency
-# IMPORTANT: services.format_clip_data must be updated for 'representative_keyframe_s3_key'
 from services import format_clip_data
 from schemas import ClipActionPayload, SplitActionPayload
-
-# --- S3 Configuration Check (Best practice) ---
-# No changes needed here, assumes S3 config is handled
 
 # Routers for UI and API
 ui_router = APIRouter(
@@ -40,7 +35,7 @@ async def review_clips_ui(
     error_message = None
 
     try:
-        # Fetch the *next* single clip for review
+        # Fetch the next single clip for review
         # JOIN with clip_artifacts TWICE to get both representative keyframe and sprite sheet info
         record = await conn.fetchrow(
             """
@@ -92,7 +87,6 @@ async def review_clips_ui(
             log.info(f"Result: can_action_previous = {can_action_previous}")
             record_dict['can_action_previous'] = can_action_previous # Add flag to dict
 
-            # IMPORTANT: Assumes format_clip_data now uses 'representative_keyframe_s3_key'
             formatted = format_clip_data(record_dict, request)
             if formatted:
                  # Use artifact data for sprite URL and metadata
@@ -139,15 +133,13 @@ async def review_clips_ui(
     })
 
 
-# --- Clip Action API Route (Handles Merge Previous AND Group Previous) ---
+# --- Clip Action API Route (Handles Merge AND Group Actions) ---
 @api_router.post("/{clip_db_id}/action", name="clip_action", status_code=200)
 async def handle_clip_action(
     clip_db_id: int = Path(..., description="Database ID of the clip", gt=0),
     payload: ClipActionPayload = Body(...),
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
-    # --- NO CHANGES NEEDED in this function's logic for clip_artifacts ---
-    # It primarily modifies clip states and processing/grouping metadata in the clips table.
     action = payload.action
     log.info(f"API: Received action '{action}' for clip_db_id: {clip_db_id}")
 
@@ -410,8 +402,6 @@ async def undo_clip_action(
     clip_db_id: int = Path(..., gt=0),
     conn: asyncpg.Connection = Depends(get_db_connection)
 ):
-    # --- NO CHANGES NEEDED in this function's logic for clip_artifacts ---
-    # It primarily modifies clip states and processing/grouping metadata in the clips table.
     log.info(f"API: Received UNDO request for clip_db_id: {clip_db_id}")
     target_state = "pending_review"
     allowed_undo_source_states = [

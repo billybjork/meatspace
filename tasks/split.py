@@ -3,11 +3,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 import shutil
-import json
-import math
 import time
 import re
-import numpy as np # Keep if needed
 import sys
 
 from prefect import task, get_run_logger
@@ -15,7 +12,6 @@ import psycopg2
 from psycopg2 import sql, extras
 from botocore.exceptions import ClientError
 
-# --- Project Root Setup ---
 try:
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
@@ -59,6 +55,7 @@ if not s3_client and S3_BUCKET_NAME:
 
 # Constants
 ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet"
+
 
 @task(name="Split Clip at Frame", retries=1, retry_delay_seconds=45)
 def split_clip_task(clip_id: int):
@@ -162,6 +159,7 @@ def split_clip_task(clip_id: int):
             task_exception = err # Store exception
             raise # Re-raise to main handler
 
+
         # === Phase 2: Main Processing (Calculate Time, Download Source, Extract Clips) ===
         try:
             relative_split_frame = split_request_frame # Already validated as int
@@ -245,6 +243,7 @@ def split_clip_task(clip_id: int):
             final_original_state = 'split_failed' # Ensure state is marked for error handling
             raise # Re-raise to main handler
 
+
         # === Phase 3: Final Database Updates (Upload New, Archive Old, Delete Artifacts) ===
         # (Uses the same transaction)
         final_error_message = ""
@@ -304,7 +303,8 @@ def split_clip_task(clip_id: int):
             conn.commit() # Commit creation of new clips and archiving of old one
             logger.info(f"TASK [Split]: Finished successfully for original clip {clip_id}. Final State: {final_original_state}. New Clips: {new_clip_ids}")
 
-            # --- Post-Commit S3 Cleanup (Optional - consider moving to separate flow) ---
+            # --- Post-Commit S3 Cleanup ---
+            # TODO: Consider moving to separate flow
             # Delete original clip video file AFTER successful commit
             original_clip_s3_key = original_clip_data.get('clip_filepath')
             if original_clip_s3_key:
@@ -325,6 +325,7 @@ def split_clip_task(clip_id: int):
             final_original_state = 'split_failed' # Ensure failure state
             task_exception = final_db_err
             raise # Re-raise to main handler
+
 
     # === Main Error Handling Block ===
     except Exception as e:
@@ -350,7 +351,6 @@ def split_clip_task(clip_id: int):
         # Re-raise the original exception if captured
         if task_exception: raise task_exception
         else: raise # Re-raise generic exception if specific one wasn't stored
-
 
     finally:
         # --- Cleanup ---

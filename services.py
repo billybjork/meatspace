@@ -2,7 +2,7 @@ import ast
 import asyncpg
 from fastapi import Request
 from asyncpg.exceptions import UndefinedTableError
-import re # Import re for sanitizing
+import re
 
 from config import CLOUDFRONT_DOMAIN, log
 
@@ -31,9 +31,7 @@ def format_clip_data(record, request: Request):
     # Sanitize title further if needed, e.g., remove common prefixes/suffixes
     title = re.sub(r'^(Clip|Scene)\s?', '', title).strip()
 
-
     # --- Get S3 Keys ---
-    # *** UPDATED: Fetch the representative keyframe key ***
     representative_keyframe_s3_key = record.get('representative_keyframe_s3_key')
     clip_s3_key = record.get('clip_filepath') # Video clip path remains the same
 
@@ -84,9 +82,6 @@ def format_clip_data(record, request: Request):
         except (ValueError, TypeError):
              log.warning(f"Could not convert similarity score '{similarity_score}' to float for clip {clip_identifier}")
              formatted_data["score"] = 0.0 # Default or None?
-
-    # Add other potential fields if needed
-    # e.g., "can_merge_next": record.get('can_merge_next') # Passed from review query
 
     return formatted_data
 

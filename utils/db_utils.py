@@ -21,11 +21,12 @@ except Exception as e:
 DATABASE_URL = os.getenv("DATABASE_URL")
 MEDIA_BASE_DIR = os.getenv("MEDIA_BASE_DIR")
 
-# --- Connection Pooling for psycopg2 (Crucial for Prefect Tasks) ---
+# --- Connection Pooling for psycopg2 (crucial for Prefect Tasks) ---
 db_pool = None
 # TODO: Change to environment variables?
 MIN_POOL_CONN = int(os.getenv("PREFECT_DB_MIN_POOL", 1)) # Allow tuning pool size
 MAX_POOL_CONN = int(os.getenv("PREFECT_DB_MAX_POOL", 15)) # Allow tuning pool size
+
 
 def initialize_db_pool():
     """Initializes the psycopg2 connection pool."""
@@ -47,6 +48,7 @@ def initialize_db_pool():
             logger.error(f"Failed to initialize psycopg2 connection pool: {e}", exc_info=True)
             db_pool = None # Ensure pool is None if init failed
             raise # Re-raise to prevent silent failure
+
 
 def get_db_connection(cursor_factory=None):
     """Gets a connection from the pool. Retries briefly on failure."""
@@ -296,6 +298,7 @@ def get_pending_split_jobs() -> list[tuple[int, int]]:
             # though releasing logic handles this. Just ensure release is called.
             release_db_connection(conn) # Release back to pool
     return split_jobs
+
 
 # Close the pool, e.g., on application shutdown if used outside Prefect
 def close_db_pool():

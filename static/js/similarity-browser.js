@@ -1,3 +1,7 @@
+/**
+ * All scripts relating to similarity_browser UI
+ */
+
 document.addEventListener('DOMContentLoaded', () => {
     console.log("Meatspace script loaded. Setting up listeners.");
 

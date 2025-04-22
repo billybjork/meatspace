@@ -2,16 +2,15 @@ import os
 import logging
 from dotenv import load_dotenv
 
-# Load .env relative to this config file's location (assuming project root)
 dotenv_path = os.path.join(os.path.dirname(__file__), '.env')
 load_dotenv(dotenv_path=dotenv_path)
-print(f"Attempted loading .env from: {dotenv_path}") # Debug print
+print(f"Attempted loading .env from: {dotenv_path}")
 
 # --- Logging Setup ---
 log = logging.getLogger("meatspace_api") # Specific logger name for the API
 if not log.hasHandlers():
     handler = logging.StreamHandler()
-    # Example format - adjust as needed
+    # Logging format
     formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(module)s:%(lineno)d] - %(message)s')
     handler.setFormatter(formatter)
     log.addHandler(handler)

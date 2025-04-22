@@ -7,17 +7,16 @@ from pathlib import Path
 import shutil
 import json
 import math
-from datetime import datetime # Added for timestamps
+from datetime import datetime
 
 from prefect import task, get_run_logger
 import psycopg2
-from psycopg2 import sql, extras # Import extras for DictCursor and Json helper
+from psycopg2 import sql, extras
 
 from botocore.exceptions import ClientError
 
-# --- Project Root Setup (Robust Import) ---
+# --- Project Root Setup ---
 try:
-    # Assuming tasks/sprite_generator.py relative to project root
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
@@ -33,18 +32,15 @@ except ImportError:
         def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB connection getter")
         def release_db_connection(conn): pass # Dummy release
 
-# --- Import Shared Components (S3, FFMPEG) ---
+# --- Import Shared Components ---
 s3_client = None
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
-FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg") # Get FFMPEG path from env or default
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 
 try:
     # Attempt to import from splice first (might have pre-initialized client)
-    # Adjust the import path based on your actual project structure if needed
-    # Assuming splice.py is in the same 'tasks' directory: from .splice import ...
-    # If it's elsewhere, adjust: from other_module.splice import ...
     from .splice import s3_client as splice_s3_client, run_ffmpeg_command, sanitize_filename
-    if splice_s3_client: s3_client = splice_s3_client # Use imported client if available
+    if splice_s3_client: s3_client = splice_s3_client
     # FFMPEG_PATH might also be defined in splice, prefer env var or default 'ffmpeg'
     # Keep run_ffmpeg_command and sanitize_filename from splice if available
     print("INFO: Imported shared components (S3 client?, ffmpeg runner, sanitizer) from tasks.splice")
@@ -99,6 +95,7 @@ SPRITE_TILE_HEIGHT = int(os.getenv("SPRITE_TILE_HEIGHT", -1)) # -1 maintains asp
 SPRITE_FPS = int(os.getenv("SPRITE_FPS", 24))
 SPRITE_COLS = int(os.getenv("SPRITE_COLS", 5))
 ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet" # Constant for artifact type
+
 
 @task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45)
 def generate_sprite_sheet_task(clip_id: int):
@@ -397,7 +394,6 @@ def generate_sprite_sheet_task(clip_id: int):
                           # This shouldn't happen with RETURNING id unless insert failed silently?
                           logger.error("Artifact insert/update query did not return an ID.")
                           raise psycopg2.DatabaseError("Artifact insert/update failed unexpectedly.")
-
 
                  # 2. Update Clip Status
                  logger.info(f"Updating clip {clip_id} state to '{intended_success_state}'")

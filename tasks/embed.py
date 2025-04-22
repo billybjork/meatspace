@@ -3,16 +3,13 @@ from PIL import Image
 import os
 import re
 import numpy as np
-import traceback
 from pathlib import Path
 import tempfile
 import shutil
-from datetime import datetime # Added for timestamp update
 
 from prefect import task, get_run_logger
 import psycopg2
 from psycopg2 import sql
-from psycopg2.extras import execute_values # Keep for potential future use, though not used directly now
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError
@@ -41,9 +38,6 @@ except ImportError as e:
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 AWS_REGION = os.getenv("AWS_REGION")
 
-# --- Constants ---
-ARTIFACT_TYPE_KEYFRAME = "keyframe"
-
 # --- Initialize S3 Client ---
 s3_client = None
 if S3_BUCKET_NAME:
@@ -59,13 +53,16 @@ if S3_BUCKET_NAME:
 else:
      print("Embed Task: WARNING - S3_BUCKET_NAME not set. S3 operations will fail.")
 
+# --- Constants ---
+ARTIFACT_TYPE_KEYFRAME = "keyframe"
+
 
 # --- Global Model Cache ---
 _model_cache = {}
 def get_cached_model_and_processor(model_name, device='cpu'):
     """Loads model/processor or retrieves from cache."""
     logger = get_run_logger()
-    cache_key = f"{model_name}_{device}" # Include device in cache key
+    cache_key = f"{model_name}_{device}"
     if cache_key in _model_cache:
         logger.debug(f"Using cached model/processor for: {cache_key}")
         return _model_cache[cache_key]
@@ -387,7 +384,6 @@ def generate_embeddings_task(
                  logger.warning(f"Loaded {len(images)} images, but expected {len(local_paths_to_load)}. Check file integrity.")
                  if not images: raise RuntimeError("Failed to load any valid images.")
 
-
             # Load model (cached)
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             model, processor, model_type, embedding_dim = get_cached_model_and_processor(model_name, device)
@@ -446,6 +442,7 @@ def generate_embeddings_task(
 
             if final_embedding_np is None:
                 raise RuntimeError(f"Final embedding could not be determined for clip {clip_id}")
+
 
             # 9. Format Embedding String
             embedding_list = final_embedding_np.tolist()

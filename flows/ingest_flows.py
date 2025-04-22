@@ -3,7 +3,7 @@ import os
 from pathlib import Path
 import traceback
 import time
-from datetime import timedelta, datetime # Added datetime
+from datetime import timedelta
 
 # --- Project Root Setup ---
 project_root = Path(__file__).parent.parent.resolve()
@@ -17,7 +17,7 @@ from prefect.futures import wait
 
 # --- Task Imports ---
 from tasks.intake import intake_task
-from tasks.splice import splice_video_task
+from tasks.splice import splice_video_task, s3_client, S3_BUCKET_NAME
 from tasks.sprite import generate_sprite_sheet_task
 from tasks.keyframe import extract_keyframes_task
 from tasks.embed import generate_embeddings_task
@@ -30,55 +30,13 @@ from utils.db_utils import (
     get_source_input_from_db,
     get_pending_merge_pairs,
     get_pending_split_jobs,
-    # get_db_connection # Sync connector for sync parts of initiator
 )
-# --- Import Async DB Utils ---
-# Needed for the async cleanup flow
-try:
-    # Assuming database.py provides these asyncpg pool management functions
-    from database import connect_db, close_db
-    ASYNC_DB_CONFIGURED = True
-    print("Async DB configuration (asyncpg) loaded for cleanup flow.")
-except ImportError as e:
-     print(f"WARNING: Could not import async DB functions from database.py: {e}. Cleanup flow may fail.", file=sys.stderr)
-     ASYNC_DB_CONFIGURED = False
 
-
-# --- S3 Import (Needed for cleanup flow) ---
-# Attempt to import S3 client configuration
-try:
-    # Assuming s3_client might be initialized centrally or in a task module like splice
-    # Ensure it's accessible here. Central initialization is recommended.
-    # For now, relying on tasks.splice import as before.
-    from tasks.splice import s3_client, S3_BUCKET_NAME
-    from botocore.exceptions import ClientError
-    if not S3_BUCKET_NAME:
-        raise ImportError("S3_BUCKET_NAME not configured/imported")
-    if s3_client is None:
-         # Attempt to initialize if None but bucket name exists (e.g., if splice wasn't imported yet)
-         # This is a fallback - central init is better
-         import boto3
-         print("Attempting fallback S3 client initialization in ingest_flows.")
-         s3_client = boto3.client('s3', region_name=os.getenv("AWS_REGION"))
-
-    S3_CONFIGURED = True
-    print("S3 client configuration loaded successfully for cleanup flow.")
-except ImportError as e:
-    print(f"WARNING: S3 client config not fully available for cleanup flow: {e}. Cleanup may fail.", file=sys.stderr)
-    S3_CONFIGURED = False
-    s3_client = None
-    S3_BUCKET_NAME = None
-    # Define ClientError if botocore couldn't be imported or lacks it
-    if 'ClientError' not in globals():
-        class ClientError(Exception): pass # Define dummy exception
-except Exception as s3_init_err:
-     print(f"ERROR: Unexpected error initializing S3 client for cleanup flow: {s3_init_err}", file=sys.stderr)
-     S3_CONFIGURED = False
-     s3_client = None
-     S3_BUCKET_NAME = None
-     if 'ClientError' not in globals():
-        class ClientError(Exception): pass
-
+# --- Async DB and S3 client imports ---
+from database import connect_db, close_db
+ASYNC_DB_CONFIGURED = True
+from botocore.exceptions import ClientError
+S3_CONFIGURED = True
 
 # --- Configuration ---
 DEFAULT_KEYFRAME_STRATEGY = os.getenv("DEFAULT_KEYFRAME_STRATEGY", "midpoint") # e.g., 'midpoint', 'multi'
@@ -93,13 +51,14 @@ KEYFRAME_TIMEOUT = int(os.getenv("KEYFRAME_TIMEOUT", 600)) # 10 minutes default 
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900)) # 15 minutes default timeout
 CLIP_CLEANUP_DELAY_MINUTES = int(os.getenv("CLIP_CLEANUP_DELAY_MINUTES", 30)) # Wait time before cleaning up
 
-
 # --- Constants ---
-ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet" # Constant for artifact type
+ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet"
+
 
 # =============================================================================
 # ===                        PROCESSING FLOWS                             ===
 # =============================================================================
+
 
 @task
 def submit_post_review_flow_task(clip_id: int):
@@ -111,10 +70,11 @@ def submit_post_review_flow_task(clip_id: int):
     # Parameters passed here become parameters for the sub-flow run
     process_clip_post_review.submit(
         clip_id=clip_id,
-        keyframe_strategy=DEFAULT_KEYFRAME_STRATEGY, # Pass the strategy name
+        keyframe_strategy=DEFAULT_KEYFRAME_STRATEGY,
         model_name=DEFAULT_EMBEDDING_MODEL
     )
     logger.info(f"Subflow submission task finished for clip_id: {clip_id}")
+
 
 @flow(log_prints=True)
 def process_clip_post_review(
@@ -142,7 +102,7 @@ def process_clip_post_review(
         logger.info(f"Submitting keyframe task for clip_id: {clip_id} with strategy: {keyframe_strategy}")
         keyframe_job = extract_keyframes_task.submit(
             clip_id=clip_id,
-            strategy=keyframe_strategy, # Pass the strategy name directly
+            strategy=keyframe_strategy,
             overwrite=False # Usually don't overwrite in the standard post-review flow
         )
         # Wait for keyframe task to finish before proceeding to embedding
@@ -154,7 +114,7 @@ def process_clip_post_review(
         logger.info(f"Keyframing task completed successfully for clip_id: {clip_id}.")
         keyframe_task_succeeded = True
 
-        # --- 2. Embedding (Only if keyframing succeeded) ---
+        # --- 2. Embedding (only if keyframing succeeded) ---
         # Construct the embedding strategy label based on keyframe strategy
         # Example: if keyframe_strategy is 'multi', default embedding might be 'keyframe_multi_avg'
         if keyframe_strategy == "multi":
@@ -166,7 +126,7 @@ def process_clip_post_review(
         embedding_job = generate_embeddings_task.submit(
             clip_id=clip_id,
             model_name=model_name,
-            generation_strategy=embedding_strategy_label, # Pass the derived label
+            generation_strategy=embedding_strategy_label,
             overwrite=False # Usually don't overwrite here
         )
         # Wait for embedding task
@@ -178,7 +138,6 @@ def process_clip_post_review(
 
     except Exception as e:
          stage = "embedding" if keyframe_task_succeeded else "keyframing"
-         # Log error with traceback
          logger.error(f"Error during post-review processing flow (stage: {stage}) for clip_id {clip_id}: {e}", exc_info=True)
          # Optionally cancel downstream task if upstream failed mid-wait
          # if stage == "keyframing" and embedding_job: embedding_job.cancel() # Prefect Cloud/Server might handle this
@@ -220,9 +179,9 @@ def scheduled_ingest_initiator():
     # Embedding only stage starts from 'keyframed'
     embedding_processing_states = ['embedding', 'embedding_failed']
     # Merge starts from 'pending_merge_target' or 'marked_for_merge_into_previous'
-    merge_processing_states = ['merging', 'merge_failed'] # Tasks set these
+    merge_processing_states = ['merging', 'merge_failed']
     # Split starts from 'pending_split'
-    split_processing_states = ['splitting', 'split_failed'] # Task sets these
+    split_processing_states = ['splitting', 'split_failed']
 
     # --- Stage 1: Intake ---
     stage_name = "Intake"
@@ -237,7 +196,7 @@ def scheduled_ingest_initiator():
             logger.info(f"[{stage_name}] Found {len(new_source_ids)} sources. Submitting intake tasks...")
             for sid in new_source_ids:
                 try:
-                    source_input = get_source_input_from_db(sid) # Uses sync db_utils
+                    source_input = get_source_input_from_db(sid)
                     if source_input:
                         intake_task.submit(source_video_id=sid, input_source=source_input)
                         logger.debug(f"[{stage_name}] Submitted intake_task for source_id: {sid}")
@@ -275,7 +234,7 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed to query for 'downloaded' source videos: {db_query_err}", exc_info=True)
          error_count += 1
 
-    # --- Stage 2.5: Sprite Sheet Generation ---
+    # --- Stage 3: Sprite Sheet Generation ---
     stage_name = "SpriteGen"
     try:
         clips_needing_sprites = get_items_for_processing(
@@ -299,7 +258,7 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed to query for 'pending_sprite_generation' clips: {db_query_err}", exc_info=True)
          error_count += 1
 
-    # --- Stage 3: Post-Review Start (Keyframe/Embed Subflow) ---
+    # --- Stage 4: Post-Review Start (Keyframe/Embed Subflow) ---
     stage_name = "Post-Review Start"
     try:
         # Find clips approved after review (state might be set by cleanup flow or review UI)
@@ -326,7 +285,7 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed to query for 'review_approved' clips: {db_query_err}", exc_info=True)
          error_count += 1
 
-    # --- Stage 3.5: Embedding Only (If keyframed but embedding pending/failed) ---
+    # --- Stage 4.5: Embedding Only (if keyframed but embedding pending/failed) ---
     stage_name = "Embedding"
     try:
         # Find clips that are keyframed but not yet embedded (or failed embedding)
@@ -344,7 +303,7 @@ def scheduled_ingest_initiator():
                     generate_embeddings_task.submit(
                         clip_id=cid,
                         model_name=DEFAULT_EMBEDDING_MODEL,
-                        generation_strategy=DEFAULT_EMBEDDING_STRATEGY_LABEL # Use the configured default
+                        generation_strategy=DEFAULT_EMBEDDING_STRATEGY_LABEL
                     )
                     logger.debug(f"[{stage_name}] Submitted generate_embeddings_task for clip_id: {cid}")
                     time.sleep(TASK_SUBMIT_DELAY)
@@ -355,10 +314,10 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed to query for 'keyframed' clips: {db_query_err}", exc_info=True)
          error_count += 1
 
-    # --- Stage 4: Merge (Backward Merge) ---
+    # --- Stage 5.1: Merge (backward merge with prior clip) ---
     stage_name = "Merge"
     try:
-        merge_pairs = get_pending_merge_pairs() # Uses sync db_utils
+        merge_pairs = get_pending_merge_pairs()
         processed_counts[stage_name] = len(merge_pairs)
 
         if merge_pairs:
@@ -383,10 +342,10 @@ def scheduled_ingest_initiator():
          logger.error(f"[{stage_name}] Failed during backward merge check/submission: {db_query_err}", exc_info=True)
          error_count += 1
 
-    # --- Stage 5: Split ---
+    # --- Stage 5.2: Split ---
     stage_name = "Split"
     try:
-        clips_to_split_data = get_pending_split_jobs() # Uses sync db_utils, gets list of (id, frame)
+        clips_to_split_data = get_pending_split_jobs() # Gets list of (id, frame)
         processed_counts[stage_name] = len(clips_to_split_data)
 
         if clips_to_split_data:
@@ -395,8 +354,7 @@ def scheduled_ingest_initiator():
             for cid, split_frame in clips_to_split_data:
                 if cid not in submitted_splits:
                     try:
-                        # The split_clip_task retrieves the split frame itself from metadata
-                        split_clip_task.submit(clip_id=cid)
+                        split_clip_task.submit(clip_id=cid) # Retrieves the split frame itself from metadata
                         submitted_splits.add(cid)
                         logger.debug(f"[{stage_name}] Submitted split_clip_task for original clip_id: {cid} (split requested at frame {split_frame})")
                         time.sleep(TASK_SUBMIT_DELAY)
@@ -422,6 +380,7 @@ def scheduled_ingest_initiator():
 # ===                        CLEANUP FLOW                                 ===
 # =============================================================================
 
+
 @flow(name="Scheduled Clip Cleanup", log_prints=True)
 async def cleanup_reviewed_clips_flow( # Make it async
     cleanup_delay_minutes: int = CLIP_CLEANUP_DELAY_MINUTES
@@ -439,7 +398,7 @@ async def cleanup_reviewed_clips_flow( # Make it async
     logger.info(f"Using cleanup delay: {cleanup_delay_minutes} minutes")
 
     # --- Dependency Checks ---
-    if not S3_CONFIGURED or not s3_client: # Check s3_client instance too
+    if not S3_CONFIGURED or not s3_client:
         logger.error("S3 Client/Config is not available. Cannot perform S3 deletions. Exiting cleanup flow.")
         return
     if not ASYNC_DB_CONFIGURED:
@@ -539,7 +498,7 @@ async def cleanup_reviewed_clips_flow( # Make it async
                                  error_count += 1
                                  s3_deletion_successful = False # Prevent DB update on unexpected error
 
-                    # 3. Update Database (Delete artifact row, Update clip state) - Transactionally
+                    # 3. Update Database Transactionally (delete artifact row, update clip state)
                     if s3_deletion_successful:
                         final_clip_state = None
                         if current_state == 'approved_pending_deletion': final_clip_state = 'review_approved'
@@ -563,7 +522,6 @@ async def cleanup_reviewed_clips_flow( # Make it async
                                     logger.info(f"{log_prefix} Deleted artifact record from DB (Status: {del_result})")
                                     # Check result? 'DELETE 1' or 'DELETE 0'
                                     if del_result.startswith("DELETE"): db_artifact_deleted_count += int(del_result.split()[-1])
-
 
                                 # Update clip state
                                 update_clip_sql = """
@@ -660,7 +618,7 @@ if __name__ == "__main__":
         if flow_to_run == "initiator":
             print("\n--- Testing scheduled_ingest_initiator ---")
             # This flow is synchronous
-            scheduled_ingest_initiator() # Assumes sync DB utils work
+            scheduled_ingest_initiator()
             print("--- Finished scheduled_ingest_initiator ---")
 
         elif flow_to_run == "cleanup":

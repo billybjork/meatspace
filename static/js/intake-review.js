@@ -1,8 +1,146 @@
 /**
- * Main JavaScript for the single-clip review UI.
- * Handles player initialization, keyboard shortcuts, split mode management,
- * and delegates API calls to review-actions.js.
+ * All scripts relating to intake_review UI, including helper functions
+ * for UI feedback/state and API interactions, along with the main logic for
+ * the review UI (player initialization, keyboard shortcuts, split mode).
  */
+
+// --- Helper Functions ---
+
+/**
+ * Displays a temporary feedback message.
+ * @param {HTMLElement} feedbackDiv - The DOM element to display feedback in.
+ * @param {string} message - The message to display.
+ * @param {boolean} [isError=false] - Whether the message represents an error.
+ */
+function showFeedback(feedbackDiv, message, isError = false) {
+    if (!feedbackDiv) return;
+    feedbackDiv.textContent = message;
+    feedbackDiv.className = `action-feedback ${isError ? 'error' : 'success'}`;
+    // Optional: Clear feedback after a delay
+    // setTimeout(() => { if(feedbackDiv) feedbackDiv.textContent = ''; }, isError ? 5000 : 2000);
+}
+
+/**
+ * Sets a processing state (visual cue) on a clip item.
+ * @param {HTMLElement} clipItem - The main container element for the clip review item.
+ * @param {boolean} isProcessing - Whether the item is currently being processed.
+ */
+function setProcessingState(clipItem, isProcessing) {
+    if (!clipItem) return;
+    if (isProcessing) {
+        clipItem.classList.add('processing');
+    } else {
+        clipItem.classList.remove('processing');
+    }
+}
+
+/**
+ * Makes the API call for standard actions (approve, skip, archive, merge_previous, group_previous, retry_sprite_gen).
+ * Reloads the page on success.
+ * @param {string} clipId - The database ID of the clip.
+ * @param {string} action - The action being performed.
+ * @param {HTMLElement} clipItem - The clip item's container element.
+ * @param {HTMLElement} feedbackDiv - The element for displaying feedback messages.
+ * @returns {Promise<{success: boolean, error?: Error}>} Resolves/rejects based on API call.
+ */
+async function performApiAction(clipId, action, clipItem, feedbackDiv) {
+    if (!clipId || !action || !clipItem || !feedbackDiv) {
+         console.error("performApiAction called with missing arguments.");
+         if(feedbackDiv) showFeedback(feedbackDiv, "Internal UI error.", true);
+         return { success: false, error: new Error("Missing arguments") };
+    }
+
+    setProcessingState(clipItem, true);
+    showFeedback(feedbackDiv, `Processing ${action}...`);
+
+    const payload = { action: action };
+
+    try {
+        const response = await fetch(`/api/clips/${clipId}/action`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const result = await response.json(); // Try to parse JSON even on error for details
+
+        if (!response.ok) {
+            // Use detail from JSON if available, otherwise use status text
+            const errorDetail = result?.detail || `HTTP error ${response.status}`;
+            throw new Error(errorDetail);
+        }
+
+        showFeedback(feedbackDiv, `Success: ${action} processed. Loading next...`, false);
+        // Reload the page to get the next clip
+        window.location.reload();
+        // Return success, although the reload interrupts further JS execution here
+        return { success: true };
+
+    } catch (error) {
+        console.error(`API action '${action}' failed for ${clipId}:`, error);
+        showFeedback(feedbackDiv, `Error (${action}): ${error.message}`, true);
+        setProcessingState(clipItem, false); // Re-enable interaction on error
+        return { success: false, error: error };
+    }
+}
+
+/**
+ * Makes the API call to queue a split action.
+ * Reloads the page on success.
+ * @param {string} clipId - The database ID of the clip.
+ * @param {number} frame - The frame number at which to split the clip.
+ * @param {HTMLElement} clipItem - The clip item's container element.
+ * @param {HTMLElement} feedbackDiv - The main feedback element for the clip item.
+ * @param {HTMLElement} splitControlsElement - The container for the split controls UI.
+ * @returns {Promise<{success: boolean, error?: Error}>} Resolves/rejects based on API call.
+ */
+async function performApiSplit(clipId, frame, clipItem, feedbackDiv, splitControlsElement) {
+     if (!clipId || typeof frame !== 'number' || !clipItem || !feedbackDiv || !splitControlsElement) {
+        console.error("performApiSplit called with missing arguments.");
+        if(feedbackDiv) showFeedback(feedbackDiv, "Internal UI error.", true);
+        return { success: false, error: new Error("Missing arguments") };
+    }
+
+    setProcessingState(clipItem, true);
+    showFeedback(feedbackDiv, 'Queueing split...');
+    const splitFeedback = splitControlsElement.querySelector('.split-feedback');
+    if (splitFeedback) splitFeedback.textContent = 'Queueing split...';
+
+    const payload = { split_request_at_frame: frame };
+
+    try {
+        const response = await fetch(`/api/clips/${clipId}/split`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const result = await response.json(); // Try parsing on error too
+
+        if (!response.ok) {
+             const errorDetail = result?.detail || `HTTP error ${response.status}`;
+             throw new Error(errorDetail);
+        }
+
+        showFeedback(feedbackDiv, 'Success: Split queued. Loading next...', false);
+        // Reload the page
+        window.location.reload();
+        return { success: true };
+
+    } catch (error) {
+        console.error(`Split API failed for clip ${clipId}:`, error);
+        const errorMsg = `Split Error: ${error.message}`;
+        showFeedback(feedbackDiv, errorMsg, true);
+        if (splitFeedback) {
+             splitFeedback.textContent = errorMsg;
+             splitFeedback.style.color = '#d00';
+         }
+        setProcessingState(clipItem, false); // Re-enable on error
+        return { success: false, error: error };
+    }
+}
+
+
+// --- Main Review UI Logic ---
+
 document.addEventListener('DOMContentLoaded', () => {
     // --- Global Setup ---
     const reviewContainer = document.querySelector('.review-container');
@@ -16,9 +154,9 @@ document.addEventListener('DOMContentLoaded', () => {
     // Keyboard state tracking
     let keyState = {
         'a': false, 's': false, 'd': false, 'f': false, 'g': false, // Action keys
-        'meta': false,    // Cmd on Mac - Still track for potential future use or other shortcuts
-        'control': false, // Ctrl on Win/Linux - Still track
-        // We don't need to track Enter/Space/Arrows/Escape state, just their event triggers
+        // Unused currently but still track for potential future use in shortcuts
+        'meta': false,    // Cmd on Mac
+        'control': false, // Ctrl on Win/Linux
     };
 
     // --- Initialization ---
@@ -46,6 +184,7 @@ document.addEventListener('DOMContentLoaded', () => {
             archive: clipItem.querySelector('.archive-btn'),
             merge_previous: clipItem.querySelector('.merge-previous-btn'),
             group_previous: clipItem.querySelector('.group-previous-btn'),
+            retry_sprite_gen: retryBtn // Use the reference already obtained
         };
 
 
@@ -55,7 +194,6 @@ document.addEventListener('DOMContentLoaded', () => {
              // Attempt to parse metadata and initialize player
              if (spriteUrl && spriteMetaJson) {
                  try {
-                     // Metadata might be double-encoded
                      let parsedOnce = JSON.parse(spriteMetaJson);
                      meta = (typeof parsedOnce === 'string') ? JSON.parse(parsedOnce) : parsedOnce;
 
@@ -63,15 +201,14 @@ document.addEventListener('DOMContentLoaded', () => {
                          throw new Error("Parsed metadata is not a valid object.");
                      }
 
-                     // Basic validation and type conversion for essential metadata fields
                      const parsedMeta = {
                         tile_width: parseFloat(meta.tile_width),
                         tile_height_calculated: parseFloat(meta.tile_height_calculated),
                         cols: parseInt(meta.cols, 10),
                         rows: parseInt(meta.rows, 10),
                         total_sprite_frames: parseInt(meta.total_sprite_frames, 10),
-                        clip_fps: parseFloat(meta.clip_fps_source), // Use clip_fps_source
-                        clip_total_frames: parseInt(meta.clip_total_frames_source, 10), // Use clip_total_frames_source
+                        clip_fps: parseFloat(meta.clip_fps_source),
+                        clip_total_frames: parseInt(meta.clip_total_frames_source, 10),
                         spriteUrl: spriteUrl
                     };
 
@@ -86,21 +223,14 @@ document.addEventListener('DOMContentLoaded', () => {
                      if(missingOrInvalidKey) {
                         throw new Error(`Invalid or missing numeric value for metadata key '${missingOrInvalidKey}': ${meta[missingOrInvalidKey]}`);
                      }
-                     parsedMeta.isValid = true; // Mark metadata as valid
+                     parsedMeta.isValid = true;
 
-                     // --- Create and store the SpritePlayer instance ---
-                     // The last argument is the callback function to update split UI on frame changes
+                     // Assume SpritePlayer class is defined/loaded elsewhere
                      window.spritePlayer = new SpritePlayer(currentClipId, viewer, scrubBar, playPauseBtn, frameDisplay, parsedMeta, updateSplitUI);
-                     // console.log(`[Main Init ${currentClipId}] SpritePlayer initialized successfully.`);
 
-                     // Autoplay if requested
                      if (shouldAutoplay && window.spritePlayer) {
-                         // console.log(`[Main Init ${currentClipId}] Autoplaying sprite...`);
-                         // Use a small delay to ensure the browser has rendered and is ready
                          setTimeout(() => window.spritePlayer?.play('autoplay'), 100);
                      }
-
-                     // Focus the viewer for immediate keyboard control after a short delay
                      setTimeout(() => viewer.focus(), 150);
 
                  } catch (e) {
@@ -110,43 +240,39 @@ document.addEventListener('DOMContentLoaded', () => {
                      viewer.classList.add('no-sprite');
                  }
              } else {
-                 // Handle cases where sprite URL or metadata is missing from the start
-                 const spriteErrorMsg = clipItem.querySelector('.clip-info strong[style*="color:orange"]'); // Check for backend failure message
+                 const spriteErrorMsg = clipItem.querySelector('.clip-info strong[style*="color:orange"]');
                  initError = spriteErrorMsg ? 'Sprite generation failed (backend).' : 'Sprite sheet unavailable.';
                  viewer.textContent = initError;
                  viewer.classList.add('no-sprite');
              }
 
-             // Disable controls if initialization failed or sprite is unavailable
              if (initError) {
                  console.warn(`[Main Init ${currentClipId}] Disabling controls due to: ${initError}`);
                  if (scrubBar) scrubBar.disabled = true;
                  if (playPauseBtn) playPauseBtn.disabled = true;
-                 // Find the parent controls div to potentially style it
                  const controlsDiv = document.getElementById(`controls-${currentClipId}`);
-                 if (controlsDiv) controlsDiv.style.opacity = '0.6'; // Dim controls
+                 if (controlsDiv) controlsDiv.style.opacity = '0.6';
 
                  if (splitBtn) {
                      splitBtn.disabled = true;
                      splitBtn.title = "Cannot split: Sprite unavailable or failed.";
                  }
-                 // Ensure retry button is enabled *only* if a sprite error occurred
-                 if (retryBtn && initError.includes('failed')) {
+                 if (retryBtn && (initError.includes('failed') || initError.includes('Error initializing sprite'))) {
                      retryBtn.disabled = false;
+                     actionButtons.retry_sprite_gen = retryBtn;
                  } else if (retryBtn) {
-                     retryBtn.disabled = true; // Disable retry if sprite is just missing, not failed
+                     retryBtn.disabled = true;
                  }
              } else {
-                 // Ensure retry button is disabled if there was no error
                  if (retryBtn) retryBtn.disabled = true;
              }
 
         } else {
             console.error("Sprite viewer element (#sprite-viewer-...) not found in the DOM!");
-            // Display an error message in the main container if possible
              const feedbackDiv = clipItem?.querySelector('.action-feedback');
              if(feedbackDiv) showFeedback(feedbackDiv, "UI Error: Sprite viewer missing.", true);
         }
+
 
         // --- Helper Function to Update Button Active States ---
         function updateActiveButtonState() {
@@ -173,6 +299,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
             }
         }
+
 
         // --- Split Mode UI Management Functions ---
         function activateSplitMode() {
@@ -208,7 +335,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
             player.viewerElement?.focus();
             console.log(`[Main ${currentClipId}] Split mode activated.`);
-            updateActiveButtonState(); // Ensure button states reset
+            updateActiveButtonState();
         }
 
         function cancelSplitMode() {
@@ -222,27 +349,25 @@ document.addEventListener('DOMContentLoaded', () => {
             if (splitControls) splitControls.style.display = 'none';
             if (splitModeBtn) {
                 splitModeBtn.style.display = 'inline-block';
-                // Re-enable based on sprite validity, assuming it doesn't change while in split mode
                 splitModeBtn.disabled = !(window.spritePlayer?.meta?.isValid);
             }
 
-            // Re-enable buttons, respecting their *initial* disabled state from the template
-            // Re-enable buttons, respecting their *initial* disabled state from the template
             allActionButtons.forEach(btn => {
-                // Check if the button was likely disabled by the template's logic
-                // by checking the specific 'title' attribute text.
-                const isDisabledByTemplate = btn.disabled &&
-                   (btn.title.includes("not available or not in an actionable state") || // Check for the combined title
-                    btn.title.includes("Sprite unavailable or failed")); // Check for sprite issue title
+                const isDisabledByInitLogic = btn.disabled && (
+                   btn.title.includes("not available") ||
+                   btn.title.includes("not in an actionable state") ||
+                   btn.title.includes("Sprite unavailable or failed") ||
+                   (btn.classList.contains('retry-sprite-btn') && !actionButtons.retry_sprite_gen)
+                );
 
-                if (!isDisabledByTemplate) {
-                    btn.disabled = false; // Only re-enable if it wasn't disabled by template logic
+                if (!isDisabledByInitLogic) {
+                    btn.disabled = false;
                 }
            });
 
             window.spritePlayer?.viewerElement?.focus();
             console.log(`[Main ${currentClipId}] Split mode cancelled.`);
-            updateActiveButtonState(); // Update button active visual state
+            updateActiveButtonState();
         }
 
         function updateSplitUI(clipId, frameNumber, meta) {
@@ -278,41 +403,27 @@ document.addEventListener('DOMContentLoaded', () => {
             let feedbackMsg = '';
             let isError = true;
 
-            if (totalFrames <= (2 * minFrameMargin)) { feedbackMsg = `Clip too short to split (Frames: ${totalFrames})`; }
-            else if (frameNumber < minFrameMargin) { feedbackMsg = `Cannot split at frame 0. Select frame ≥ ${minFrameMargin}.`; }
-            else if (frameNumber >= (totalFrames - minFrameMargin)) { feedbackMsg = `Cannot split at last frame. Select frame ≤ ${totalFrames - minFrameMargin - 1}.`; }
-            else { isDisabled = false; feedbackMsg = 'Valid split point.'; isError = false; }
+            if (totalFrames <= (2 * minFrameMargin)) {
+                feedbackMsg = `Clip too short to split (Frames: 0-${displayTotalFrames})`;
+            } else if (frameNumber < minFrameMargin) {
+                 feedbackMsg = `Cannot split at frame 0. Select frame ≥ ${minFrameMargin}.`;
+            } else if (frameNumber >= (totalFrames - minFrameMargin)) {
+                 const maxValidFrame = totalFrames - minFrameMargin - 1;
+                 feedbackMsg = `Cannot split at last frame (${displayTotalFrames}). Select frame ≤ ${maxValidFrame}.`;
+            } else {
+                 isDisabled = false;
+                 feedbackMsg = 'Valid split point.';
+                 isError = false;
+            }
 
             confirmSplitBtn.disabled = isDisabled;
             splitFeedback.textContent = feedbackMsg;
             splitFeedback.style.color = isError ? '#d9534f' : '#5cb85c';
-        } // --- End of updateSplitUI ---
+        }
 
 
         // --- Keyboard Event Listeners ---
-        document.addEventListener('keydown', handleGlobalKeydown);
-        document.addEventListener('keyup', handleGlobalKeyup);
-
-        function handleGlobalKeyup(event) {
-            const key = event.key.toLowerCase();
-            let changed = false;
-
-            if (keyState.hasOwnProperty(key)) {
-                if (keyState[key]) changed = true;
-                keyState[key] = false;
-            }
-            if (event.metaKey === false && keyState.meta) {
-                keyState.meta = false; // Changed state, but doesn't directly affect merge visual anymore
-            }
-            if (event.ctrlKey === false && keyState.control) {
-                keyState.control = false; // Changed state, but doesn't directly affect merge visual anymore
-            }
-
-            if (changed) { // Only update if A, S, D, or F was released
-                updateActiveButtonState();
-            }
-        }
-
+        // Use named functions for easier removal on cleanup
         async function handleGlobalKeydown(event) {
             const targetTagName = event.target.tagName.toLowerCase();
             if (['input', 'textarea', 'select'].includes(targetTagName)) {
@@ -325,28 +436,24 @@ document.addEventListener('DOMContentLoaded', () => {
             const viewerFocused = document.activeElement === player?.viewerElement;
             let keyStateChanged = false;
 
-            // Update modifier key states (still track them)
             if (event.metaKey !== keyState.meta) { keyState.meta = event.metaKey; }
             if (event.ctrlKey !== keyState.control) { keyState.control = event.ctrlKey; }
 
-            // Update primary action key states
             if (keyState.hasOwnProperty(key)) {
                  if (!keyState[key]) keyStateChanged = true;
                  keyState[key] = true;
             }
 
-            // Update Button Visual State if A,S,D, or F was pressed
             if (keyStateChanged) {
                  updateActiveButtonState();
             }
 
-            // --- Actions Requiring Enter Key ---
             if (key === 'enter') {
                 event.preventDefault();
                 const feedbackDiv = clipItem.querySelector('.action-feedback');
                 let actionHandled = false;
-
                 let actionToPerform = null;
+
                 if (keyState.a) actionToPerform = 'approve';
                 else if (keyState.s) actionToPerform = 'skip';
                 else if (keyState.d) actionToPerform = 'archive';
@@ -358,54 +465,48 @@ document.addEventListener('DOMContentLoaded', () => {
                          showFeedback(feedbackDiv, "Merge with previous is not available.", true);
                          setTimeout(() => { if(feedbackDiv) feedbackDiv.textContent = ''; }, 3000);
                          keyState.f = false;
-                         updateActiveButtonState(); // Update UI as F key is no longer effectively down
+                         updateActiveButtonState();
                     }
                 }
                 else if (keyState.g) {
                     const groupBtn = actionButtons['group_previous'];
-                    if (groupBtn && !groupBtn.disabled) { actionToPerform = 'group_previous'; }
-                    else {
+                    if (groupBtn && !groupBtn.disabled) {
+                        actionToPerform = 'group_previous';
+                    } else {
                          showFeedback(feedbackDiv, "Group with previous is not available.", true);
                          setTimeout(() => { if(feedbackDiv) feedbackDiv.textContent = ''; }, 3000);
-                         keyState.g = false; // Reset g state if button disabled
+                         keyState.g = false;
                          updateActiveButtonState();
                     }
                }
 
-                // Handle Split confirmation FIRST if in split mode
                 if (splitModeActive) {
                      const confirmBtn = clipItem.querySelector('.confirm-split-btn');
                      if (confirmBtn && !confirmBtn.disabled) {
                          console.log("[Keyboard] Enter: Confirming split...");
                          confirmBtn.disabled = true;
-                         setProcessingState(clipItem, true);
                          const frame = player?.getCurrentFrame();
                          if (typeof frame === 'number') {
                               await performApiSplit(currentClipId, frame, clipItem, feedbackDiv, clipItem.querySelector('.split-controls'));
                          } else {
                               showFeedback(feedbackDiv, "Error: Could not get split frame.", true);
                               confirmBtn.disabled = false;
-                              setProcessingState(clipItem, false);
                          }
                          actionHandled = true;
                      }
-                // Execute standard action if split wasn't handled and an action key was held
                 } else if (actionToPerform) {
                      console.log(`[Keyboard] Enter: Triggering action '${actionToPerform}'`);
-                     setProcessingState(clipItem, true);
                      await performApiAction(currentClipId, actionToPerform, clipItem, feedbackDiv);
                      actionHandled = true;
                 }
 
-                // Reset primary action key states after Enter
-                keyState.a = false; keyState.s = false; keyState.d = false; keyState.f = false;
+                keyState.a = false; keyState.s = false; keyState.d = false; keyState.f = false; keyState.g = false;
                 if (actionHandled) {
-                     updateActiveButtonState(); // Ensure buttons deactivate after Enter completes
+                     updateActiveButtonState();
                      return;
                 }
             }
 
-            // --- Handle Other Keys (Space, Arrows, Escape) ---
             if (!player || !player.meta?.isValid) {
                 if (key === 'escape' && splitModeActive) {
                      event.preventDefault();
@@ -413,6 +514,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 return;
             }
+
              switch (key) {
                  case ' ':
                      if (viewerFocused) {
@@ -438,42 +540,95 @@ document.addEventListener('DOMContentLoaded', () => {
                       }
                       break;
              }
-        } // --- End handleGlobalKeydown ---
+        }
 
-        // --- Click Listener (Backup / Visual Aid) ---
+        function handleGlobalKeyup(event) {
+            const key = event.key.toLowerCase();
+            let changed = false;
+
+            if (keyState.hasOwnProperty(key)) {
+                if (keyState[key]) changed = true;
+                keyState[key] = false;
+            }
+            if (event.metaKey === false && keyState.meta) {
+                keyState.meta = false;
+            }
+            if (event.ctrlKey === false && keyState.control) {
+                keyState.control = false;
+            }
+
+            if (changed) {
+                updateActiveButtonState();
+            }
+        }
+
+        document.addEventListener('keydown', handleGlobalKeydown);
+        document.addEventListener('keyup', handleGlobalKeyup);
+
+
+        // --- Click Listener ---
          if (clipItem) {
              clipItem.addEventListener('click', async (event) => {
                  const target = event.target;
                  const actionBtn = target.closest('.action-btn');
-                 if (!actionBtn || actionBtn.disabled || clipItem.classList.contains('processing')) { return; }
+
+                 if (!actionBtn || actionBtn.disabled || clipItem.classList.contains('processing')) {
+                     if (!target.closest('.sprite-play-pause-btn')) {
+                          return;
+                     }
+                 }
+
                  const action = actionBtn.dataset.action;
                  const feedbackDiv = clipItem.querySelector('.action-feedback');
                  const player = window.spritePlayer;
-                 if (!action) { console.warn("Clicked button has no data-action defined."); return; }
-                 if (player) player.pause('buttonClick');
+
+                 if (player && action !== 'toggle_play_pause') {
+                    player.pause('buttonClick');
+                 }
+
+                 if (!action) {
+                    if (!target.closest('.sprite-play-pause-btn')) {
+                         console.warn("Clicked button has no data-action defined:", actionBtn);
+                    }
+                    return;
+                 }
 
                  switch (action) {
-                     case 'approve': case 'skip': case 'archive': case 'retry_sprite_gen': case 'merge_previous': case 'group_previous':
-                         setProcessingState(clipItem, true);
+                     case 'approve':
+                     case 'skip':
+                     case 'archive':
+                     case 'retry_sprite_gen':
+                     case 'merge_previous':
+                     case 'group_previous':
                          await performApiAction(currentClipId, action, clipItem, feedbackDiv);
                          break;
-                     case 'enter_split_mode': activateSplitMode(); break;
-                     case 'cancel_split_mode': cancelSplitMode(); break;
+                     case 'enter_split_mode':
+                         activateSplitMode();
+                         break;
+                     case 'cancel_split_mode':
+                         cancelSplitMode();
+                         break;
                      case 'confirm_split':
                          const frame = player?.getCurrentFrame();
                          if (typeof frame === 'number') {
-                             actionBtn.disabled = true; setProcessingState(clipItem, true);
+                             actionBtn.disabled = true;
                              await performApiSplit(currentClipId, frame, clipItem, feedbackDiv, clipItem.querySelector('.split-controls'));
-                         } else { showFeedback(feedbackDiv, "Error: Cannot get frame number to split.", true); }
+                         } else {
+                             showFeedback(feedbackDiv, "Error: Cannot get frame number to split.", true);
+                         }
                          break;
-                     default: console.log("Unknown button action clicked:", action);
+                     default:
+                         console.log("Unknown button action clicked:", action);
                  }
              });
-             const playPauseBtn = clipItem.querySelector('.sprite-play-pause-btn');
-             if(playPauseBtn && window.spritePlayer) {
-                 playPauseBtn.addEventListener('click', (e) => {
+
+             const playPauseBtnInstance = clipItem.querySelector('.sprite-play-pause-btn');
+             if(playPauseBtnInstance && window.spritePlayer) {
+                 playPauseBtnInstance.addEventListener('click', (e) => {
                       e.stopPropagation();
-                      if (!playPauseBtn.disabled) { window.spritePlayer.togglePlayback(); }
+                      if (!playPauseBtnInstance.disabled && window.spritePlayer) {
+                          window.spritePlayer.togglePlayback();
+                      }
                  });
              }
          }
@@ -487,10 +642,11 @@ document.addEventListener('DOMContentLoaded', () => {
             }
             document.removeEventListener('keydown', handleGlobalKeydown);
             document.removeEventListener('keyup', handleGlobalKeyup);
+            console.log("[Main] Removed global key listeners.");
         });
 
     } else {
-        console.log("No clip review item found on the page.");
+        console.log("No clip review item (.clip-review-item) found on the page.");
     }
 
-}); // --- End DOMContentLoaded ---
+});

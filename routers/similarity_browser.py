@@ -4,11 +4,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 import asyncpg
 from asyncpg.exceptions import UndefinedTableError, UndefinedFunctionError, DataError
 
-# Import shared components
 from config import log, DEFAULT_MODEL_NAME, DEFAULT_GENERATION_STRATEGY, NUM_RESULTS
 from database import get_db_connection
-# Assuming services.py contains the necessary updated function
-# NOTE: format_clip_data in services.py MUST be updated to handle 'representative_keyframe_s3_key'
 from services import format_clip_data, fetch_available_embedding_options, parse_embedding_data
 
 router = APIRouter(
@@ -18,6 +15,7 @@ router = APIRouter(
 # Constants for Artifacts
 ARTIFACT_TYPE_KEYFRAME = "keyframe"
 REPRESENTATIVE_TAG = "representative"
+
 
 @router.get("/", response_class=HTMLResponse, name="index")
 async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_connection)):
@@ -34,7 +32,6 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         template_context["available_options"] = available_options
 
         # Find a random clip that *has* embeddings for the selected model/strategy
-        # No change needed here as it only needs the identifier for redirect
         random_clip_record = await conn.fetchrow(
             """
             SELECT c.clip_identifier
@@ -51,7 +48,7 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         )
 
         if random_clip_record and random_clip_record['clip_identifier']:
-            random_clip_identifier = random_clip_record['clip_identifier'] # Use identifier
+            random_clip_identifier = random_clip_record['clip_identifier']
             # Determine model/strategy for redirect (use default or first available)
             default_exists = any(
                 opt['model_name'] == DEFAULT_MODEL_NAME and opt['strategy'] == DEFAULT_GENERATION_STRATEGY
@@ -88,6 +85,7 @@ async def index(request: Request, conn: asyncpg.Connection = Depends(get_db_conn
         log.error(f"Error in index route: {e}", exc_info=True)
         template_context["error"] = "An unexpected error occurred loading the page."
         return templates.TemplateResponse("index.html", template_context)
+
 
 @router.get("/query/{clip_identifier}", response_class=HTMLResponse, name="query_clip")
 async def query_clip(
@@ -135,7 +133,6 @@ async def query_clip(
 
         # Use the fetched DB ID
         query_clip_db_id = query_clip_record['id']
-        # IMPORTANT: format_clip_data needs to be updated to use 'representative_keyframe_s3_key'
         query_info = format_clip_data(query_clip_record, request)
         template_context["query"] = query_info
 
@@ -187,10 +184,9 @@ async def query_clip(
 
         results = []
         for record in similar_records:
-            # IMPORTANT: format_clip_data needs to be updated to use 'representative_keyframe_s3_key'
             formatted = format_clip_data(record, request)
             if formatted:
-                results.append(formatted) # Score is already in 'formatted' if added by format_clip_data
+                results.append(formatted)
         template_context["results"] = results
 
         if not results and not template_context["error"]:

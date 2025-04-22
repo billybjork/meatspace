@@ -6,15 +6,14 @@ import shutil
 import json
 import re
 import time
-import sys # Import sys for path manipulation if needed
+import sys
 
 from prefect import task, get_run_logger
 import psycopg2
-from psycopg2 import sql, extras # Import extras for DictCursor
+from psycopg2 import sql, extras
 from botocore.exceptions import ClientError
 
-# --- Project Root Setup (if needed, e.g., for utils) ---
-# Assuming db_utils is in ../utils relative to this file's dir
+# --- Project Root Setup ---
 try:
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
@@ -31,7 +30,7 @@ except ImportError:
 s3_client = None
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
-CLIP_S3_PREFIX = os.getenv("CLIP_S3_PREFIX", "clips/") # Ensure this is set
+CLIP_S3_PREFIX = os.getenv("CLIP_S3_PREFIX", "clips/")
 
 try:
     # Attempt to import from splice first
@@ -54,6 +53,7 @@ if not s3_client and S3_BUCKET_NAME:
      try: import boto3; s3_client = boto3.client('s3', region_name=os.getenv("AWS_REGION")); print("Initialized default Boto3 S3 client in merge.")
      except ImportError: print("ERROR: Boto3 required but not installed."); s3_client = None
      except Exception as boto_err: print(f"ERROR: Failed to initialize fallback Boto3 client: {boto_err}"); s3_client = None
+
 
 # --- Task Definition ---
 @task(name="Merge Clips Backward", retries=1, retry_delay_seconds=30)
@@ -209,7 +209,6 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                 logger.info(f"Deleted {cur.rowcount} existing artifact(s) for clips {clip_id_target} and {clip_id_source}.")
 
                 # 2. Update the Target Clip (N-1)
-                # REMOVED nullification of sprite/keyframe/embedding columns
                 update_target_sql = sql.SQL("""
                     UPDATE clips
                     SET
@@ -233,7 +232,6 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                 logger.info(f"Updated target clip {clip_id_target}. State -> 'pending_sprite_generation'.")
 
                 # 3. Archive the Source Clip (N)
-                # REMOVED nullification of non-existent columns
                 archive_source_sql = sql.SQL("""
                     UPDATE clips
                     SET

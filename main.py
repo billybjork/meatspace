@@ -68,8 +68,8 @@ app.state.templates = templates
 log.info("Static files and Jinja2 templates configured.")
 
 # --- Include Routers ---
-app.include_router(search_router)      # Includes routes like / and /query/{id}
-app.include_router(review_ui_router)   # Includes /review
+app.include_router(search_router)
+app.include_router(review_ui_router)
 app.include_router(review_api_router)  # Includes /api/clips/... actions
 log.info("Included API routers.")
 

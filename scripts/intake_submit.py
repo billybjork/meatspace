@@ -1,38 +1,42 @@
 import argparse
-from pathlib import Path
 import os
 import sys
+from pathlib import Path
+
 import psycopg2
 from dotenv import load_dotenv
 
-project_root_for_env = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-dotenv_path = os.path.join(project_root_for_env, '.env')
+# Resolve project root and load .env
+project_root = Path(__file__).resolve().parent.parent
+dotenv_path = project_root / '.env'
 
-if os.path.exists(dotenv_path):
+if dotenv_path.exists():
     load_dotenv(dotenv_path=dotenv_path)
     print(f"Loaded environment variables from: {dotenv_path}")
 else:
     print(f"Warning: .env file not found at {dotenv_path}. Attempting to load from current environment.")
-    # Attempt loading from environment directly if .env not found
     load_dotenv()
 
+# Check for required env variable
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     print("ERROR: DATABASE_URL environment variable not found.")
     sys.exit(1)
 
-project_root_for_imports = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
-if project_root_for_imports not in sys.path:
-    sys.path.insert(0, project_root_for_imports)
+# Add project root to sys.path if needed
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
+# Try importing intake task
 try:
     from tasks.intake import intake_task
 except ImportError as e:
     print(f"Error importing Prefect task 'intake_task': {e}")
-    print(f"Ensure you are running this script relative to the project root (e.g., python scripts/{os.path.basename(__file__)})")
-    print(f"Project root added to sys.path: {project_root_for_imports}")
-    print("Check if the 'tasks' directory and 'intake.py' exist correctly.")
+    print(f"Ensure you're running this script from the project root (e.g., python scripts/{Path(__file__).name})")
+    print(f"Project root added to sys.path: {project_root}")
+    print("Check that the 'tasks' directory and 'intake.py' exist.")
     sys.exit(1)
+
 
 def create_new_source_video_record(input_url_or_path: str, initial_title: str = None):
     """
@@ -74,22 +78,23 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
                 print("ERROR: Failed to get new ID after insert.")
                 return None
 
-        conn.commit() # Commit the new record
+        conn.commit()
         return new_id
 
-    except psycopg2.Error as db_err: # Catch specific DB errors
+    except psycopg2.Error as db_err:
         print(f"ERROR creating database record (psycopg2): {db_err}")
         if conn:
-            conn.rollback() # Rollback on error
+            conn.rollback()
         return None
     except Exception as e:
         print(f"ERROR creating database record (General): {e}")
         if conn:
-            conn.rollback() # Rollback on error
+            conn.rollback()
         return None
     finally:
         if conn:
-            conn.close() # Always close the direct connection
+            conn.close()
+
 
 def main():
     parser = argparse.ArgumentParser(description="Manually submit a video URL or local path for the Prefect intake workflow.")
@@ -127,7 +132,7 @@ def main():
     # 2. Submit the Prefect task run using .delay()
     print(f"\nSubmitting intake_task for source_video_id: {source_id}...")
     print(f"  Input: {args.input_source}")
-    print(f"  Re-encode: {not args.no_reencode}") # Logic inverted: --no-reencode flag means re_encode_for_qt=False
+    print(f"  Re-encode: {not args.no_reencode}") # --no-reencode flag means re_encode_for_qt=False
     print(f"  Overwrite: {args.overwrite}")
 
     try:
