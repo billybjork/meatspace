@@ -11,20 +11,21 @@ try:
     dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env')
     if os.path.exists(dotenv_path):
         load_dotenv(dotenv_path=dotenv_path)
+        print(f"Loaded .env file from: {dotenv_path}")
     else:
         print("Warning: .env file not found at expected location:", dotenv_path)
-        load_dotenv()
+        # Optionally try loading without path if it's discoverable elsewhere
+        # load_dotenv()
 except Exception as e:
     print(f"Error loading .env file: {e}")
 
 
 DATABASE_URL = os.getenv("DATABASE_URL")
-MEDIA_BASE_DIR = os.getenv("MEDIA_BASE_DIR")
 
 # --- Connection Pooling for psycopg2 (crucial for Prefect Tasks) ---
 db_pool = None
-MIN_POOL_CONN = int(os.getenv("PREFECT_DB_MIN_POOL", 1)) # Allow tuning pool size
-MAX_POOL_CONN = int(os.getenv("PREFECT_DB_MAX_POOL", 15)) # Allow tuning pool size
+MIN_POOL_CONN = int(os.getenv("PREFECT_DB_MIN_POOL", 2)) # Sensible defaults
+MAX_POOL_CONN = int(os.getenv("PREFECT_DB_MAX_POOL", 10))# Sensible defaults
 
 
 def initialize_db_pool():
@@ -35,7 +36,7 @@ def initialize_db_pool():
         logger = get_run_logger()
         log_func = logger.info
         log_error = logger.error
-    except: # Fallback if run outside Prefect context
+    except Exception: # Fallback if run outside Prefect context
         log_func = print
         log_error = print
 
@@ -45,7 +46,9 @@ def initialize_db_pool():
             raise ValueError("DATABASE_URL not found in environment variables.")
         try:
             log_func(f"Initializing psycopg2 connection pool (Min: {MIN_POOL_CONN}, Max: {MAX_POOL_CONN})...")
+            # Use ThreadedConnectionPool suitable for multi-threaded Prefect workers
             db_pool = psycopg2.pool.ThreadedConnectionPool(MIN_POOL_CONN, MAX_POOL_CONN, dsn=DATABASE_URL)
+            # Test connection acquisition
             conn = db_pool.getconn()
             log_func("DB Pool initialized successfully. Test connection acquired.")
             db_pool.putconn(conn)
@@ -60,10 +63,10 @@ def get_db_connection(cursor_factory=None):
     # Use Prefect logger if available, otherwise basic print
     try:
         logger = get_run_logger()
-        log_func = logger.info
+        log_func = logger.debug # Less verbose for connection acquisition
         log_warning = logger.warning
         log_error = logger.error
-    except: # Fallback if run outside Prefect context
+    except Exception: # Fallback if run outside Prefect context
         log_func = print
         log_warning = print
         log_error = print
@@ -77,23 +80,33 @@ def get_db_connection(cursor_factory=None):
 
     conn = None
     retries = 3
-    delay = 1
+    delay = 0.5 # Shorter initial delay
     for attempt in range(retries):
         try:
             conn = db_pool.getconn()
-            if cursor_factory:
-                conn.cursor_factory = cursor_factory
-            # logger.debug(f"Acquired DB connection {id(conn)} from pool.")
-            return conn # Success
+            if conn:
+                # Optionally set cursor factory if requested
+                if cursor_factory:
+                    # Note: setting cursor_factory applies to *all* cursors created from this conn
+                    conn.cursor_factory = cursor_factory
+                # log_func(f"Acquired DB connection {id(conn)} from pool.")
+                return conn # Success
+            else:
+                 raise psycopg2.pool.PoolError("db_pool.getconn() returned None")
+
         except (psycopg2.pool.PoolError, psycopg2.OperationalError) as e:
             log_warning(f"Attempt {attempt + 1}/{retries}: Failed to get connection from pool: {e}. Retrying in {delay}s...")
+            # Ensure connection is properly released or closed if partially acquired
             if conn:
-                 db_pool.putconn(conn, close=True)
+                 try:
+                      db_pool.putconn(conn, close=True) # Close potentially bad connection
+                 except Exception as put_err:
+                      log_warning(f"Error closing connection during retry: {put_err}")
                  conn = None
             time.sleep(delay)
-            delay *= 2
+            delay *= 2 # Exponential backoff
         except Exception as e:
-             log_error(f"Unexpected error getting connection from pool: {e}")
+             log_error(f"Unexpected error getting connection from pool: {e}", exc_info=True)
              raise
 
     log_error(f"Failed to get connection from pool after {retries} attempts.")
@@ -105,21 +118,23 @@ def release_db_connection(conn):
     # Use Prefect logger if available, otherwise basic print
     try:
         logger = get_run_logger()
-        log_func = logger.info
+        log_func = logger.debug
         log_warning = logger.warning
         log_error = logger.error
-    except: # Fallback if run outside Prefect context
+    except Exception: # Fallback if run outside Prefect context
         log_func = print
         log_warning = print
         log_error = print
 
     if db_pool and conn:
         try:
+            # Reset cursor_factory before putting back (important if changed)
             conn.cursor_factory = None
             db_pool.putconn(conn)
-            # logger.debug(f"Released DB connection {id(conn)} back to pool.")
+            # log_func(f"Released DB connection {id(conn)} back to pool.")
         except (Exception, psycopg2.DatabaseError) as e:
-            log_error(f"Error releasing DB connection {id(conn)} back to pool: {e}")
+            log_error(f"Error releasing DB connection {id(conn)} back to pool: {e}", exc_info=True)
+            # If releasing fails, try closing it to prevent pool contamination
             try:
                 db_pool.putconn(conn, close=True)
                 log_warning(f"Closed connection {id(conn)} instead due to release error.")
@@ -127,31 +142,58 @@ def release_db_connection(conn):
                  log_error(f"Failed to close problematic connection {id(conn)}: {close_err}")
 
 
-# --- Query Logic ---
-
-def get_items_for_processing(table: str, ready_state: str, processing_states: list[str]) -> list[int]:
+def get_all_pending_work(limit_per_stage: int = 50) -> list[dict]:
     """
-    Helper to query DB for IDs in a 'ready' state, excluding those already in 'processing' states.
+    Fetches pending work items across different stages in a single query.
+
+    Args:
+        limit_per_stage: The maximum number of items to fetch for each stage.
+
+    Returns:
+        A list of dictionaries, where each dictionary has 'id' and 'stage' keys.
+        Example: [{'id': 123, 'stage': 'intake'}, {'id': 456, 'stage': 'splice'}, ...]
     """
     logger = get_run_logger()
-    items = []
+    work_items = []
     conn = None
     try:
-        conn = get_db_connection()
+        conn = get_db_connection(cursor_factory=RealDictCursor) # Use RealDictCursor
         with conn.cursor() as cur:
-            if not processing_states:
-                 query = sql.SQL("SELECT id FROM {} WHERE ingest_state = %s ORDER BY id ASC").format(sql.Identifier(table))
-                 cur.execute(query, (ready_state,))
-            else:
-                query = sql.SQL("SELECT id FROM {} WHERE ingest_state = %s AND ingest_state NOT IN %s ORDER BY id ASC").format(sql.Identifier(table))
-                cur.execute(query, (ready_state, tuple(processing_states)))
-            items = [row[0] for row in cur.fetchall()]
+            # Note: This query relies on subsequent state updates in the flow
+            # to prevent immediate re-processing. It does *not* include complex
+            # locking checks within the SELECT itself for simplicity.
+            # Adjust states and tables according to your actual pipeline needs.
+            query = sql.SQL("""
+                (SELECT id, 'intake' AS stage FROM source_videos WHERE ingest_state = %s ORDER BY id LIMIT %s)
+                UNION ALL
+                (SELECT id, 'splice' AS stage FROM source_videos WHERE ingest_state = %s ORDER BY id LIMIT %s)
+                UNION ALL
+                (SELECT id, 'sprite' AS stage FROM clips WHERE ingest_state = %s ORDER BY id LIMIT %s)
+                UNION ALL
+                (SELECT id, 'post_review' AS stage FROM clips WHERE ingest_state = %s ORDER BY id LIMIT %s)
+                UNION ALL
+                (SELECT id, 'embedding' AS stage FROM clips WHERE ingest_state = %s ORDER BY id LIMIT %s)
+            """)
+            # Add more UNION ALL clauses for other states if needed
+
+            params = [
+                'new', limit_per_stage,                       # Intake
+                'downloaded', limit_per_stage,                # Splice
+                'pending_sprite_generation', limit_per_stage, # Sprite
+                'review_approved', limit_per_stage,           # Post-Review Trigger
+                'keyframed', limit_per_stage,                 # Embedding Only
+            ]
+            cur.execute(query, params)
+            work_items = cur.fetchall() # Fetches list of dicts because of RealDictCursor
+            logger.info(f"Found {len(work_items)} total pending work items across stages (limit: {limit_per_stage}/stage).")
+
     except (Exception, psycopg2.DatabaseError) as e:
-        logger.error(f"DB Error querying table '{table}' for processing (state '{ready_state}', excluding {processing_states}): {e}", exc_info=True)
+        logger.error(f"DB Error querying for all pending work: {e}", exc_info=True)
+        work_items = [] # Ensure empty list on error
     finally:
         if conn:
             release_db_connection(conn)
-    return items
+    return work_items
 
 
 def get_source_input_from_db(source_video_id: int) -> str | None:
@@ -179,6 +221,7 @@ def get_source_input_from_db(source_video_id: int) -> str | None:
 def get_pending_merge_pairs() -> list[tuple[int, int]]:
     """
     Finds pairs of clips ready for backward merging.
+    (No changes needed for this function based on the request)
     """
     logger = get_run_logger()
     merge_pairs = []
@@ -186,6 +229,7 @@ def get_pending_merge_pairs() -> list[tuple[int, int]]:
     try:
         conn = get_db_connection(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
+            # Same query as before
             query = sql.SQL("""
                 SELECT
                     t.id AS target_id,
@@ -243,6 +287,7 @@ def get_pending_merge_pairs() -> list[tuple[int, int]]:
 def get_pending_split_jobs() -> list[tuple[int, int]]:
     """
     Finds clips marked for splitting and extracts their split frame number.
+    (No changes needed for this function based on the request)
     """
     logger = get_run_logger()
     split_jobs = []
@@ -250,6 +295,7 @@ def get_pending_split_jobs() -> list[tuple[int, int]]:
     try:
         conn = get_db_connection(cursor_factory=RealDictCursor)
         with conn.cursor() as cur:
+            # Same query as before
             query = sql.SQL("""
                 SELECT
                     id,
@@ -285,75 +331,92 @@ def get_pending_split_jobs() -> list[tuple[int, int]]:
 
 
 # --- For Immediate State Updates ---
-def update_clip_state_sync(clip_id: int, new_state: str, error_message: str | None = None) -> bool:
-    """
-    Synchronously updates the ingest_state and last_error for a single clip.
-    Uses the psycopg2 connection pool. Intended for quick updates before triggering longer jobs.
 
-    Args:
-        clip_id: The ID of the clip to update.
-        new_state: The new ingest_state value.
-        error_message: Optional error message to store in last_error.
-
-    Returns:
-        True if the update was successful (1 row affected), False otherwise.
-    """
+def _update_state_sync(table_name: str, item_id: int, new_state: str, processing_state: str | None, error_message: str | None = None) -> bool:
+    """Internal helper for synchronous state updates."""
     logger = get_run_logger()
     conn = None
     success = False
-    log_prefix = f"[Sync Update Clip {clip_id}]"
+    log_prefix = f"[Sync Update {table_name.capitalize()} {item_id}]"
     try:
         conn = get_db_connection() # Get connection from pool
         with conn.cursor() as cur:
-            query = sql.SQL("""
-                UPDATE clips
-                SET
-                    ingest_state = %s,
-                    last_error = %s, -- Pass None if no error message
-                    updated_at = NOW()
-                WHERE id = %s;
-            """)
-            cur.execute(query, (new_state, error_message, clip_id))
-            conn.commit() # Crucial: Commit the transaction
+            # Clear retry count if moving to a processing state
+            set_clauses = [
+                sql.SQL("ingest_state = %s"),
+                sql.SQL("last_error = %s"),
+                sql.SQL("updated_at = NOW()")
+            ]
+            params = [new_state, error_message]
+
+            if new_state == processing_state: # Check if it's the designated processing state
+                 set_clauses.append(sql.SQL("retry_count = 0"))
+
+            query = sql.SQL("UPDATE {} SET {} WHERE id = %s;").format(
+                sql.Identifier(table_name),
+                sql.SQL(', ').join(set_clauses)
+            )
+            params.append(item_id)
+
+            cur.execute(query, tuple(params))
+            conn.commit() # Commit the transaction
 
             if cur.rowcount == 1:
                 logger.debug(f"{log_prefix} Successfully updated state to '{new_state}'.")
                 success = True
             elif cur.rowcount == 0:
-                logger.warning(f"{log_prefix} Update to state '{new_state}' affected 0 rows. Clip ID might not exist or already updated.")
-                success = False # Or maybe True if 0 rows is acceptable? Depends on logic.
+                logger.warning(f"{log_prefix} Update to state '{new_state}' affected 0 rows. Item ID might not exist or state already updated.")
+                success = False # Indicate no update occurred
             else:
-                # This shouldn't happen with WHERE id = %s, but good to check.
-                logger.warning(f"{log_prefix} Update to state '{new_state}' affected {cur.rowcount} rows (expected 1).")
+                logger.warning(f"{log_prefix} Update to state '{new_state}' affected {cur.rowcount} rows (expected 0 or 1).")
                 success = False # Treat unexpected row count as failure
 
     except (Exception, psycopg2.DatabaseError) as error:
         logger.error(f"{log_prefix} DB error updating state to '{new_state}': {error}", exc_info=True)
         if conn:
-            try:
-                conn.rollback() # Rollback on error
-                logger.info(f"{log_prefix} Transaction rolled back due to error.")
-            except Exception as rb_err:
-                logger.error(f"{log_prefix} Failed to rollback transaction: {rb_err}", exc_info=True)
+            try: conn.rollback(); logger.info(f"{log_prefix} Transaction rolled back.")
+            except Exception as rb_err: logger.error(f"{log_prefix} Failed rollback: {rb_err}", exc_info=True)
         success = False
     finally:
         if conn:
-            release_db_connection(conn) # Always release the connection
+            release_db_connection(conn)
     return success
 
+def update_clip_state_sync(clip_id: int, new_state: str, error_message: str | None = None) -> bool:
+    """Synchronously updates the ingest_state for a clip."""
+    # Define which state signifies the start of processing for clips, resetting retry_count
+    processing_state = 'processing_post_review' # Or 'keyframing', 'embedding' depending on flow logic
+    return _update_state_sync('clips', clip_id, new_state, processing_state, error_message)
 
-# Close the pool, e.g., on application shutdown if used outside Prefect
+def update_source_video_state_sync(source_video_id: int, new_state: str, error_message: str | None = None) -> bool:
+    """Synchronously updates the ingest_state for a source_video."""
+     # Define which state signifies the start of processing for source_videos
+    processing_state = 'downloading' # Or 'processing_local'
+    return _update_state_sync('source_videos', source_video_id, new_state, processing_state, error_message)
+
+
+# --- Pool Management ---
 def close_db_pool():
+    """Closes all connections in the pool."""
     global db_pool
     # Use Prefect logger if available, otherwise basic print
     try:
         logger = get_run_logger()
         log_func = logger.info
-    except: # Fallback if run outside Prefect context
+        log_warning = logger.warning
+    except Exception: # Fallback if run outside Prefect context
         log_func = print
+        log_warning = print
 
     if db_pool:
-        log_func("Closing psycopg2 connection pool...")
-        db_pool.closeall()
-        db_pool = None
-        log_func("psycopg2 connection pool closed.")
+        try:
+            log_func("Closing psycopg2 connection pool...")
+            db_pool.closeall()
+            db_pool = None
+            log_func("psycopg2 connection pool closed.")
+        except Exception as e:
+            log_warning(f"Error closing connection pool: {e}")
+            db_pool = None # Ensure pool is marked as closed even on error
+
+# Optional: Initialize pool when module loads? Be careful in task environments.
+# initialize_db_pool()

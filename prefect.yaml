@@ -42,7 +42,6 @@ deployments:
     parameters: {} # Add parameters here if you make `cleanup_delay_minutes` a flow parameter
     # is_async: True # Prefect detects async flows automatically
 
-  # --- NEW DEPLOYMENT ADDED BELOW ---
   - name: process-clip-post-review-default # Deployment name (can be different from flow name)
     flow_name: process-clip-post-review # Explicitly link to the flow function name
     description: Processes a single clip after review (keyframing, embedding). Triggered by ingest dispatcher.

@@ -26,12 +26,13 @@ from tasks.split import split_clip_task
 
 # --- DB Util Imports ---
 from utils.db_utils import (
-    get_items_for_processing,
+    get_all_pending_work,
     get_source_input_from_db,
     get_pending_merge_pairs,
     get_pending_split_jobs,
     initialize_db_pool,
-    update_clip_state_sync
+    update_clip_state_sync,
+    update_source_video_state_sync
 )
 
 # --- Async DB and S3 client imports ---
@@ -184,13 +185,13 @@ def process_clip_post_review(
 
 
 @flow(name="Scheduled Ingest Initiator", log_prints=True)
-def scheduled_ingest_initiator():
+def scheduled_ingest_initiator(limit_per_stage: int = 50):
     """
     Scheduled flow to find new work at different stages of the ingest pipeline
-    and trigger the appropriate next tasks or flow runs.
+    using a consolidated query and trigger the appropriate next tasks or flow runs.
     """
     logger = get_run_logger()
-    logger.info("FLOW: Running Scheduled Ingest Initiator cycle...")
+    logger.info(f"FLOW: Running Scheduled Ingest Initiator cycle (Limit: {limit_per_stage}/stage)...")
 
     try:
         initialize_db_pool()
@@ -200,148 +201,192 @@ def scheduled_ingest_initiator():
          raise RuntimeError("Cannot proceed without DB pool for tasks.") from pool_init_err
 
     error_count = 0
-    processed_counts = {
-        "Intake": 0, "Splice": 0, "SpriteGen": 0, "Post-Review Start": 0,
-        "Embedding": 0, "Merge": 0, "Split": 0
-    }
+    # Use defaultdict for easier counting
+    from collections import defaultdict
+    processed_counts = defaultdict(int)
+    submitted_counts = defaultdict(int)
 
-    intake_processing_states = ['downloading', 'download_failed']
-    splice_processing_states = ['splicing', 'splice_failed']
-    sprite_gen_processing_states = ['generating_sprite', 'sprite_generation_failed']
-    post_review_processing_states = [
-        'keyframing', 'embedding', 'keyframing_failed', 'embedding_failed',
-        'processing_post_review', 'embedded', # Add 'embedded' to prevent re-trigger if embedding finishes quickly
-        'approved_pending_deletion', 'archived_pending_deletion'
-    ]
-    embedding_processing_states = ['embedding', 'embedding_failed', 'embedded'] # Add 'embedded'
-    merge_processing_states = ['merging', 'merge_failed']
-    split_processing_states = ['splitting', 'split_failed']
+    # --- Consolidated Work Fetching ---
+    all_work = []
+    try:
+        all_work = get_all_pending_work(limit_per_stage=limit_per_stage)
+        logger.info(f"Found {len(all_work)} total work items across stages.")
+    except Exception as db_query_err:
+        logger.error(f"[All Stages] Failed consolidating work query: {db_query_err}", exc_info=True)
+        error_count += 1
+        # Optionally raise error to stop the flow run if DB query fails critically
+        # raise db_query_err
+
+    # Organize work by stage
+    work_by_stage = defaultdict(list)
+    for item in all_work:
+        work_by_stage[item['stage']].append(item['id'])
+        processed_counts[item['stage'].capitalize()] += 1 # Count items found per stage
 
     # --- Stage 1: Intake ---
     stage_name = "Intake"
-    try:
-        new_source_ids = get_items_for_processing("source_videos", "new", intake_processing_states)
-        processed_counts[stage_name] = len(new_source_ids)
-        if new_source_ids:
-            logger.info(f"[{stage_name}] Found {len(new_source_ids)} sources. Submitting tasks...")
-            for sid in new_source_ids:
-                try:
+    intake_ids = work_by_stage.get('intake', [])
+    if intake_ids:
+        logger.info(f"[{stage_name}] Found {len(intake_ids)} sources. Submitting tasks...")
+        for sid in intake_ids:
+            try:
+                # Attempt to update state *before* getting input and submitting
+                # State 'downloading' signifies start of processing for source_videos
+                if update_source_video_state_sync(sid, 'downloading'):
                     source_input = get_source_input_from_db(sid)
                     if source_input:
                         intake_task.submit(source_video_id=sid, input_source=source_input)
                         logger.debug(f"[{stage_name}] Submitted intake_task for source_id: {sid}")
+                        submitted_counts[stage_name] += 1
                         time.sleep(TASK_SUBMIT_DELAY)
-                    else: logger.error(f"[{stage_name}] No input source for ID: {sid}."); error_count += 1
-                except Exception as task_submit_err: logger.error(f"[{stage_name}] Submit fail ID {sid}: {task_submit_err}", exc_info=True); error_count += 1
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed query: {db_query_err}", exc_info=True); error_count += 1
+                    else:
+                        logger.error(f"[{stage_name}] No input source found for ID: {sid} after state update.")
+                        # Rollback state? Or leave as downloading? Let's leave it for now, retry might fix.
+                        error_count += 1
+                else:
+                    logger.warning(f"[{stage_name}] Failed to update state for source ID {sid} to 'downloading'. Skipping task submission.")
+                    error_count += 1
+            except Exception as task_submit_err:
+                logger.error(f"[{stage_name}] Submit failed for ID {sid}: {task_submit_err}", exc_info=True)
+                error_count += 1
+                # Attempt to revert state? Risky if state update failed above.
+                # update_source_video_state_sync(sid, 'new', f"Failed submission: {task_submit_err}")
 
     # --- Stage 2: Splice ---
     stage_name = "Splice"
-    try:
-        downloaded_source_ids = get_items_for_processing("source_videos", "downloaded", splice_processing_states)
-        processed_counts[stage_name] = len(downloaded_source_ids)
-        if downloaded_source_ids:
-            logger.info(f"[{stage_name}] Found {len(downloaded_source_ids)} sources for splicing. Submitting tasks...")
-            for sid in downloaded_source_ids:
-                try:
+    splice_ids = work_by_stage.get('splice', [])
+    if splice_ids:
+        logger.info(f"[{stage_name}] Found {len(splice_ids)} sources for splicing. Submitting tasks...")
+        for sid in splice_ids:
+            try:
+                # State 'splicing' signifies start of processing
+                if update_source_video_state_sync(sid, 'splicing'):
                     splice_video_task.submit(source_video_id=sid)
                     logger.debug(f"[{stage_name}] Submitted splice_task for source_id: {sid}")
+                    submitted_counts[stage_name] += 1
                     time.sleep(TASK_SUBMIT_DELAY)
-                except Exception as task_submit_err: logger.error(f"[{stage_name}] Submit fail ID {sid}: {task_submit_err}", exc_info=True); error_count += 1
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed query: {db_query_err}", exc_info=True); error_count += 1
+                else:
+                     logger.warning(f"[{stage_name}] Failed to update state for source ID {sid} to 'splicing'. Skipping task submission.")
+                     error_count += 1
+            except Exception as task_submit_err:
+                logger.error(f"[{stage_name}] Submit failed for ID {sid}: {task_submit_err}", exc_info=True)
+                error_count += 1
+                # update_source_video_state_sync(sid, 'downloaded', f"Failed submission: {task_submit_err}")
 
     # --- Stage 3: Sprite Sheet Generation ---
     stage_name = "SpriteGen"
-    try:
-        clips_needing_sprites = get_items_for_processing("clips", "pending_sprite_generation", sprite_gen_processing_states)
-        processed_counts[stage_name] = len(clips_needing_sprites)
-        if clips_needing_sprites:
-            logger.info(f"[{stage_name}] Found {len(clips_needing_sprites)} clips needing sprites. Submitting tasks...")
-            for cid in clips_needing_sprites:
-                try:
+    sprite_ids = work_by_stage.get('sprite', [])
+    if sprite_ids:
+        logger.info(f"[{stage_name}] Found {len(sprite_ids)} clips needing sprites. Submitting tasks...")
+        for cid in sprite_ids:
+            try:
+                 # State 'generating_sprite' signifies start of processing
+                if update_clip_state_sync(cid, 'generating_sprite'):
                     generate_sprite_sheet_task.submit(clip_id=cid)
                     logger.debug(f"[{stage_name}] Submitted sprite_task for clip_id: {cid}")
+                    submitted_counts[stage_name] += 1
                     time.sleep(TASK_SUBMIT_DELAY)
-                except Exception as task_submit_err: logger.error(f"[{stage_name}] Submit fail ID {cid}: {task_submit_err}", exc_info=True); error_count += 1
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed query: {db_query_err}", exc_info=True); error_count += 1
+                else:
+                    logger.warning(f"[{stage_name}] Failed to update state for clip ID {cid} to 'generating_sprite'. Skipping task submission.")
+                    error_count += 1
+            except Exception as task_submit_err:
+                logger.error(f"[{stage_name}] Submit failed for ID {cid}: {task_submit_err}", exc_info=True)
+                error_count += 1
+                # update_clip_state_sync(cid, 'pending_sprite_generation', f"Failed submission: {task_submit_err}")
 
     # --- Stage 4: Post-Review Start (Trigger Separate Flow Run) ---
     stage_name = "Post-Review Start"
-    try:
-        clips_to_process = get_items_for_processing("clips", "review_approved", post_review_processing_states)
-        processed_counts[stage_name] = len(clips_to_process)
-        if clips_to_process:
-            deployment_name = "process-clip-post-review/process-clip-post-review-default"
-            logger.info(f"[{stage_name}] Found {len(clips_to_process)} approved clips. Triggering '{deployment_name}' runs...")
-            for cid in clips_to_process:
-                try:
-                    logger.debug(f"[{stage_name}] Setting clip {cid} state to 'processing_post_review'.")
-                    updated = update_clip_state_sync(cid, 'processing_post_review')
-                    if not updated: logger.error(f"[{stage_name}] Failed state update for clip {cid}. Skipping trigger."); error_count += 1; continue
-
+    post_review_ids = work_by_stage.get('post_review', [])
+    if post_review_ids:
+        deployment_name = "process-clip-post-review/process-clip-post-review-default"
+        logger.info(f"[{stage_name}] Found {len(post_review_ids)} approved clips. Triggering '{deployment_name}' runs...")
+        for cid in post_review_ids:
+            try:
+                # State 'processing_post_review' signifies start of processing
+                if update_clip_state_sync(cid, 'processing_post_review'):
                     logger.debug(f"[{stage_name}] Submitting deployment run '{deployment_name}' for clip_id: {cid}")
-                    run_deployment(name=deployment_name, parameters={"clip_id": cid, "keyframe_strategy": DEFAULT_KEYFRAME_STRATEGY, "model_name": DEFAULT_EMBEDDING_MODEL}, timeout=0)
+                    run_deployment(
+                        name=deployment_name,
+                        parameters={
+                            "clip_id": cid,
+                            "keyframe_strategy": DEFAULT_KEYFRAME_STRATEGY,
+                            "model_name": DEFAULT_EMBEDDING_MODEL
+                        },
+                        timeout=0 # Fire and forget
+                    )
+                    submitted_counts[stage_name] += 1
                     time.sleep(TASK_SUBMIT_DELAY)
-                except Exception as flow_trigger_err: logger.error(f"[{stage_name}] Failed trigger for '{deployment_name}', clip_id {cid}: {flow_trigger_err}", exc_info=True); error_count += 1
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed query: {db_query_err}", exc_info=True); error_count += 1
+                else:
+                    logger.warning(f"[{stage_name}] Failed state update for clip {cid} to 'processing_post_review'. Skipping trigger.")
+                    error_count += 1
+            except Exception as flow_trigger_err:
+                logger.error(f"[{stage_name}] Failed trigger for '{deployment_name}', clip_id {cid}: {flow_trigger_err}", exc_info=True)
+                error_count += 1
+                # update_clip_state_sync(cid, 'review_approved', f"Failed trigger: {flow_trigger_err}")
 
-    # --- Stage 4.5: Embedding Only (If keyframed but embedding failed/pending) ---
-    stage_name = "Embedding"
-    try:
-        clips_ready_for_embedding = get_items_for_processing("clips", "keyframed", embedding_processing_states)
-        processed_counts[stage_name] = len(clips_ready_for_embedding)
-        if clips_ready_for_embedding:
-            logger.info(f"[{stage_name}] Found {len(clips_ready_for_embedding)} keyframed clips needing embedding. Submitting tasks...")
-            for cid in clips_ready_for_embedding:
-                try:
-                    generate_embeddings_task.submit(clip_id=cid, model_name=DEFAULT_EMBEDDING_MODEL, generation_strategy=DEFAULT_EMBEDDING_STRATEGY_LABEL)
-                    logger.debug(f"[{stage_name}] Submitted embed_task for clip_id: {cid}")
-                    time.sleep(TASK_SUBMIT_DELAY)
-                except Exception as task_submit_err: logger.error(f"[{stage_name}] Submit fail ID {cid}: {task_submit_err}", exc_info=True); error_count += 1
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed query: {db_query_err}", exc_info=True); error_count += 1
-
-    # --- Stage 5.1: Merge ---
+    # --- Stage 5.1: Merge (Keep separate query for complexity) ---
     stage_name = "Merge"
     try:
         merge_pairs = get_pending_merge_pairs()
-        processed_counts[stage_name] = len(merge_pairs)
+        processed_counts[stage_name] = len(merge_pairs) # Count pairs found
         if merge_pairs:
              logger.info(f"[{stage_name}] Found {len(merge_pairs)} pairs for merging. Submitting tasks...")
-             submitted_merges = set()
+             submitted_merges = set() # Track submitted clips to avoid duplicates within this run
              for target_id, source_id in merge_pairs:
                   if target_id not in submitted_merges and source_id not in submitted_merges:
                       try:
+                          # State update for merge happens *inside* the merge task after locking both clips
                           merge_clips_task.submit(clip_id_target=target_id, clip_id_source=source_id)
-                          submitted_merges.add(target_id); submitted_merges.add(source_id)
+                          submitted_merges.add(target_id)
+                          submitted_merges.add(source_id)
                           logger.debug(f"[{stage_name}] Submitted merge_task for target={target_id}, source={source_id}")
+                          submitted_counts[stage_name] += 1 # Count successful submissions
                           time.sleep(TASK_SUBMIT_DELAY)
-                      except Exception as task_submit_err: logger.error(f"[{stage_name}] Submit fail ({target_id}, {source_id}): {task_submit_err}", exc_info=True); error_count += 1
-                  else: logger.warning(f"[{stage_name}] Skipping merge involving {target_id}/{source_id} - submitted.")
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed during merge check: {db_query_err}", exc_info=True); error_count += 1
+                      except Exception as task_submit_err:
+                          logger.error(f"[{stage_name}] Submit failed for merge ({target_id}, {source_id}): {task_submit_err}", exc_info=True)
+                          error_count += 1
+                  else:
+                       logger.warning(f"[{stage_name}] Skipping merge involving {target_id}/{source_id} as one clip is already part of a submitted merge in this run.")
+    except Exception as db_query_err:
+        logger.error(f"[{stage_name}] Failed during merge check: {db_query_err}", exc_info=True)
+        error_count += 1
 
-    # --- Stage 5.2: Split ---
+    # --- Stage 5.2: Split (Keep separate query for complexity) ---
     stage_name = "Split"
     try:
         clips_to_split_data = get_pending_split_jobs()
-        processed_counts[stage_name] = len(clips_to_split_data)
+        processed_counts[stage_name] = len(clips_to_split_data) # Count jobs found
         if clips_to_split_data:
             logger.info(f"[{stage_name}] Found {len(clips_to_split_data)} clips pending split. Submitting tasks...")
-            submitted_splits = set()
+            submitted_splits = set() # Track submitted clips
             for cid, split_frame in clips_to_split_data:
                 if cid not in submitted_splits:
                     try:
+                        # State update for split happens *inside* the split task after locking
                         split_clip_task.submit(clip_id=cid)
                         submitted_splits.add(cid)
                         logger.debug(f"[{stage_name}] Submitted split_task for clip_id: {cid} (frame {split_frame})")
+                        submitted_counts[stage_name] += 1 # Count successful submissions
                         time.sleep(TASK_SUBMIT_DELAY)
-                    except Exception as task_submit_err: logger.error(f"[{stage_name}] Submit fail ID {cid}: {task_submit_err}", exc_info=True); error_count += 1
-                else: logger.warning(f"[{stage_name}] Skipping duplicate split for clip {cid}.")
-    except Exception as db_query_err: logger.error(f"[{stage_name}] Failed during split check: {db_query_err}", exc_info=True); error_count += 1
+                    except Exception as task_submit_err:
+                        logger.error(f"[{stage_name}] Submit failed for split ID {cid}: {task_submit_err}", exc_info=True)
+                        error_count += 1
+                else:
+                     logger.warning(f"[{stage_name}] Skipping duplicate split task submission for clip {cid} in this run.")
+    except Exception as db_query_err:
+        logger.error(f"[{stage_name}] Failed during split check: {db_query_err}", exc_info=True)
+        error_count += 1
 
     # --- Initiator Flow Completion Logging ---
-    summary_log = f"FLOW: Scheduled Ingest Initiator cycle complete. Processed counts: {processed_counts}."
+    # Convert defaultdicts to regular dicts for cleaner logging
+    final_processed_counts = dict(processed_counts)
+    final_submitted_counts = dict(submitted_counts)
+    summary_log = (f"FLOW: Scheduled Ingest Initiator cycle complete. "
+                   f"Items Found: {final_processed_counts}. "
+                   f"Tasks/Runs Submitted: {final_submitted_counts}.")
+
     if error_count > 0:
-         logger.warning(f"{summary_log} Completed with {error_count} submission/trigger error(s).")
+         logger.warning(f"{summary_log} Completed with {error_count} submission/state update error(s).")
     else:
          logger.info(summary_log)
 
