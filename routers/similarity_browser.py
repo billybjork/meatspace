@@ -108,22 +108,36 @@ async def query_clip(
 
         # Fetch query clip details, including the specific embedding AND representative keyframe artifact
         query_clip_sql = """
+            WITH RankedKeyframes AS (
+                SELECT
+                    ca.clip_id,
+                    ca.s3_key,
+                    -- Rank keyframes for each clip: 'representative' is rank 1, others follow based on tag alphabetically
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ca.clip_id
+                        ORDER BY
+                            CASE WHEN ca.tag = $4 THEN 0 ELSE 1 END, -- Prioritize the 'representative' tag
+                            ca.tag ASC -- Secondary sort for consistent fallback (e.g., picks 'mid' before 'start')
+                    ) as rn
+                FROM clip_artifacts ca
+                WHERE ca.artifact_type = $3 -- Filter for artifact_type 'keyframe'
+            )
             SELECT
                 c.id, c.clip_identifier, c.clip_filepath,
-                c.start_time_seconds, c.end_time_seconds, -- Include time info if needed by format_clip_data
-                ca.s3_key AS representative_keyframe_s3_key, -- Select keyframe S3 key from artifacts
+                c.start_time_seconds, c.end_time_seconds,
+                rk.s3_key AS representative_keyframe_s3_key, -- Select the s3_key from the top-ranked keyframe
                 e.embedding -- Fetch the specific embedding
             FROM clips c
-            LEFT JOIN embeddings e ON c.id = e.clip_id AND e.model_name = $2 AND e.generation_strategy = $3
-            LEFT JOIN clip_artifacts ca ON c.id = ca.clip_id -- Join artifacts table
-                  AND ca.artifact_type = $4 -- Filter for keyframes
-                  AND ca.tag = $5 -- Filter for the representative one
+            LEFT JOIN embeddings e ON c.id = e.clip_id AND e.model_name = $2 AND e.generation_strategy = $5
+            LEFT JOIN RankedKeyframes rk ON c.id = rk.clip_id AND rk.rn = 1 -- Join ONLY the top-ranked keyframe (rn=1)
             WHERE c.clip_identifier = $1;
         """
         query_clip_record = await conn.fetchrow(
             query_clip_sql,
-            clip_identifier, model_name, strategy,
-            ARTIFACT_TYPE_KEYFRAME, REPRESENTATIVE_TAG # Pass artifact filters as params
+            clip_identifier, model_name, # $1, $2
+            ARTIFACT_TYPE_KEYFRAME, # $3 (artifact_type filter in CTE)
+            REPRESENTATIVE_TAG,     # $4 (tag to prioritize in CTE ORDER BY)
+            strategy                # $5 (strategy filter for embeddings)
         )
 
         if not query_clip_record:
@@ -158,28 +172,44 @@ async def query_clip(
         # Perform similarity search using pgvector operator
         # Fetch result clip details, including *their* representative keyframes
         similarity_query = """
+            WITH RankedKeyframes AS (
+                SELECT
+                    ca.clip_id,
+                    ca.s3_key,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY ca.clip_id
+                        ORDER BY
+                            CASE WHEN ca.tag = $6 THEN 0 ELSE 1 END, -- Prioritize the 'representative' tag ($6)
+                            ca.tag ASC
+                    ) as rn
+                FROM clip_artifacts ca
+                WHERE ca.artifact_type = $5 -- Filter for 'keyframe' ($5)
+            )
             SELECT
                 c.id, c.clip_identifier, c.clip_filepath,
-                c.start_time_seconds, c.end_time_seconds, -- Include time info if needed
-                ca.s3_key AS representative_keyframe_s3_key, -- Select keyframe S3 key from artifacts
+                c.start_time_seconds, c.end_time_seconds,
+                rk.s3_key AS representative_keyframe_s3_key, -- Get the best keyframe for each result
                 1 - (e.embedding <=> $1::vector) AS similarity_score -- Cosine Similarity
             FROM embeddings e
             JOIN clips c ON e.clip_id = c.id
-            LEFT JOIN clip_artifacts ca ON c.id = ca.clip_id -- Join artifacts table for results
-                  AND ca.artifact_type = $6 -- Filter for keyframes
-                  AND ca.tag = $7 -- Filter for the representative one
+            LEFT JOIN RankedKeyframes rk ON c.id = rk.clip_id AND rk.rn = 1 -- Join the top-ranked keyframe for results
             WHERE e.model_name = $2
               AND e.generation_strategy = $3
               AND c.id != $4 -- Exclude the query clip
               AND c.ingest_state = 'embedded' -- Only compare against ready clips
               AND e.embedding IS NOT NULL
             ORDER BY e.embedding <=> $1::vector ASC -- ASC for cosine distance
-            LIMIT $5;
+            LIMIT $7;
         """
         similar_records = await conn.fetch(
             similarity_query,
-            query_embedding_string, model_name, strategy, query_clip_db_id, NUM_RESULTS,
-            ARTIFACT_TYPE_KEYFRAME, REPRESENTATIVE_TAG # Pass artifact filters as params
+            query_embedding_string, # $1
+            model_name,             # $2
+            strategy,               # $3
+            query_clip_db_id,       # $4
+            ARTIFACT_TYPE_KEYFRAME, # $5 (artifact_type filter in CTE)
+            REPRESENTATIVE_TAG,     # $6 (tag to prioritize in CTE ORDER BY)
+            NUM_RESULTS             # $7
         )
 
         results = []

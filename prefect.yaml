@@ -1,8 +1,8 @@
 # Generic project metadata
 name: meatspace-ingest
-prefect-version: 3 # Specify your Prefect version
+prefect-version: 3
 
-# Define how deployments are built (can be null if using `prefect deploy --all`)
+# Define how deployments are built (using `prefect deploy --all`)
 build: null
 
 # Define deployments
@@ -13,8 +13,6 @@ deployments:
     work_pool:
       name: default-agent-pool # Target work pool for your agent
       work_queue_name: default # Target work queue (optional, defaults often work)
-      # job_variables: # Optional: Define infrastructure overrides, like image name for Docker
-        # image: "your-dockerhub-username/meatspace-ingest:latest"
     schedule:
       # Run every minute
       interval: 60

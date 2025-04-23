@@ -235,17 +235,21 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
                 if update_source_video_state_sync(sid, 'downloading'):
                     source_input = get_source_input_from_db(sid)
                     if source_input:
-                        intake_task.submit(source_video_id=sid, input_source=source_input)
-                        logger.debug(f"[{stage_name}] Submitted intake_task for source_id: {sid}")
+                        logger.info(f"[{stage_name}] Input source fetched for {sid}. Submitting task...") # ADDED
+                        future = intake_task.submit(source_video_id=sid, input_source=source_input)
+                        # Check if submission returned a future object (basic check)
+                        if future:
+                            logger.info(f"[{stage_name}] Successfully submitted intake_task for source_id: {sid}.")
+                        else:
+                            logger.error(f"[{stage_name}] intake_task.submit() did NOT return a future object for {sid}. Submission likely failed.") # ADDED
+                            # Attempt to revert state here might be complex/risky, logging is key
+                            update_source_video_state_sync(sid, 'new', 'Task submission failed after state update')
+
                         submitted_counts[stage_name] += 1
                         time.sleep(TASK_SUBMIT_DELAY)
                     else:
-                        logger.error(f"[{stage_name}] No input source found for ID: {sid} after state update.")
-                        # Rollback state? Or leave as downloading? Let's leave it for now, retry might fix.
+                        logger.warning(f"[{stage_name}] Failed to update state for source ID {sid} to 'downloading'. Skipping task submission.")
                         error_count += 1
-                else:
-                    logger.warning(f"[{stage_name}] Failed to update state for source ID {sid} to 'downloading'. Skipping task submission.")
-                    error_count += 1
             except Exception as task_submit_err:
                 logger.error(f"[{stage_name}] Submit failed for ID {sid}: {task_submit_err}", exc_info=True)
                 error_count += 1
