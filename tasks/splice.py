@@ -252,36 +252,72 @@ def splice_video_task(source_video_id: int):
          logger.error("OpenCV (cv2) or NumPy (np) not imported correctly. Cannot perform scene detection.")
          raise ImportError("OpenCV or NumPy failed to import.")
 
+    overwrite_existing = False # Define explicitly if needed later, currently splice doesn't overwrite
+    task_outcome = "failed" # Default outcome
+
     try:
         # --- Database Connection and Initial Check ---
         conn = get_db_connection()
-        conn.autocommit = False
+        if conn is None: raise ConnectionError("Failed to get DB connection.")
+        conn.autocommit = False # Manual transaction control
+
         with conn.cursor() as cur:
             # === Transaction Start (initial check/update) ===
             try:
-                cur.execute("SELECT pg_advisory_xact_lock(1, %s)", (source_video_id,))
+                # 1. Acquire Lock
+                cur.execute("SELECT pg_try_advisory_xact_lock(1, %s)", (source_video_id,))
+                lock_acquired = cur.fetchone()[0]
+                if not lock_acquired:
+                    logger.warning(f"Could not acquire DB lock for source_video_id: {source_video_id}. Skipping.")
+                    conn.rollback()
+                    return {"status": "skipped_lock", "reason": "Could not acquire lock", "source_video_id": source_video_id}
+                logger.info(f"Acquired DB lock for source {source_video_id}.")
+
+                # 2. Fetch data & lock row
                 cur.execute("SELECT filepath, ingest_state, title FROM source_videos WHERE id = %s FOR UPDATE", (source_video_id,))
                 result = cur.fetchone()
                 if not result: raise ValueError(f"Source video ID {source_video_id} not found.")
 
                 source_s3_key, current_state, db_title = result
-                if db_title: source_title = db_title
-                logger.info(f"Locked source {source_video_id}. Title: '{source_title}', State: '{current_state}', S3 Key: '{source_s3_key}'")
+                if db_title: source_title = db_title # Use DB title if available
+                logger.info(f"Fetched source {source_video_id}. Title: '{source_title}', State: '{current_state}', S3 Key: '{source_s3_key}'")
 
-                if not source_s3_key: raise ValueError(f"Source video {source_video_id} missing S3 filepath.")
-                if current_state != 'downloaded':
-                    logger.warning(f"Source {source_video_id} not 'downloaded' (state: '{current_state}'). Skipping.")
-                    conn.rollback()
-                    return {"status": "skipped", "reason": f"Incorrect state: {current_state}"}
+                if not source_s3_key:
+                    raise ValueError(f"Source video {source_video_id} missing S3 filepath.")
 
-                cur.execute("UPDATE source_videos SET ingest_state = 'splicing', updated_at = NOW(), last_error = NULL WHERE id = %s", (source_video_id,))
-                logger.info(f"Set source {source_video_id} state to 'splicing'")
-                conn.commit() # Commit short transaction
+                # --- UPDATED State Checking Logic ---
+                expected_processing_state = 'splicing'
+                # Allow processing if state is 'splicing' (set by initiator) or 'splicing_failed' (for retries)
+                allow_processing = current_state == expected_processing_state or \
+                                   current_state == 'splicing_failed'
+
+                # Explicitly skip if already completed ('spliced') unless overwriting (currently no overwrite logic)
+                if current_state == 'spliced' and not overwrite_existing:
+                    logger.warning(f"Source video {source_video_id} is already 'spliced'. Skipping.")
+                    allow_processing = False
+                    task_outcome = "skipped_already_done"
+
+                if not allow_processing:
+                    # Log includes the actual state found vs expected
+                    logger.warning(f"Skipping splice task for source video {source_video_id}. Current state: '{current_state}' (expected '{expected_processing_state}' or 'splicing_failed').")
+                    conn.rollback() # Release lock/transaction
+
+                    # Determine specific skip reason for return value
+                    skip_reason = f"State '{current_state}' not runnable"
+                    if task_outcome == "skipped_already_done": skip_reason = "Already spliced"
+
+                    return {"status": "skipped_state", "reason": skip_reason, "source_video_id": source_video_id}
+
+                # If we reach here, processing is allowed. The initiator already set the state.
+                # Commit transaction to release the row lock before long-running processing.
+                conn.commit()
+                logger.info(f"Verified state '{current_state}' is runnable for splicing ID {source_video_id}. Proceeding...")
+                # The lock acquired by FOR UPDATE is released by commit.
 
             except (ValueError, psycopg2.DatabaseError) as initial_db_err:
-                logger.error(f"DB Error during initial check/update for source {source_video_id}: {initial_db_err}")
+                logger.error(f"DB Error during initial check/update for source {source_video_id}: {initial_db_err}", exc_info=True)
                 if conn: conn.rollback()
-                raise
+                raise # Re-raise to be caught by main handler
 
         # === Main Processing ===
         temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_splice_{source_video_id}_")

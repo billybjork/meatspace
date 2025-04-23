@@ -13,7 +13,7 @@ from prefect import task, get_run_logger
 import psycopg2
 from psycopg2 import sql, extras
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, NoCredentialsError
 
 # --- Project Root Setup ---
 try:
@@ -22,15 +22,12 @@ try:
         sys.path.insert(0, project_root)
     from utils.db_utils import get_db_connection, release_db_connection
 except ImportError:
-    # Fallback if structure is different or running standalone
     try:
-        # Try direct import if utils is in the same directory or PYTHONPATH
         from utils.db_utils import get_db_connection, release_db_connection
     except ImportError as e:
-        print(f"ERROR: Cannot find db_utils. Ensure script is run from project root or PYTHONPATH is set correctly. {e}", file=sys.stderr)
-        # Define dummies only if absolutely necessary for script loading
-        def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB connection getter")
-        def release_db_connection(conn): pass # Dummy release
+        print(f"ERROR: Cannot find db_utils. {e}", file=sys.stderr)
+        def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB getter")
+        def release_db_connection(conn): pass
 
 # --- Import Shared Components ---
 s3_client = None
@@ -38,40 +35,33 @@ S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
 
 try:
-    # Attempt to import from splice first (might have pre-initialized client)
     from .splice import s3_client as splice_s3_client, run_ffmpeg_command, sanitize_filename
     if splice_s3_client: s3_client = splice_s3_client
-    # FFMPEG_PATH might also be defined in splice, prefer env var or default 'ffmpeg'
-    # Keep run_ffmpeg_command and sanitize_filename from splice if available
-    print("INFO: Imported shared components (S3 client?, ffmpeg runner, sanitizer) from tasks.splice")
-
+    print("INFO: Imported shared components from tasks.splice")
 except ImportError as e:
      print(f"INFO: Could not import components from .splice, using defaults/direct init. Error: {e}")
-     # Define fallbacks if splice import fails
+     # Define fallbacks
      def run_ffmpeg_command(cmd, step, cwd=None):
-         # Basic fallback implementation
-         logger = get_run_logger() # Get logger inside function if needed
+         logger = get_run_logger()
          logger.info(f"Executing Fallback FFMPEG Step: {step}")
          logger.debug(f"Command: {' '.join(cmd)}")
          try:
              result = subprocess.run(cmd, capture_output=True, text=True, check=True, cwd=cwd, encoding='utf-8', errors='replace')
-             logger.debug(f"FFMPEG Output:\n{result.stdout[:500]}...") # Log partial output
+             logger.debug(f"FFMPEG Output:\n{result.stdout[:500]}...")
              if result.stderr: logger.warning(f"FFMPEG Stderr:\n{result.stderr[:500]}...")
              return result
          except FileNotFoundError:
               logger.error(f"ERROR: {cmd[0]} command not found at path '{FFMPEG_PATH}'.")
               raise
          except subprocess.CalledProcessError as e:
-              logger.error(f"ERROR: {step} failed. Exit code: {e.returncode}")
-              logger.error(f"Stderr:\n{e.stderr}")
+              logger.error(f"ERROR: {step} failed. Exit code: {e.returncode}\nStderr:\n{e.stderr}")
               raise
      def sanitize_filename(name):
-         # Basic fallback sanitization
-         name = re.sub(r'[^\w\.\-]+', '_', name)
+         name = re.sub(r'[^\w\.\-]+', '_', str(name)) # Ensure string
          name = re.sub(r'_+', '_', name).strip('_')
          return name if name else "default_filename"
 
-# Initialize S3 client if not imported
+# Initialize S3 client if not imported and configured
 if not s3_client and S3_BUCKET_NAME:
      try:
          import boto3
@@ -79,14 +69,14 @@ if not s3_client and S3_BUCKET_NAME:
          print("INFO: Initialized default Boto3 S3 client in sprite_generator.")
      except ImportError:
          print("ERROR: Boto3 required but not installed.", file=sys.stderr)
-         s3_client = None # Ensure it's None
+     except NoCredentialsError:
+         print("ERROR: AWS credentials not found for fallback S3 client init.", file=sys.stderr)
      except Exception as boto_err:
          print(f"ERROR: Failed to initialize fallback Boto3 client: {boto_err}", file=sys.stderr)
-         s3_client = None # Ensure it's None
 
-# Final check for S3 client after potential initializations
-if not S3_BUCKET_NAME: print("WARNING: S3_BUCKET_NAME environment variable not set.")
-# S3 client check happens within the task function
+# Final check for S3 bucket name
+if not S3_BUCKET_NAME:
+    print("WARNING: S3_BUCKET_NAME environment variable not set. S3 operations will fail.")
 
 # --- Constants ---
 SPRITE_SHEET_S3_PREFIX = os.getenv("SPRITE_SHEET_S3_PREFIX", "clip_artifacts/sprite_sheets/")
@@ -98,7 +88,7 @@ ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet" # Constant for artifact type
 
 
 @task(name="Generate Sprite Sheet", retries=1, retry_delay_seconds=45)
-def generate_sprite_sheet_task(clip_id: int):
+def generate_sprite_sheet_task(clip_id: int, overwrite_existing: bool = False):
     """
     Generates a sprite sheet for a given clip, uploads it to S3,
     and records it as an artifact in the clip_artifacts table.
@@ -112,12 +102,12 @@ def generate_sprite_sheet_task(clip_id: int):
     temp_dir_obj = None
     temp_dir = None
     clip_data = {}
-    task_outcome = "failed" # Default outcome status: 'success', 'success_no_sprite', 'skipped_state', 'failed', 'failed_db...'
-    intended_success_state = "pending_review" # State to set on success (with or without sprite)
-    failure_state = "sprite_generation_failed" # State to set on failure
+    task_outcome = "failed" # Default outcome status
+    intended_success_state = "pending_review"
+    failure_state = "sprite_generation_failed"
     error_message = None
     sprite_s3_key = None
-    sprite_artifact_id = None # Store the ID of the created/updated artifact
+    sprite_artifact_id = None
 
     # --- Dependency Checks ---
     if not s3_client:
@@ -132,66 +122,80 @@ def generate_sprite_sheet_task(clip_id: int):
          # Depending on robustness of ffprobe fallback logic, this might need to be an error.
 
     try:
-        # === Phase 1: DB Check, Lock, and State Update ===
-        conn = get_db_connection(cursor_factory=extras.DictCursor) # Use DictCursor for easy column access
+        # === Phase 1: DB Check, Lock, and Verify State ===
+        conn = get_db_connection(cursor_factory=extras.DictCursor)
+        if conn is None: raise ConnectionError("Failed to get DB connection.")
         conn.autocommit = False # Manual transaction control
-
+        
         try:
             with conn.cursor() as cur:
-                # 1. Acquire Lock (Use advisory lock within the transaction)
-                # Note: pg_advisory_xact_lock locks for the current transaction
-                cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
-                logger.info(f"Acquired DB lock for clip {clip_id} for duration of transaction.")
+                # 1. Acquire Lock
+                cur.execute("SELECT pg_try_advisory_xact_lock(2, %s)", (clip_id,))
+                lock_acquired = cur.fetchone()['pg_try_advisory_xact_lock'] # Access dict key
+                if not lock_acquired:
+                    logger.warning(f"Could not acquire DB lock for clip_id: {clip_id}. Skipping.")
+                    conn.rollback()
+                    return {"status": "skipped_lock", "reason": "Could not acquire lock", "clip_id": clip_id}
+                logger.info(f"Acquired DB lock for clip {clip_id}.")
 
-                # 2. Fetch clip data AND source title
+                # 2. Fetch clip data AND source title, locking the row
                 cur.execute(
                     """
                     SELECT
                         c.clip_filepath, c.clip_identifier, c.start_time_seconds, c.end_time_seconds,
                         c.source_video_id, c.ingest_state, c.start_frame, c.end_frame,
-                        sv.title AS source_title  -- Fetch source title
+                        sv.title AS source_title
                     FROM clips c
-                    JOIN source_videos sv ON c.source_video_id = sv.id -- Join source_videos
+                    JOIN source_videos sv ON c.source_video_id = sv.id
                     WHERE c.id = %s FOR UPDATE;
                     """, (clip_id,)
                 )
-                clip_data = cur.fetchone()
+                clip_data = cur.fetchone() # Fetches a dictionary row
 
                 if not clip_data:
                      raise ValueError(f"Clip {clip_id} not found.")
 
-                # 3. Check current state
                 current_state = clip_data['ingest_state']
-                # Allow running if pending OR if failed (for retries)
-                if current_state not in ['pending_sprite_generation', 'sprite_generation_failed']:
-                    logger.warning(f"Clip {clip_id} not in 'pending_sprite_generation' or 'sprite_generation_failed' state (state: {current_state}). Skipping sprite generation.")
-                    task_outcome = "skipped_state"
-                    conn.rollback() # Release lock and row lock by rolling back
-                    return {"status": task_outcome, "reason": f"Incorrect state: {current_state}", "clip_id": clip_id}
+                logger.info(f"Fetched clip {clip_id}. Current State: '{current_state}'")
 
-                # 4. Validate clip filepath
+                # 3. Validate clip filepath before state check
                 if not clip_data['clip_filepath']:
                      raise ValueError(f"Clip {clip_id} is missing required 'clip_filepath'.")
 
-                # 5. Update state to 'generating_sprite'
-                cur.execute(
-                    "UPDATE clips SET ingest_state = 'generating_sprite', updated_at = NOW(), last_error = NULL WHERE id = %s",
-                    (clip_id,)
-                )
-                logger.info(f"Set clip {clip_id} state to 'generating_sprite'")
+                # --- UPDATED State Checking Logic ---
+                expected_processing_state = 'generating_sprite'
+                # Allow processing if state is 'generating_sprite' (set by initiator) or 'sprite_generation_failed' (for retries)
+                allow_processing = current_state == expected_processing_state or \
+                                   current_state == 'sprite_generation_failed'
 
-            # Commit the state update and keep the transaction open if needed,
-            # or commit here to release the lock sooner if subsequent phases are long.
-            # Let's commit here to reduce lock duration.
-            conn.commit()
-            logger.debug("Phase 1 DB check/update transaction committed.")
+                # Explicitly skip if already completed ('pending_review' is the state after sprite gen) unless overwriting
+                # Note: Sprite task doesn't typically support overwrite logic, but check included for consistency
+                if current_state == 'pending_review' and not overwrite_existing:
+                    logger.warning(f"Clip {clip_id} is already 'pending_review'. Skipping sprite generation.")
+                    allow_processing = False
+                    task_outcome = "skipped_already_done"
+
+                if not allow_processing:
+                    logger.warning(f"Skipping sprite task for clip {clip_id}. Current state: '{current_state}' (expected '{expected_processing_state}' or 'sprite_generation_failed').")
+                    conn.rollback() # Release lock/transaction
+
+                    skip_reason = f"State '{current_state}' not runnable"
+                    if task_outcome == "skipped_already_done": skip_reason = "Already processed (pending_review)"
+
+                    return {"status": "skipped_state", "reason": skip_reason, "clip_id": clip_id}
+
+                # If we reach here, processing is allowed. Initiator already set the state.
+                # Commit transaction to release the row lock before long-running processing.
+                conn.commit()
+                logger.info(f"Verified state '{current_state}' is runnable for sprite generation ID {clip_id}. Proceeding...")
+                # The lock acquired by FOR UPDATE is released by commit.
 
         except (ValueError, psycopg2.DatabaseError) as db_err:
             logger.error(f"DB Error during initial check/update for sprite gen clip {clip_id}: {db_err}", exc_info=True)
-            if conn: conn.rollback() # Ensure rollback on error
+            if conn: conn.rollback()
             error_message = f"DB Init Error: {str(db_err)[:500]}"
             task_outcome = "failed_db_init"
-            raise # Re-raise to main handler
+            raise
 
 
         # === Phase 2: Main Processing (Download, Probe, Generate, Upload) ===
