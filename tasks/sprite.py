@@ -143,12 +143,16 @@ def generate_sprite_sheet_task(clip_id: int):
                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id,))
                 logger.info(f"Acquired DB lock for clip {clip_id} for duration of transaction.")
 
-                # 2. Fetch clip data (FOR UPDATE locks the row)
+                # 2. Fetch clip data AND source title
                 cur.execute(
                     """
-                    SELECT clip_filepath, clip_identifier, start_time_seconds, end_time_seconds,
-                           source_video_id, ingest_state, start_frame, end_frame
-                    FROM clips WHERE id = %s FOR UPDATE;
+                    SELECT
+                        c.clip_filepath, c.clip_identifier, c.start_time_seconds, c.end_time_seconds,
+                        c.source_video_id, c.ingest_state, c.start_frame, c.end_frame,
+                        sv.title AS source_title  -- Fetch source title
+                    FROM clips c
+                    JOIN source_videos sv ON c.source_video_id = sv.id -- Join source_videos
+                    WHERE c.id = %s FOR UPDATE;
                     """, (clip_id,)
                 )
                 clip_data = cur.fetchone()
@@ -281,14 +285,18 @@ def generate_sprite_sheet_task(clip_id: int):
             sprite_s3_key = None # Ensure key is None
             sprite_metadata = None # Ensure metadata is None
         else:
-            # Construct sprite sheet filename and S3 key
-            safe_identifier = sanitize_filename(clip_identifier)
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S") # Add timestamp to avoid collisions
-            sprite_filename = f"{safe_identifier}_sprite_{SPRITE_FPS}fps_w{SPRITE_TILE_WIDTH}_c{SPRITE_COLS}_{timestamp}.jpg"
+            # Sanitize source title for use in path
+            source_title = clip_data.get('source_title', f'source_{clip_data["source_video_id"]}') # Fallback if title is missing
+            sanitized_source_title = sanitize_filename(source_title)
+
+            # Construct sprite sheet filename and S3 key including sanitized source title
+            safe_clip_identifier = sanitize_filename(clip_identifier) # clip_identifier already fetched
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+            sprite_filename = f"{safe_clip_identifier}_sprite_{SPRITE_FPS}fps_w{SPRITE_TILE_WIDTH}_c{SPRITE_COLS}_{timestamp}.jpg"
             local_sprite_path = temp_dir / sprite_filename
-            # Ensure S3 prefix ends with /
-            s3_prefix = SPRITE_SHEET_S3_PREFIX.strip('/') + '/'
-            sprite_s3_key = f"{s3_prefix}{sprite_filename}"
+            s3_base_prefix = SPRITE_SHEET_S3_PREFIX.strip('/') + '/' # Base artifact prefix
+            # Add sanitized source title to the S3 key path
+            sprite_s3_key = f"{s3_base_prefix}{sanitized_source_title}/{sprite_filename}"
 
             # Calculate grid dimensions
             num_rows = max(1, math.ceil(num_sprite_frames / SPRITE_COLS))
@@ -523,52 +531,3 @@ def generate_sprite_sheet_task(clip_id: int):
         "final_db_state": final_db_state_expected, # What the state *should* be based on outcome
         "error": error_message
     }
-
-# Example local run command (requires Prefect setup or direct call modification)
-# Assumes you have environment variables set (DB connection, S3 bucket etc.)
-# E.g., in your shell:
-# export S3_BUCKET_NAME=your-bucket-name
-# export DATABASE_URL=postgresql://user:pass@host:port/dbname
-# ... etc ...
-#
-# Then run via Prefect CLI (if flow is defined):
-# prefect run --path path/to/your/flow.py --param clip_id=123
-#
-# Or for testing the task directly (less common for Prefect tasks):
-# if __name__ == "__main__":
-#     # Basic setup for direct call (replace with actual ID)
-#     test_clip_id = 1 # Replace with a valid clip ID in 'pending_sprite_generation' or 'sprite_generation_failed' state
-#     if len(sys.argv) > 1:
-#         try:
-#             test_clip_id = int(sys.argv[1])
-#         except ValueError:
-#             print(f"Usage: python {__file__} [clip_id]")
-#             sys.exit(1)
-#
-#     print(f"Attempting direct task run for clip_id={test_clip_id}...")
-#     # Note: Prefect context (like logger) won't be fully available
-#     # You might need to mock get_run_logger or use basic print/logging
-#     try:
-#         # Mock logger if needed for standalone run
-#         class MockLogger:
-#             def info(self, msg, **kwargs): print(f"INFO: {msg}")
-#             def warning(self, msg, **kwargs): print(f"WARN: {msg}")
-#             def error(self, msg, **kwargs): print(f"ERROR: {msg}", file=sys.stderr)
-#             def debug(self, msg, **kwargs): print(f"DEBUG: {msg}")
-#             def critical(self, msg, **kwargs): print(f"CRITICAL: {msg}", file=sys.stderr)
-#
-#         if 'prefect.runtime.flow_run' not in sys.modules: # Avoid patching if running in Prefect
-#             from unittest.mock import patch
-#             with patch('sprite_generator.get_run_logger', return_value=MockLogger()):
-#                 result = generate_sprite_sheet_task.fn(test_clip_id) # Call the underlying function
-#                 print("\n--- Task Result ---")
-#                 print(json.dumps(result, indent=2))
-#         else: # Running within Prefect context already
-#              result = generate_sprite_sheet_task.fn(test_clip_id) # Call the underlying function
-#              print("\n--- Task Result ---")
-#              print(json.dumps(result, indent=2))
-#
-#     except Exception as main_err:
-#         print(f"\n--- Task Execution Failed ---", file=sys.stderr)
-#         import traceback
-#         traceback.print_exc()

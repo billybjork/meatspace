@@ -340,10 +340,13 @@ def splice_video_task(source_video_id: int):
                         continue
 
                     # Generate identifiers and paths
+                    # Use sanitized source title for directory structure
                     clip_identifier = f"{sanitized_title_prefix}_clip_{idx:05d}" # Use 0-based index for consistency
                     clip_filename = f"{clip_identifier}.mp4"
                     local_clip_path = temp_dir / clip_filename # Store temp clips directly in temp_dir
-                    clip_s3_key = f"{CLIP_S3_PREFIX}{clip_filename}" # S3 key includes prefix
+                    s3_prefix = CLIP_S3_PREFIX.strip('/') + '/' # Ensure prefix ends with /
+                    # Add sanitized_title_prefix to the S3 key path
+                    clip_s3_key = f"{s3_prefix}{sanitized_title_prefix}/{clip_filename}"
 
                     logger.info(f"Extracting clip {idx}: {clip_identifier} (Frames {start_frame}-{end_frame_exclusive-1}, Time {start_time_seconds:.2f}s-{end_time_seconds:.2f}s)")
 

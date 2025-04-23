@@ -95,14 +95,17 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                 cur.execute("SELECT pg_advisory_xact_lock(2, %s)", (clip_id_source,))
                 logger.debug(f"Acquired locks for target {clip_id_target} and source {clip_id_source}")
 
-                # Fetch data for both clips FOR UPDATE (row lock within transaction)
+                # Fetch data for both clips AND source title
                 cur.execute(
                     """
-                    SELECT id, clip_filepath, clip_identifier, start_frame, end_frame,
-                           start_time_seconds, end_time_seconds, source_video_id,
-                           ingest_state, processing_metadata
-                    FROM clips
-                    WHERE id = ANY(%s::int[]) FOR UPDATE;
+                    SELECT
+                        c.id, c.clip_filepath, c.clip_identifier, c.start_frame, c.end_frame,
+                        c.start_time_seconds, c.end_time_seconds, c.source_video_id,
+                        c.ingest_state, c.processing_metadata,
+                        sv.title AS source_title -- Fetch source title
+                    FROM clips c
+                    JOIN source_videos sv ON c.source_video_id = sv.id -- Join source_videos
+                    WHERE c.id = ANY(%s::int[]) FOR UPDATE;
                     """, ([clip_id_target, clip_id_source],)
                 )
                 results = cur.fetchall()
@@ -116,6 +119,9 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                 if clip_target_data['source_video_id'] != clip_source_data['source_video_id']:
                     raise ValueError("Clips do not belong to the same source video.")
                 source_video_id = clip_target_data['source_video_id']
+
+                # Extract source title (should be the same for both)
+                source_title = clip_target_data.get('source_title', f'source_{source_video_id}') # Use target's, fallback
 
                 # Validate states (allow proceeding with warning for robustness, but log it)
                 if clip_target_data['ingest_state'] != expected_target_state:
@@ -141,6 +147,9 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
              raise # Re-raise to fail the task
 
         # === Main Processing: Download, Merge, Upload ===
+        if source_title is None: # Add a check just in case assignment failed silently (shouldn't happen)
+            raise RuntimeError("Source title could not be determined before processing.")
+        
         temp_dir_obj = tempfile.TemporaryDirectory(prefix=f"meatspace_merge_")
         temp_dir = Path(temp_dir_obj.name)
         logger.info(f"Using temporary directory: {temp_dir}")
@@ -163,14 +172,19 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
 
         new_end_frame = clip_source_data['end_frame']
         new_end_time = clip_source_data['end_time_seconds']
+
+        # Sanitize source title for use in path
+        sanitized_source_title = sanitize_filename(source_title)
+
         # Generate new identifier and filename for the merged clip
-        source_prefix = f"{clip_target_data['source_video_id']}" # Use source video ID as prefix
-        updated_clip_identifier = f"{source_prefix}_{clip_target_data['start_frame']}_{new_end_frame}"
+        source_prefix = f"{clip_target_data['source_video_id']}"
+        updated_clip_identifier = f"{source_prefix}_{clip_target_data['start_frame']}_{new_end_frame}_merged"
         updated_clip_filename = f"{sanitize_filename(updated_clip_identifier)}.mp4"
         updated_local_clip_path = temp_dir / updated_clip_filename
-        # Ensure clip prefix ends with /
-        s3_prefix = CLIP_S3_PREFIX.strip('/') + '/'
-        updated_clip_s3_key = f"{s3_prefix}{updated_clip_filename}"
+
+        # Ensure clip prefix ends with / and add sanitized source title
+        s3_base_prefix = CLIP_S3_PREFIX.strip('/') + '/'
+        updated_clip_s3_key = f"{s3_base_prefix}{sanitized_source_title}/{updated_clip_filename}"
 
         ffmpeg_merge_cmd_copy = [ FFMPEG_PATH, '-y', '-f', 'concat', '-safe', '0', '-i', str(concat_list_path), '-c', 'copy', str(updated_local_clip_path) ]
         try:
@@ -236,7 +250,6 @@ def merge_clips_task(clip_id_target: int, clip_id_source: int):
                     UPDATE clips
                     SET
                         ingest_state = 'merged',      -- Final state
-                        clip_filepath = NULL,         -- Nullify its video path
                         processing_metadata = jsonb_set(COALESCE(processing_metadata, '{}'::jsonb), '{merged_into_clip_id}', %s::jsonb),
                         last_error = 'Merged into clip ' || %s::text,
                         updated_at = NOW(),

@@ -42,7 +42,7 @@
             {% if results %}
                 {% for result in results %}
                 <div class="result-item">
-                    <a href="{{ url_for('query_clip', clip_id=result.clip_id) }}?model={{ model_name }}&strategy={{ strategy }}" class="result-link">
+                    <a href="{{ url_for('query_clip', clip_identifier=result.clip_id) }}?model={{ model_name }}&strategy={{ strategy }}" class="result-link">
                         <div class="media-container result-container"
                              data-video-src="{{ result.video_url }}">
                              <img src="{{ result.keyframe_url }}" alt="Result Keyframe {{ loop.index }}" class="keyframe-thumb">
