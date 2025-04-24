@@ -8,6 +8,3 @@ backend/venv/
 *.pyd
 *.~
 *.swp
-/ui/node_modules/
-/ui/.solid/
-/ui/.output/
