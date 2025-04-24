@@ -2,7 +2,7 @@ import { createResource, Show } from 'solid-js';
 import { Title } from '@solidjs/meta';
 import styles from '~/styles/intake-review.css?inline';
 
-import type { NextClipResponse, ErrorResponse } from '~/lib/types';
+import type { NextClipResponse, ApiErrorResponse } from '~/schemas/clip';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -16,10 +16,12 @@ async function fetchNextClip(): Promise<NextClipResponse> {
     if (!response.ok) {
       let errorDetail = `HTTP error ${response.status}`;
       try {
-        const errorJson: ErrorResponse = await response.json();
+        const errorJson: ApiErrorResponse = await response.json();
         if (typeof errorJson.detail === 'string') errorDetail = errorJson.detail;
         else if (Array.isArray(errorJson.detail) && errorJson.detail.length)
-          errorDetail = errorJson.detail.map((d) => d.msg).join(', ');
+          errorDetail = errorJson.detail
+            .map((d: { msg: string }) => d.msg)
+            .join(', ');
       } catch {
         /* fallback keeps original errorDetail */
       }
@@ -82,8 +84,7 @@ export default function IntakeReviewPage() {
             );
           }
 
-          const clip = data.clip;
-          console.log('Rendering clip object:', JSON.stringify(clip, null, 2));
+          const clip = data.clip!; // <-- Non-null assertion added here
 
           // Gracefully support either start_s / end_s OR start_time_seconds / end_time_seconds
           const startSeconds =
