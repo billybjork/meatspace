@@ -1,6 +1,5 @@
 import { z } from 'zod';
 
-// Corresponds to Python Pydantic SpriteMeta
 // Uses field names expected *after* Python data massaging
 export const SpriteMetaSchema = z.object({
     tile_width: z.number().int(),
@@ -16,7 +15,6 @@ export const SpriteMetaSchema = z.object({
 });
 export type SpriteMeta = z.infer<typeof SpriteMetaSchema>;
 
-// Corresponds to Python Pydantic ClipForReview
 // Uses field names expected *after* Python data massaging
 export const ClipForReviewSchema = z.object({
     // id alias mapped to db_id in Python massage
@@ -42,7 +40,6 @@ export const ClipForReviewSchema = z.object({
 });
 export type ClipForReview = z.infer<typeof ClipForReviewSchema>;
 
-// Corresponds to Python Pydantic NextClipResponse
 // Matches the structure returned by /api/clips/review/next
 export const NextClipResponseSchema = z.object({
     done: z.boolean(),

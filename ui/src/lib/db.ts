@@ -1,9 +1,7 @@
-// ui/src/lib/db.ts
-import { Pool, PoolClient, QueryResult } from 'pg'; // Import Pool and PoolClient from pg
+import { Pool, PoolClient, QueryResult } from 'pg';
 import dotenv from 'dotenv';
 import path from 'path';
 
-// Load environment variables from ui/.env
 dotenv.config({ path: path.resolve(process.cwd(), 'ui/.env') });
 
 let pool: Pool | null = null;
