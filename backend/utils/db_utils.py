@@ -20,8 +20,8 @@ from typing import List, Tuple, Dict, Any, Optional
 import psycopg2
 from psycopg2 import sql, pool
 from psycopg2.extras import RealDictCursor
-from dotenv import load_dotenv
 from prefect import get_run_logger
+from dotenv import load_dotenv
 
 # ─────────────────────────────────────────── env / pool setup
 dotenv_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
@@ -145,6 +145,28 @@ def get_all_pending_work(
             release_db_connection(conn)
     log.debug(f"Pending work rows: {len(items)}")
     return items
+
+
+def get_source_input_from_db(source_video_id: int) -> str | None:
+    """Fetches the original_url for a given source_video ID."""
+    logger = get_run_logger()
+    conn = None
+    input_source = None
+    try:
+        conn = get_db_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT original_url FROM source_videos WHERE id = %s", (source_video_id,))
+            result = cur.fetchone()
+            if result and result[0]:
+                input_source = result[0]
+            else:
+                logger.warning(f"No 'original_url' found in DB for source_video_id {source_video_id}")
+    except (Exception, psycopg2.DatabaseError) as error:
+         logger.error(f"DB error fetching input source for ID {source_video_id}: {error}", exc_info=True)
+    finally:
+        if conn:
+            release_db_connection(conn)
+    return input_source
 
 
 def get_pending_merge_pairs(
