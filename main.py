@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, FileResponse
 from config import log
 from database import connect_db, close_db, get_db_connection
 from routers.similarity_browser import router as search_router
-from routers.intake_review import ui_router as review_ui_router, api_router as review_api_router
+from routers.intake_review import api_router as review_api_router
 
 # --- Lifespan Management for Database Pool ---
 
@@ -69,7 +69,6 @@ log.info("Static files and Jinja2 templates configured.")
 
 # --- Include Routers ---
 app.include_router(search_router)
-app.include_router(review_ui_router)
 app.include_router(review_api_router)  # Includes /api/clips/... actions
 log.info("Included API routers.")
 

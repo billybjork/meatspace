@@ -7,3 +7,6 @@ __pycache__/
 *.pyd
 *.~
 *.swp
+/ui/node_modules/
+/ui/.solid/
+/ui/.output/

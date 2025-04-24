@@ -62,6 +62,7 @@ TASK_SUBMIT_DELAY = float(os.getenv("TASK_SUBMIT_DELAY", 0.1)) # Delay between t
 KEYFRAME_TIMEOUT = int(os.getenv("KEYFRAME_TIMEOUT", 600)) # Timeout for keyframe task result (seconds)
 EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900)) # Timeout for embedding task result (seconds)
 CLIP_CLEANUP_DELAY_MINUTES = int(os.getenv("CLIP_CLEANUP_DELAY_MINUTES", 30))
+ACTION_COMMIT_GRACE_PERIOD_SECONDS = int(os.getenv("ACTION_COMMIT_GRACE_PERIOD_SECONDS", 10)) # Grace period for actions
 
 # --- Constants ---
 ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet"
@@ -189,9 +190,10 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     """
     Scheduled flow to find new work at different stages of the ingest pipeline
     using a consolidated query and trigger the appropriate next tasks or flow runs.
+    Applies a grace period based on `action_committed_at` before picking up items.
     """
     logger = get_run_logger()
-    logger.info(f"FLOW: Running Scheduled Ingest Initiator cycle (Limit: {limit_per_stage}/stage)...")
+    logger.info(f"FLOW: Running Scheduled Ingest Initiator cycle (Limit: {limit_per_stage}/stage, Grace Period: {ACTION_COMMIT_GRACE_PERIOD_SECONDS}s)...")
 
     try:
         initialize_db_pool()
@@ -207,10 +209,23 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     submitted_counts = defaultdict(int)
 
     # --- Consolidated Work Fetching ---
+    # NOTE: The actual SQL filtering using action_committed_at happens INSIDE
+    # the get_all_pending_work function in db_utils.py. We pass the grace period here.
     all_work = []
     try:
-        all_work = get_all_pending_work(limit_per_stage=limit_per_stage)
-        logger.info(f"Found {len(all_work)} total work items across stages.")
+        logger.info(f"Fetching work items with grace period: {ACTION_COMMIT_GRACE_PERIOD_SECONDS} seconds...")
+        all_work = get_all_pending_work(
+            limit_per_stage=limit_per_stage,
+            grace_period_seconds=ACTION_COMMIT_GRACE_PERIOD_SECONDS
+            )
+        # Example of how the query inside get_all_pending_work might look for 'review_approved':
+        # SELECT id, 'post_review' AS stage
+        # FROM clips
+        # WHERE ingest_state = 'review_approved'
+        #   AND (action_committed_at IS NULL OR action_committed_at < (NOW() - INTERVAL '$2 seconds')) -- $2 is grace_period_seconds
+        # ORDER BY updated_at ASC -- or by id ASC
+        # LIMIT $1; -- $1 is limit_per_stage
+        logger.info(f"Found {len(all_work)} total work items across stages (after applying grace period).")
     except Exception as db_query_err:
         logger.error(f"[All Stages] Failed consolidating work query: {db_query_err}", exc_info=True)
         error_count += 1
@@ -227,7 +242,7 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     stage_name = "Intake"
     intake_ids = work_by_stage.get('intake', [])
     if intake_ids:
-        logger.info(f"[{stage_name}] Found {len(intake_ids)} sources. Submitting tasks...")
+        logger.info(f"[{stage_name}] Found {len(intake_ids)} sources (post-grace). Submitting tasks...")
         for sid in intake_ids:
             try:
                 # Attempt to update state *before* getting input and submitting
@@ -247,9 +262,9 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
 
                         submitted_counts[stage_name] += 1
                         time.sleep(TASK_SUBMIT_DELAY)
-                    else:
-                        logger.warning(f"[{stage_name}] Failed to update state for source ID {sid} to 'downloading'. Skipping task submission.")
-                        error_count += 1
+                else:
+                    logger.warning(f"[{stage_name}] Failed to update state for source ID {sid} to 'downloading'. Skipping task submission.")
+                    error_count += 1
             except Exception as task_submit_err:
                 logger.error(f"[{stage_name}] Submit failed for ID {sid}: {task_submit_err}", exc_info=True)
                 error_count += 1
@@ -260,7 +275,7 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     stage_name = "Splice"
     splice_ids = work_by_stage.get('splice', [])
     if splice_ids:
-        logger.info(f"[{stage_name}] Found {len(splice_ids)} sources for splicing. Submitting tasks...")
+        logger.info(f"[{stage_name}] Found {len(splice_ids)} sources for splicing (post-grace). Submitting tasks...")
         for sid in splice_ids:
             try:
                 # State 'splicing' signifies start of processing
@@ -281,7 +296,7 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     stage_name = "SpriteGen"
     sprite_ids = work_by_stage.get('sprite', [])
     if sprite_ids:
-        logger.info(f"[{stage_name}] Found {len(sprite_ids)} clips needing sprites. Submitting tasks...")
+        logger.info(f"[{stage_name}] Found {len(sprite_ids)} clips needing sprites (post-grace). Submitting tasks...")
         for cid in sprite_ids:
             try:
                  # State 'generating_sprite' signifies start of processing
@@ -303,7 +318,7 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     post_review_ids = work_by_stage.get('post_review', [])
     if post_review_ids:
         deployment_name = "process-clip-post-review/process-clip-post-review-default"
-        logger.info(f"[{stage_name}] Found {len(post_review_ids)} approved clips. Triggering '{deployment_name}' runs...")
+        logger.info(f"[{stage_name}] Found {len(post_review_ids)} approved clips (post-grace). Triggering '{deployment_name}' runs...")
         for cid in post_review_ids:
             try:
                 # State 'processing_post_review' signifies start of processing
@@ -331,10 +346,12 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     # --- Stage 5.1: Merge (Keep separate query for complexity) ---
     stage_name = "Merge"
     try:
-        merge_pairs = get_pending_merge_pairs()
+        # NOTE: The actual SQL filtering using action_committed_at should happen INSIDE
+        # the get_pending_merge_pairs function in db_utils.py if a grace period is desired for merge states.
+        merge_pairs = get_pending_merge_pairs(grace_period_seconds=ACTION_COMMIT_GRACE_PERIOD_SECONDS)
         processed_counts[stage_name] = len(merge_pairs) # Count pairs found
         if merge_pairs:
-             logger.info(f"[{stage_name}] Found {len(merge_pairs)} pairs for merging. Submitting tasks...")
+             logger.info(f"[{stage_name}] Found {len(merge_pairs)} pairs for merging (post-grace). Submitting tasks...")
              submitted_merges = set() # Track submitted clips to avoid duplicates within this run
              for target_id, source_id in merge_pairs:
                   if target_id not in submitted_merges and source_id not in submitted_merges:
@@ -358,10 +375,12 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     # --- Stage 5.2: Split (Keep separate query for complexity) ---
     stage_name = "Split"
     try:
-        clips_to_split_data = get_pending_split_jobs()
+        # NOTE: The actual SQL filtering using action_committed_at should happen INSIDE
+        # the get_pending_split_jobs function in db_utils.py if a grace period is desired for split states.
+        clips_to_split_data = get_pending_split_jobs(grace_period_seconds=ACTION_COMMIT_GRACE_PERIOD_SECONDS)
         processed_counts[stage_name] = len(clips_to_split_data) # Count jobs found
         if clips_to_split_data:
-            logger.info(f"[{stage_name}] Found {len(clips_to_split_data)} clips pending split. Submitting tasks...")
+            logger.info(f"[{stage_name}] Found {len(clips_to_split_data)} clips pending split (post-grace). Submitting tasks...")
             submitted_splits = set() # Track submitted clips
             for cid, split_frame in clips_to_split_data:
                 if cid not in submitted_splits:
@@ -386,7 +405,7 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
     final_processed_counts = dict(processed_counts)
     final_submitted_counts = dict(submitted_counts)
     summary_log = (f"FLOW: Scheduled Ingest Initiator cycle complete. "
-                   f"Items Found: {final_processed_counts}. "
+                   f"Items Found (Post-Grace): {final_processed_counts}. "
                    f"Tasks/Runs Submitted: {final_submitted_counts}.")
 
     if error_count > 0:
@@ -426,8 +445,15 @@ async def cleanup_reviewed_clips_flow(
         async with pool.acquire() as conn:
             logger.info("Acquired asyncpg connection.")
             delay_interval = timedelta(minutes=cleanup_delay_minutes)
-            query_clips = "SELECT id, ingest_state FROM clips WHERE ingest_state = ANY($1::text[]) AND updated_at < (NOW() - $2::INTERVAL) ORDER BY id ASC;"
             pending_states = ['approved_pending_deletion', 'archived_pending_deletion']
+            # Formatted SQL Query
+            query_clips = """
+                SELECT id, ingest_state
+                FROM clips
+                WHERE ingest_state = ANY($1::text[])
+                  AND updated_at < (NOW() - $2::INTERVAL)
+                ORDER BY id ASC;
+            """
             clips_to_cleanup = await conn.fetch(query_clips, pending_states, delay_interval)
             processed_count = len(clips_to_cleanup)
             logger.info(f"Found {processed_count} clips potentially ready for cleanup.")
@@ -438,7 +464,14 @@ async def cleanup_reviewed_clips_flow(
                 log_prefix = f"[Cleanup Clip {clip_id}]"; logger.info(f"{log_prefix} Processing state: {current_state}")
                 sprite_artifact_s3_key, s3_deletion_successful = None, False
                 try:
-                    query_artifact = "SELECT s3_key FROM clip_artifacts WHERE clip_id = $1 AND artifact_type = $2 LIMIT 1;"
+                    # Formatted SQL Query
+                    query_artifact = """
+                        SELECT s3_key
+                        FROM clip_artifacts
+                        WHERE clip_id = $1
+                          AND artifact_type = $2
+                        LIMIT 1;
+                    """
                     artifact_record = await conn.fetchrow(query_artifact, clip_id, ARTIFACT_TYPE_SPRITE_SHEET)
                     if artifact_record: sprite_artifact_s3_key = artifact_record['s3_key']; logger.info(f"{log_prefix} Found sprite: {sprite_artifact_s3_key}")
                     else: logger.warning(f"{log_prefix} No sprite artifact found."); s3_deletion_successful = True
@@ -463,9 +496,24 @@ async def cleanup_reviewed_clips_flow(
                         try:
                             async with conn.transaction():
                                 if sprite_artifact_s3_key:
-                                    del_res = await conn.execute("DELETE FROM clip_artifacts WHERE clip_id = $1 AND artifact_type = $2;", clip_id, ARTIFACT_TYPE_SPRITE_SHEET)
-                                    if del_res.startswith("DELETE"): db_artifact_deleted_count += int(del_res.split()[-1])
-                                upd_res = await conn.execute("UPDATE clips SET ingest_state=$1, updated_at=NOW(), last_error=NULL WHERE id=$2 AND ingest_state=$3;", final_clip_state, clip_id, current_state)
+                                    # Formatted SQL Query
+                                    delete_artifact_sql = """
+                                        DELETE FROM clip_artifacts
+                                        WHERE clip_id = $1
+                                          AND artifact_type = $2;
+                                    """
+                                    del_res = await conn.execute(delete_artifact_sql, clip_id, ARTIFACT_TYPE_SPRITE_SHEET)
+                                    if del_res and del_res.startswith("DELETE"): db_artifact_deleted_count += int(del_res.split()[-1])
+                                # Formatted SQL Query
+                                update_clip_sql = """
+                                    UPDATE clips
+                                    SET ingest_state=$1,
+                                        updated_at=NOW(),
+                                        last_error=NULL
+                                    WHERE id=$2
+                                      AND ingest_state=$3;
+                                """
+                                upd_res = await conn.execute(update_clip_sql, final_clip_state, clip_id, current_state)
                                 if upd_res == "UPDATE 1": logger.info(f"{log_prefix} Updated state to '{final_clip_state}'."); db_clip_updated_count += 1
                                 else: raise RuntimeError(f"Clip update affected {upd_res} rows (expected 1)")
                         except Exception as tx_err: logger.error(f"{log_prefix} DB TX failed: {tx_err}", exc_info=True); error_count += 1
@@ -497,23 +545,38 @@ if __name__ == "__main__":
              await flow_func(*args, **kwargs)
         except Exception as e: print(f"Error running async {flow_func.__name__}: {e}"); traceback.print_exc()
         finally:
-             if pool and ASYNC_DB_CONFIGURED and close_db: print("Async DB Pool potentially closed.")
+             if pool and ASYNC_DB_CONFIGURED and close_db:
+                 await close_db(); # Ensure close_db is awaited if it's async
+                 print("Async DB Pool closed.")
+             elif pool: print("Async DB Pool was connected but close_db unavailable/not configured.")
+
 
     try:
         if flow_to_run == "initiator":
-            print("\n--- Testing scheduled_ingest_initiator ---"); scheduled_ingest_initiator(); print("--- Finished initiator ---")
+            print("\n--- Testing scheduled_ingest_initiator ---")
+            # Ensure DB pool is available for sync functions used by initiator
+            initialize_db_pool()
+            scheduled_ingest_initiator()
+            print("--- Finished initiator ---")
         elif flow_to_run == "cleanup":
-             print("\n--- Testing cleanup_reviewed_clips_flow ---"); asyncio.run(run_async_flow(cleanup_reviewed_clips_flow, cleanup_delay_minutes=1)); print("--- Finished cleanup ---")
+             print("\n--- Testing cleanup_reviewed_clips_flow ---")
+             asyncio.run(run_async_flow(cleanup_reviewed_clips_flow, cleanup_delay_minutes=1))
+             print("--- Finished cleanup ---")
         elif flow_to_run == "post_review":
              clip_id = int(os.environ.get("TEST_CLIP_ID", 0))
              if clip_id > 0:
-                 print(f"\n--- Testing process_clip_post_review directly (Clip ID: {clip_id}) ---"); initialize_db_pool(); process_clip_post_review(clip_id=clip_id); print(f"--- Finished post_review (Clip ID: {clip_id}) ---")
+                 print(f"\n--- Testing process_clip_post_review directly (Clip ID: {clip_id}) ---")
+                 initialize_db_pool()
+                 process_clip_post_review(clip_id=clip_id)
+                 print(f"--- Finished post_review (Clip ID: {clip_id}) ---")
              else: print("Set TEST_CLIP_ID env var.")
         elif flow_to_run == "merge":
              target_id = int(os.environ.get("TEST_MERGE_TARGET_ID", 0)); source_id = int(os.environ.get("TEST_MERGE_SOURCE_ID", 0))
              if target_id > 0 and source_id > 0:
                   print(f"\n--- Testing merge_clips_task (direct fn) Target:{target_id}, Source:{source_id} ---")
-                  try: initialize_db_pool(); merge_clips_task.fn(clip_id_target=target_id, clip_id_source=source_id)
+                  try:
+                      initialize_db_pool()
+                      merge_clips_task.fn(clip_id_target=target_id, clip_id_source=source_id)
                   except Exception as task_exc: print(f"Error: {task_exc}"); traceback.print_exc()
                   print(f"--- Finished merge test ---")
              else: print("Set TEST_MERGE_TARGET_ID and TEST_MERGE_SOURCE_ID.")

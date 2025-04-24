@@ -1,0 +1,120 @@
+/* ui/src/styles/intake-review.css */
+
+/* Styles will be ported here later */
+
+/* Placeholder basic styles */
+.review-container {
+    max-width: 800px;
+    margin: 20px auto;
+    padding: 15px;
+    border: 1px solid #ccc;
+    background-color: #f9f9f9;
+  }
+  
+  .clip-review-item {
+    border: 1px solid #eee;
+    padding: 10px;
+    margin-bottom: 10px;
+    background-color: #fff;
+  }
+  
+  .clip-info {
+    font-size: 0.9em;
+    color: #555;
+    margin-bottom: 10px;
+    line-height: 1.4;
+  }
+  
+  .sprite-viewer {
+    border: 1px dashed #ccc;
+    background-color: #eee;
+    min-height: 150px; /* Example min height */
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #888;
+    margin-bottom: 10px;
+    background-repeat: no-repeat; /* Important for sprite sheet */
+    overflow: hidden; /* Ensure viewer size constraints */
+  }
+  
+  .sprite-viewer.no-sprite {
+      background-image: none !important;
+  }
+  
+  .playback-controls {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 15px;
+  }
+  
+  .sprite-scrub-bar {
+    flex-grow: 1;
+  }
+  
+  .clip-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  
+  .action-btn {
+      padding: 8px 15px;
+      border: 1px solid #ccc;
+      background-color: #f0f0f0;
+      cursor: pointer;
+      border-radius: 4px;
+  }
+  .action-btn:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+  }
+  .action-btn.btn-active {
+      background-color: #e0e0e0;
+      border-color: #999;
+      box-shadow: inset 0 1px 3px rgba(0,0,0,0.2);
+  }
+  
+  
+  .split-controls {
+      display: none; /* Hidden by default */
+      margin-top: 15px;
+      padding-top: 10px;
+      border-top: 1px solid #eee;
+  }
+  
+  .split-controls .frame-info {
+      font-family: monospace;
+      margin-bottom: 5px;
+      font-size: 0.9em;
+  }
+  .split-feedback {
+      display: inline-block; /* Or block */
+      margin-left: 10px;
+      font-size: 0.9em;
+      font-weight: bold;
+  }
+  
+  .action-feedback {
+      margin-top: 15px;
+      padding: 10px;
+      border-radius: 4px;
+      text-align: center;
+  }
+  .action-feedback.success {
+      background-color: #dff0d8;
+      color: #3c763d;
+      border: 1px solid #d6e9c6;
+  }
+  .action-feedback.error {
+      background-color: #f2dede;
+      color: #a94442;
+      border: 1px solid #ebccd1;
+  }
+  
+  .clip-review-item.processing {
+      opacity: 0.7;
+      pointer-events: none;
+  }
