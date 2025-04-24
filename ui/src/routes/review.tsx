@@ -11,9 +11,9 @@ import type { NextClipResponse, ClipForReview, ApiErrorResponse } from "~/schema
 
 // Define the fetcher function for TanStack Query
 const fetchNextClip = async (): Promise<NextClipResponse> => {
-  console.log("Fetching /api/review/next...");
+  console.log("Fetching /api/clips/review/next...");
   // Use a relative path to fetch from the same origin (your SolidStart server)
-  const response = await fetch("/api/review/next", {
+  const response = await fetch("/api/clips/review/next", {
     method: 'GET',
     headers: { Accept: 'application/json' },
   });
