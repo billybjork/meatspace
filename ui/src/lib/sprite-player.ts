@@ -161,6 +161,10 @@ export interface InternalSpriteMeta {
       this.isPlaying ? this.pause() : this.play();
       setTimeout(() => (this.isToggling = false), 50);
     }
+
+    public getCurrentFrame() {
+        return this.currentFrame;
+    }
   
     /**
      * Cleanup any active intervals or listeners.

@@ -9,6 +9,7 @@ export interface SpritePlayerProps {
   spriteMeta: string; // JSON stringified metadata from API
   autoplay?: boolean;
   onSplitFrame?: (frame: number) => void;
+  playerRef?: (instance: SpritePlayerClass) => void;
 }
 
 export default function SpritePlayer(props: SpritePlayerProps) {
