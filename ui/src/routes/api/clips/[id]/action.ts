@@ -1,15 +1,11 @@
 import { type APIEvent } from "@solidjs/start/server";
-import { PoolClient } from 'pg';
-import { z } from 'zod';
+import { PoolClient } from "pg";
+import { z } from "zod";
 
 import { getDbClient } from "~/lib/db";
-import {
-    ClipActionPayloadSchema, // Expects only { action: "..." } in body
-    ActionSuccessResponseSchema,
-    ApiErrorResponseSchema
-} from "~/schemas/clip";
+import { ClipActionPayloadSchema } from "~/schemas/clip";
 
-// Custom JSON response helper
+// Helper to return JSON responses
 function json(data: any, { status = 200 } = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -17,202 +13,259 @@ function json(data: any, { status = 200 } = {}) {
   });
 }
 
-// Define allowed states for general actions (mirroring Python)
+// Allowed states for simple actions
 const ALLOWED_SOURCE_STATES_GENERAL = [
-    'pending_review', 'review_skipped', 'merge_failed', 'split_failed',
-    'keyframe_failed', 'embedding_failed', 'sprite_generation_failed', 'group_failed'
+  'pending_review', 'review_skipped', 'merge_failed', 'split_failed',
+  'keyframe_failed', 'embedding_failed', 'sprite_generation_failed', 'group_failed'
 ];
-// TODO: Add specific allowed states for 'retry_sprite_gen' if implementing that button
 
-// Mapping from action name to the target next_state in the DB
+// Valid prior ingest_state for merge/group operations
+const VALID_PREVIOUS_ACTION_STATES = [
+  'pending_review', 'review_skipped', 'approved_pending_deletion',
+  'review_approved', 'archived_pending_deletion', 'archived', 'grouped_complete'
+];
+
+// Map each action to its desired next_state
 const ACTION_TO_STATE: Record<string, string> = {
-    "approve": "approved_pending_deletion",
-    "skip": "review_skipped",
-    "archive": "archived_pending_deletion",
-    "retry_sprite_gen": "pending_sprite_generation", // Add if needed
-    // Merge/Group handled differently
-    // "merge_previous": "marked_for_merge_into_previous",
-    // "group_previous": "grouped_complete",
+  approve:          'approved_pending_deletion',
+  skip:             'review_skipped',
+  archive:          'archived_pending_deletion',
+  retry_sprite_gen: 'pending_sprite_generation',
+  merge_previous:   'marked_for_merge_into_previous',
+  group_previous:   'grouped_complete',
 };
 
-/**
- * API Route Handler for POST /api/clips/[id]/action
- * Handles simple clip actions like approve, skip, archive.
- * Reads clip ID from URL path parameter.
- * Uses transactions and advisory locks.
- */
 export async function POST(event: APIEvent) {
-    console.log("API: Received POST /api/clips/[id]/action request");
-    let client: PoolClient | null = null;
-    let clipId: number | null = null; // Keep track for logging
+  console.log("API: POST /api/clips/[id]/action");
+  let client: PoolClient | null = null;
+  let clipId: number;
 
-    try {
-        // 1. Get Clip ID from Path Parameter
-        const clipIdParam = event.params.id; // Read 'id' from the filename [id]
-        if (!clipIdParam || isNaN(parseInt(clipIdParam))) {
-            return json({ detail: "Invalid or missing clip ID in URL path." }, { status: 400 });
-        }
-        clipId = parseInt(clipIdParam);
-
-        // 2. Parse Action from Payload Body
-        let payload: z.infer<typeof ClipActionPayloadSchema>;
-        try {
-            const rawPayload = await event.request.json();
-            // Payload schema now only expects the action field
-            payload = ClipActionPayloadSchema.parse(rawPayload);
-            console.log(`Action: ${payload.action}, Clip ID: ${clipId} (from path)`);
-        } catch (error) {
-             console.error("Payload validation failed:", error);
-             if (error instanceof z.ZodError) {
-                 return json({ detail: error.flatten().fieldErrors }, { status: 422 }); // Unprocessable Entity
-             }
-             return json({ detail: "Invalid request payload body." }, { status: 400 });
-        }
-
-        const action = payload.action;
-        const intendedNextState = ACTION_TO_STATE[action];
-
-        // --- Handle Simple Actions (Approve, Skip, Archive) ---
-        if (!["approve", "skip", "archive"].includes(action)) {
-            console.warn(`Action '${action}' not yet implemented in this endpoint.`);
-             return json({ detail: `Action '${action}' is invalid or not supported by this endpoint.` }, { status: 400 });
-        }
-
-        if (!intendedNextState) {
-            console.error(`Internal error: No next state defined for action '${action}'`);
-            return json({ detail: "Internal server configuration error." }, { status: 500 });
-        }
-
-        const allowedSourceStates = ALLOWED_SOURCE_STATES_GENERAL;
-        const lockIdCurrent = 2;
-
-        // 3. Database Transaction
-        client = await getDbClient();
-        await client.query('BEGIN');
-        console.log(`Transaction started for clip ${clipId}`);
-
-        try {
-            // 4. Acquire Advisory Lock
-            await client.query('SELECT pg_advisory_xact_lock($1, $2)', [lockIdCurrent, clipId]);
-            console.log(`Acquired advisory lock (${lockIdCurrent}, ${clipId})`);
-
-            // 5. Fetch Current State (with row lock)
-            const selectQuery = `
-                SELECT ingest_state, next_state
-                FROM clips
-                WHERE id = $1
-                FOR UPDATE;
-            `;
-            const selectResult = await client.query(selectQuery, [clipId]);
-
-            if (selectResult.rows.length === 0) {
-                throw new Error(`Clip with ID ${clipId} not found.`); // -> 404
-            }
-
-            const currentData = selectResult.rows[0];
-            const currentState = currentData.ingest_state;
-            const currentNextState = currentData.next_state;
-
-            // 6. Validate State Preconditions
-            if (currentNextState !== null) {
-                 throw new Error(`Action already pending for this clip (next state: '${currentNextState}'). Undo first if needed.`); // -> 409
-            }
-            if (!allowedSourceStates.includes(currentState)) {
-                 throw new Error(`Action '${action}' cannot be performed from state '${currentState}'.`); // -> 409
-            }
-
-            // 7. Perform Update
-            const updateClauses = [
-                'next_state = $1',
-                'action_committed_at = NOW()',
-                'updated_at = NOW()',
-                'last_error = NULL',
-                'processing_metadata = NULL',
-                'grouped_with_clip_id = NULL'
-            ];
-            const updateParams: (string | number | null | (string | number)[])[] = [intendedNextState];
-            let paramIndex = 2; // Start params at $2
-
-            // Set reviewed_at timestamp appropriately
-            if (["approve", "archive"].includes(action)) {
-                updateClauses.push(`reviewed_at = NOW()`);
-            } else if (action === "skip") {
-                updateClauses.push(`reviewed_at = NULL`);
-            }
-             // Add clipId and allowed states to params for WHERE clause
-             updateParams.push(clipId); paramIndex++; // Now $2 is clipId
-             updateParams.push(allowedSourceStates); paramIndex++; // Now $3 is allowed states
-
-             // Construct the final UPDATE query
-             const updateQuery = `
-                 UPDATE clips
-                 SET ${updateClauses.join(', ')}
-                 WHERE id = $2 -- Use correct parameter index
-                   AND ingest_state = ANY($3::text[]) -- Use correct parameter index
-                   AND next_state IS NULL
-                 RETURNING id;
-             `;
-
-            console.log(`Executing update for clip ${clipId}, action ${action}...`);
-            const updateResult = await client.query(updateQuery, updateParams);
-
-            // 8. Verify Update Success
-            if (updateResult.rowCount === 0) {
-                const checkResult = await client.query('SELECT ingest_state, next_state FROM clips WHERE id = $1', [clipId]);
-                const finalState = checkResult.rows.length > 0 ? checkResult.rows[0] : { ingest_state: 'NOT FOUND', next_state: 'N/A' };
-                console.warn(`Update failed for clip ${clipId}. Row count 0. Final state check:`, finalState);
-                throw new Error(`Clip state changed or action pending (State: ${finalState.ingest_state}, Next: ${finalState.next_state}). Please refresh.`); // -> 409
-            }
-
-            console.log(`Update successful for clip ${clipId}. Row count: ${updateResult.rowCount}`);
-
-            // 9. Commit Transaction
-            await client.query('COMMIT');
-            console.log(`Transaction committed for clip ${clipId}`);
-
-            // 10. Prepare and Validate Success Response
-            const responsePayload = {
-                status: "success",
-                clip_id: clipId,
-                next_state: intendedNextState
-            };
-            const validatedResponse = ActionSuccessResponseSchema.parse(responsePayload);
-
-            return json(validatedResponse);
-
-        } catch (error) {
-            // 11. Rollback on any error within the transaction block
-            console.error(`Error during transaction for clip ${clipId}, action ${action}:`, error);
-            await client.query('ROLLBACK');
-            console.log(`Transaction rolled back for clip ${clipId}`);
-            throw error; // Re-throw
-        }
-
-    } catch (error: any) {
-        // Outer error handling
-        console.error(`API Error in POST /api/clips/[id]/action (Clip ID: ${clipId}):`, error);
-
-        let statusCode = 500;
-        let message = "Internal server error performing action.";
-
-        if (error instanceof z.ZodError) {
-            statusCode = 500;
-            message = "Internal server error preparing response.";
-            console.error("Response validation failed:", error.flatten());
-        } else if (error.message?.includes("not found")) {
-            statusCode = 404;
-            message = error.message;
-        } else if (error.message?.includes("Action already pending") || error.message?.includes("cannot be performed from state") || error.message?.includes("state changed")) {
-            statusCode = 409; // Conflict
-            message = error.message;
-        }
-
-        return json({ detail: message }, { status: statusCode });
-
-    } finally {
-        if (client) {
-            client.release();
-            console.log(`DB client released for clip ${clipId}`);
-        }
+  try {
+    // 1) Validate clip ID
+    const idParam = event.params.id;
+    if (!idParam || isNaN(Number(idParam))) {
+      return json({ detail: "Invalid clip ID." }, { status: 400 });
     }
+    clipId = Number(idParam);
+
+    // 2) Validate payload
+    let payload: z.infer<typeof ClipActionPayloadSchema>;
+    try {
+      payload = ClipActionPayloadSchema.parse(await event.request.json());
+    } catch (e: any) {
+      if (e instanceof z.ZodError) {
+        return json({ detail: e.flatten().fieldErrors }, { status: 422 });
+      }
+      return json({ detail: "Bad request payload." }, { status: 400 });
+    }
+    const action = payload.action;
+    const intendedNextState = ACTION_TO_STATE[action];
+    if (!intendedNextState) {
+      return json({ detail: `Unsupported action: ${action}` }, { status: 400 });
+    }
+
+    // 3) Determine allowed source states for this action
+    const allowedSourceStates =
+      action === 'retry_sprite_gen'
+        ? ['sprite_generation_failed']
+        : ALLOWED_SOURCE_STATES_GENERAL;
+
+    // 4) Start transaction & lock current clip
+    client = await getDbClient();
+    await client.query('BEGIN');
+    const lockIdCurrent = 2;
+    const lockIdPrevious = 3;
+    await client.query('SELECT pg_advisory_xact_lock($1,$2)', [lockIdCurrent, clipId]);
+
+    // 5) Fetch current clip
+    const cur = await client.query(
+      `SELECT ingest_state, next_state, source_video_id, start_time_seconds
+       FROM clips WHERE id=$1 FOR UPDATE`,
+      [clipId]
+    );
+    if (cur.rowCount === 0) {
+      await client.query('ROLLBACK');
+      return json({ detail: "Clip not found." }, { status: 404 });
+    }
+    const {
+      ingest_state: currentState,
+      next_state: currentNextState,
+      source_video_id: srcVid,
+      start_time_seconds: startS,
+    } = cur.rows[0];
+
+    if (currentNextState !== null) {
+      await client.query('ROLLBACK');
+      return json({ detail: `Action already pending: '${currentNextState}'.` }, { status: 409 });
+    }
+    if (!allowedSourceStates.includes(currentState)) {
+      await client.query('ROLLBACK');
+      return json(
+        { detail: `Cannot perform '${action}' from state '${currentState}'.` },
+        { status: 409 }
+      );
+    }
+
+    // 6) Merge or Group logic
+    let prevId: number | null = null;
+    let prevNextState: string | null = null;
+    if (action === 'merge_previous' || action === 'group_previous') {
+      // 6a) Find and lock previous clip
+      const pr = await client.query(
+        `SELECT id, ingest_state FROM clips
+         WHERE source_video_id=$1 AND start_time_seconds<$2
+         ORDER BY start_time_seconds DESC, id DESC
+         LIMIT 1 FOR UPDATE`,
+        [srcVid, startS]
+      );
+      if (pr.rowCount === 0) {
+        await client.query('ROLLBACK');
+        return json({ detail: `No previous clip to ${action.split('_')[0]}.` }, { status: 400 });
+      }
+      prevId = pr.rows[0].id;
+      const prevState = pr.rows[0].ingest_state;
+      await client.query('SELECT pg_advisory_xact_lock($1,$2)', [lockIdPrevious, prevId]);
+      if (!VALID_PREVIOUS_ACTION_STATES.includes(prevState)) {
+        await client.query('ROLLBACK');
+        return json(
+          { detail: `Cannot ${action.split('_')[0]}: prev clip state '${prevState}' invalid.` },
+          { status: 409 }
+        );
+      }
+
+      if (action === 'merge_previous') {
+        // Prepare metadata
+        const curMeta = JSON.stringify({ merge_target_clip_id: prevId });
+        const prevMeta = JSON.stringify({ merge_source_clip_id: clipId });
+        const targetPrevState = 'pending_merge_target';
+
+        // Update current
+        const r1 = await client.query(
+          `UPDATE clips
+           SET next_state=$1, action_committed_at=NOW(), processing_metadata=$2::jsonb,
+               updated_at=NOW(), last_error=NULL, reviewed_at=NOW()
+           WHERE id=$3 AND ingest_state=ANY($4::text[])`,
+          [intendedNextState, curMeta, clipId, allowedSourceStates]
+        );
+        // Update previous
+        const r2 = await client.query(
+          `UPDATE clips
+           SET next_state=$1, action_committed_at=NOW(), processing_metadata=$2::jsonb,
+               updated_at=NOW(), last_error=NULL
+           WHERE id=$3 AND ingest_state=$4`,
+          [targetPrevState, prevMeta, prevId, prevState]
+        );
+
+        const rc1 = r1.rowCount!;
+        const rc2 = r2.rowCount!;
+        if (rc1 < 1 || rc2 < 1) {
+          // Diagnostic
+          const afterCur = await client.query(
+            `SELECT ingest_state, next_state FROM clips WHERE id=$1`, [clipId]
+          );
+          const afterPrev = await client.query(
+            `SELECT ingest_state, next_state FROM clips WHERE id=$1`, [prevId]
+          );
+          const cc = afterCur.rows[0];
+          const pp = afterPrev.rows[0];
+          await client.query('ROLLBACK');
+          return json(
+            { detail:
+              `merge_previous failed: rc1=${rc1}, rc2=${rc2}. ` +
+              `Cur=${cc.ingest_state}/${cc.next_state}, ` +
+              `Prev=${pp.ingest_state}/${pp.next_state}`
+            },
+            { status: 409 }
+          );
+        }
+        prevNextState = targetPrevState;
+
+      } else {
+        // group_previous
+        const targetGrpState = 'grouped_complete';
+        const r1 = await client.query(
+          `UPDATE clips
+           SET next_state=$1, action_committed_at=NOW(), grouped_with_clip_id=$2,
+               processing_metadata=NULL, updated_at=NOW(),
+               last_error=NULL, reviewed_at=NOW()
+           WHERE id=$3 AND ingest_state=ANY($4::text[])`,
+          [targetGrpState, prevId, clipId, allowedSourceStates]
+        );
+        const r2 = await client.query(
+          `UPDATE clips
+           SET next_state=$1, action_committed_at=NOW(), processing_metadata=NULL,
+               updated_at=NOW(), last_error=NULL, reviewed_at=NOW()
+           WHERE id=$2 AND ingest_state=$3`,
+          [targetGrpState, prevId, prevState]
+        );
+
+        const rc1 = r1.rowCount!;
+        const rc2 = r2.rowCount!;
+        if (rc1 < 1 || rc2 < 1) {
+          // Diagnostic
+          const afterCur = await client.query(
+            `SELECT ingest_state, next_state FROM clips WHERE id=$1`, [clipId]
+          );
+          const afterPrev = await client.query(
+            `SELECT ingest_state, next_state FROM clips WHERE id=$1`, [prevId]
+          );
+          const cc = afterCur.rows[0];
+          const pp = afterPrev.rows[0];
+          await client.query('ROLLBACK');
+          return json(
+            { detail:
+              `group_previous failed: rc1=${rc1}, rc2=${rc2}. ` +
+              `Cur=${cc.ingest_state}/${cc.next_state}, ` +
+              `Prev=${pp.ingest_state}/${pp.next_state}`
+            },
+            { status: 409 }
+          );
+        }
+        prevNextState = targetGrpState;
+      }
+
+    } else {
+      // 7) Simple actions
+      const clauses = [
+        'next_state=$1', 'action_committed_at=NOW()', 'updated_at=NOW()',
+        'last_error=NULL', 'processing_metadata=NULL', 'grouped_with_clip_id=NULL'
+      ];
+      if (['approve','archive','group_previous'].includes(action)) {
+        clauses.push('reviewed_at=NOW()');
+      } else {
+        clauses.push('reviewed_at=NULL');
+      }
+      const params = [intendedNextState, clipId, allowedSourceStates];
+      const uq = `
+        UPDATE clips SET ${clauses.join(', ')}
+        WHERE id=$2 AND ingest_state=ANY($3::text[])
+        RETURNING id`;
+      const ur = await client.query(uq, params);
+      if ((ur.rowCount ?? 0) < 1) {
+        await client.query('ROLLBACK');
+        return json(
+          { detail: `Action '${action}' could not be applied. Refresh and retry.` },
+          { status: 409 }
+        );
+      }
+    }
+
+    // 8) Commit & respond
+    await client.query('COMMIT');
+    const resp: any = { status: 'success', clip_id: clipId, next_state: intendedNextState };
+    if (prevId !== null) {
+      resp.previous_clip_id = prevId;
+      resp.previous_clip_next_state = prevNextState;
+    }
+    return json(resp);
+
+  } catch (e: any) {
+    console.error("Error processing clip action:", e);
+    if (client) await client.query('ROLLBACK');
+    const st = (e.statusCode as number) || 500;
+    return json({ detail: e.message || "Internal server error." }, { status: st });
+
+  } finally {
+    if (client) client.release();
+  }
 }

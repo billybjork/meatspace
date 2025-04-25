@@ -180,7 +180,10 @@ export default function IntakeReviewPage() {
                 </div>
 
                 {/* Action Buttons via ClipActions component */}
-                <ClipActions clipId={clip.db_id} />
+                <ClipActions
+                  clipId={clip.db_id}
+                  canActionPrevious={clip.can_action_previous}
+                />
 
                 {/* Split Controls Placeholder */}
                 <div

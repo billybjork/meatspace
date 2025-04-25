@@ -7,7 +7,10 @@ type ActionVariables = { id: number | string; action: string };
  * Renders Approve/Skip/Archive buttons for a clip.
  * Uses Solid Query's useMutation wrapped in a function (per Solid API).
  */
-export default function ClipActions(props: { clipId: number | string }) {
+export default function ClipActions(props: {
+  clipId: number;
+  canActionPrevious: boolean;
+}) {
   const queryClient = useQueryClient();
 
   const mutation = useMutation<unknown, Error, ActionVariables>(() => ({
@@ -57,6 +60,20 @@ export default function ClipActions(props: { clipId: number | string }) {
           title="D + Enter"
         >
           🗑️ Archive
+        </button>
+        <button
+          class="action-btn merge-previous-btn mr-2"
+          disabled={mutation.isPending || !props.canActionPrevious}
+          onClick={() => mutation.mutate({ id: props.clipId, action: 'merge_previous' })}
+        >
+          👈 Merge
+        </button>
+        <button
+          class="action-btn group-previous-btn"
+          disabled={mutation.isPending || !props.canActionPrevious}
+          onClick={() => mutation.mutate({ id: props.clipId, action: 'group_previous' })}
+        >
+          👈 Group
         </button>
       </Show>
       <Show when={mutation.isError} keyed>
