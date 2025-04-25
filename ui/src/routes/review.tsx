@@ -1,7 +1,8 @@
-import { Show } from 'solid-js';
+import { Show, createSignal } from 'solid-js';
 import { Title } from '@solidjs/meta';
 import { useQuery, useQueryClient } from '@tanstack/solid-query';
 import ClipActions from '~/components/ClipActions';
+import SpritePlayer from '~/components/SpritePlayer';
 
 // Import the TS type for the response and the clip itself
 import type { NextClipResponse, ApiErrorResponse } from '~/schemas/clip';
@@ -50,6 +51,8 @@ const fmtSeconds = (maybeNumber: unknown): string =>
 
 export default function IntakeReviewPage() {
   const queryClient = useQueryClient();
+  // Keep track of the frame for use the 'split' action
+  const [splitFrame, setSplitFrame] = createSignal<number>(0);
 
   // --- TanStack Query ---
   const query = useQuery<NextClipResponse, Error>(() => ({
@@ -157,22 +160,14 @@ export default function IntakeReviewPage() {
                   </div>
                 </div>
 
-                {/* Sprite Player Placeholder */}
-                <div
-                  class="sprite-viewer bg-gray-100 border border-dashed border-gray-400 p-4 my-4 text-center"
-                  id={`sprite-viewer-${clip.db_id}`}
-                  tabindex="0"
-                >
-                  <p class="text-gray-600">Sprite Player Area</p>
-                  <Show when={clip.sprite_url} fallback={<p class="text-xs mt-1 text-orange-600">(No sprite artifact found)</p>} keyed>
-                    <p class="text-xs mt-2 break-all">Sprite URL: {clip.sprite_url}</p>
-                    <Show when={clip.sprite_meta} keyed>
-                      <pre class="text-xs mt-1 text-left bg-gray-200 p-1 rounded overflow-x-auto max-h-24">
-                        {JSON.stringify(clip.sprite_meta, null, 2)}
-                      </pre>
-                    </Show>
-                  </Show>
-                </div>
+                {/* → New SpritePlayer component handles both viewer & controls */}
+                <SpritePlayer
+                  clipId={clip.db_id}
+                  spriteUrl={clip.sprite_url!}
+                  spriteMeta={JSON.stringify(clip.sprite_meta)}
+                  autoplay
+                  onSplitFrame={setSplitFrame}
+                />
 
                 {/* Playback Controls Placeholder */}
                 <div class="playback-controls bg-gray-100 border border-dashed border-gray-400 p-4 my-4 text-center" id={`controls-${clip.db_id}`}>
