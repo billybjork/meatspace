@@ -175,7 +175,7 @@ def review_page_content(clip_to_display, sprite_artifact_display, next_clip_spri
     """Renders the main content area, including clip display, undo toast, and preload."""
     preload_elements = ()
     if next_clip_sprite_url:
-        preload_elements = ( Img(src=next_clip_sprite_url, style="position:absolute; left:-9999px; top:-9999px; width:1px; height:1px; opacity:0;", alt="preload", loading="lazy"), )
+        preload_elements = ( Img(src=next_clip_sprite_url, style="position:absolute; left:-9999px; top:-9999px; width:1px; height:1px; opacity:0;", alt="preload"), )
 
     display_content = clip_display(clip_to_display, None) if clip_to_display else P("Loading next clip or none available...")
 
@@ -190,7 +190,7 @@ def review_page_content(clip_to_display, sprite_artifact_display, next_clip_spri
 def no_clips_ui(next_clip_sprite_url=None, undo_context=None):
     """Renders the 'no clips' message, including potential undo toast and preload."""
     preload_elements = ()
-    if next_clip_sprite_url: preload_elements = ( Img(src=next_clip_sprite_url, style="position:absolute; left:-9999px; top:-9999px; width:1px; height:1px; opacity:0;", alt="preload", loading="lazy"), )
+    if next_clip_sprite_url: preload_elements = ( Img(src=next_clip_sprite_url, style="position:absolute; left:-9999px; top:-9999px; width:1px; height:1px; opacity:0;", alt="preload"), )
     return Div( H2("All clips reviewed!"), P("Check back later for more."), undo_toast_component(undo_context), *preload_elements, id="review-container" )
 
 
@@ -294,7 +294,11 @@ def get(session: dict):
 
 @rt("/api/clip/{clip_id:int}/select")
 def post(clip_id: int, req: Request, session: dict):
-    """Handles clip actions (approve, skip, archive, undo). Operational version."""
+    """
+    Handles clip actions (approve, skip, archive, undo).
+    Logs event ONLY. Does NOT change clip state directly.
+    Fetches the next available 'pending_review' clip for the UI.
+    """
     action = req.query_params.get('action'); reviewer = "reviewer_placeholder"; final_html = ""
     if not action: print("Error: Action missing", file=sys.stderr); return ""
     # Minimal request log
@@ -304,29 +308,36 @@ def post(clip_id: int, req: Request, session: dict):
     next_clip_sprite_url_preload = None
     new_undo_context = None
     event_id = None
+    current_clip_ref_for_fetch = None # Store ref of acted-upon clip
 
     try:
-        # Use the imported context manager from db.py
         with get_db_conn_from_pool() as conn:
             with conn.cursor() as cur:
 
-                # --- Log Event FIRST using the *same* cursor/transaction ---
+                # 1. Log Event - This is the primary action of this handler now
                 if action == 'undo':
-                    event_id = insert_clip_event(clip_id, 'undo', reviewer, cur=cur)
+                    # For undo, we find the corresponding action event ID to potentially link or mark in event_data if needed
+                    # event_data_for_undo = {'undid_action': last_undo_context.get('action')} if session.get('undo_context') else None
+                    event_id = insert_clip_event(clip_id, 'undo', reviewer, cur=cur) # event_data=event_data_for_undo
                 else: # approve, skip, archive
                     event_id = insert_clip_event(clip_id, f"selected_{action}", reviewer, cur=cur)
-                # insert_clip_event now prints its own log
+                # insert_clip_event prints its own log
 
-                # --- Proceed based on action ---
-                # Allow undo even if logging failed (policy decision)
-                if event_id is not None or action == 'undo':
+                # 2. Fetch Reference for Next Clip Lookup (if action wasn't undo)
+                # Still need this to find the *next* pending clip relative to the current one.
+                if action != 'undo':
+                    cur.execute("SELECT updated_at, id FROM clips WHERE id = %s;", (clip_id,))
+                    current_clip_ref_for_fetch = cur.fetchone()
 
+                # 3. Fetch Clip Data for UI Response
+                # This logic determines what the UI should show *next*, based on the action logged.
+                # It does NOT rely on any state changes performed within this request.
+
+                if event_id is not None: # Event logged successfully
                     if action == 'undo':
-                        last_undo_context = session.pop('undo_context', None)
-                        clip_to_show = None
-
-                        # Fetch the clip that was acted upon (now needs review again)
-                        sql_get_undone_clip = """
+                        last_undo_context = session.pop('undo_context', None) # Clear the context state since undo was logged
+                        # Fetch the clip that was acted upon to display it again
+                        sql_fetch_reverted = """
                             WITH LatestSprite AS (
                                 SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
                                 FROM clip_artifacts WHERE artifact_type = 'sprite_sheet'
@@ -337,99 +348,22 @@ def post(clip_id: int, req: Request, session: dict):
                             LEFT JOIN LatestSprite ls ON c.id = ls.clip_id AND ls.rn = 1
                             WHERE c.id = %s;
                         """
-                        cur.execute(sql_get_undone_clip, (clip_id,))
-                        clip_to_show = cur.fetchone()
+                        cur.execute(sql_fetch_reverted, (clip_id,))
+                        next_clip = cur.fetchone() # Display the clip whose action was undone
 
-                        if clip_to_show:
-                             # Fetch the *next* clip's sprite for preload (relative to the one being shown)
+                        if next_clip: # Prepare preload for the clip *after* this one
                              sql_next_id = """SELECT c.id, c.updated_at FROM clips c WHERE c.ingest_state = 'pending_review'
                                               AND (c.updated_at > %s OR (c.updated_at = %s AND c.id > %s))
                                               ORDER BY c.updated_at ASC, c.id ASC LIMIT 1;"""
-                             cur.execute(sql_next_id, (clip_to_show['updated_at'], clip_to_show['updated_at'], clip_to_show['id']))
+                             cur.execute(sql_next_id, (next_clip['updated_at'], next_clip['updated_at'], next_clip['id']))
                              next_clip_ref = cur.fetchone()
-
                              if next_clip_ref:
                                  sql_next_art = "SELECT s3_key FROM clip_artifacts WHERE clip_id = %s AND artifact_type = 'sprite_sheet' ORDER BY created_at DESC LIMIT 1;"
                                  cur.execute(sql_next_art, (next_clip_ref['id'],))
                                  art = cur.fetchone()
                                  if art: next_clip_sprite_url_preload = get_sprite_display_url(art.get('s3_key'))
-
-                             next_clip = clip_to_show
-                             new_undo_context = None # Clear undo context after successful processing
-                        else:
-                             # Handle case where undone clip not found (fetch first pending)
-                             print(f"Warning: Could not find clip {clip_id} after undo action. Fetching first pending.")
-                             sql_fallback_clip = """
-                                WITH LatestSprite AS (
-                                    SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
-                                    FROM clip_artifacts WHERE artifact_type = 'sprite_sheet'
-                                )
-                                SELECT c.*, sv.fps AS source_fps, ls.s3_key as sprite_s3_key, ls.metadata as sprite_metadata
-                                FROM clips c JOIN source_videos sv ON c.source_video_id = sv.id
-                                LEFT JOIN LatestSprite ls ON c.id = ls.clip_id AND ls.rn = 1
-                                WHERE c.ingest_state = 'pending_review' ORDER BY c.updated_at ASC, c.id ASC LIMIT 1;
-                             """
-                             cur.execute(sql_fallback_clip)
-                             next_clip = cur.fetchone() # Show first pending clip if undo target vanished
-                             new_undo_context = None # Still clear undo context
-
-
-                    else: # Regular Actions (approve, skip, archive)
-                        new_undo_context = {'clip_id': clip_id, 'action': action} # Prep undo only if event logged okay
-
-                        # Fetch the *current* clip's reference for ordering
-                        cur.execute("SELECT updated_at, id FROM clips WHERE id = %s;", (clip_id,))
-                        current_clip_ref = cur.fetchone()
-
-                        if current_clip_ref:
-                            # Fetch the *next* pending clip relative to the one just acted upon
-                            sql_next_clip_join = """
-                                WITH LatestSprite AS (
-                                    SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
-                                    FROM clip_artifacts WHERE artifact_type = 'sprite_sheet'
-                                )
-                                SELECT c.*, sv.fps AS source_fps, ls.s3_key as sprite_s3_key, ls.metadata as sprite_metadata
-                                FROM clips c JOIN source_videos sv ON c.source_video_id = sv.id
-                                LEFT JOIN LatestSprite ls ON c.id = ls.clip_id AND ls.rn = 1
-                                WHERE c.ingest_state = 'pending_review'
-                                AND (c.updated_at > %s OR (c.updated_at = %s AND c.id > %s))
-                                ORDER BY c.updated_at ASC, c.id ASC LIMIT 1;
-                            """
-                            cur.execute(sql_next_clip_join, (current_clip_ref['updated_at'], current_clip_ref['updated_at'], current_clip_ref['id']))
-                            next_clip = cur.fetchone()
-
-                            if next_clip:
-                                # Fetch the clip *after* next's S3 key in one go
-                                sql_after_next_preload = """
-                                    WITH AfterNextClip AS (
-                                        SELECT c.id
-                                        FROM clips c
-                                        WHERE c.ingest_state = 'pending_review'
-                                          AND (c.updated_at > %(next_clip_ts)s OR (c.updated_at = %(next_clip_ts)s AND c.id > %(next_clip_id)s))
-                                        ORDER BY c.updated_at ASC, c.id ASC
-                                        LIMIT 1
-                                    ), AfterNextSprite AS (
-                                        SELECT a.s3_key
-                                        FROM clip_artifacts a JOIN AfterNextClip anc ON a.clip_id = anc.id
-                                        WHERE a.artifact_type = 'sprite_sheet'
-                                        ORDER BY a.created_at DESC
-                                        LIMIT 1
-                                    )
-                                    SELECT s3_key FROM AfterNextSprite;
-                                """
-                                params_after_next = {
-                                    'next_clip_ts': next_clip['updated_at'],
-                                    'next_clip_id': next_clip['id']
-                                }
-                                cur.execute(sql_after_next_preload, params_after_next)
-                                art = cur.fetchone()
-                                if art:
-                                     next_clip_sprite_url_preload = get_sprite_display_url(art.get('s3_key'))
-
-                            # else: No more clips after current one
-                        else:
-                             # Handle case where current clip ref not found (fetch first pending)
-                             print(f"Warning: Could not find reference clip {clip_id}. Fetching first pending.")
+                        else: # Fallback if reverted clip not found immediately
+                             print(f"Warning: Could not find clip {clip_id} immediately after undo event. Fetching first pending.")
                              sql_fallback_clip = """
                                 WITH LatestSprite AS (
                                     SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
@@ -442,12 +376,69 @@ def post(clip_id: int, req: Request, session: dict):
                              """
                              cur.execute(sql_fallback_clip)
                              next_clip = cur.fetchone()
+                        new_undo_context = None # No undo context shown after an undo action
 
+                    else: # Regular action logged successfully (approve, skip, archive)
+                        # Fetch the *next* 'pending_review' clip based on the clip just acted upon
+                        if current_clip_ref_for_fetch:
+                             sql_next_clip_join = """
+                                WITH LatestSprite AS (
+                                    SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
+                                    FROM clip_artifacts WHERE artifact_type = 'sprite_sheet'
+                                )
+                                SELECT c.*, sv.fps AS source_fps, ls.s3_key as sprite_s3_key, ls.metadata as sprite_metadata
+                                FROM clips c JOIN source_videos sv ON c.source_video_id = sv.id
+                                LEFT JOIN LatestSprite ls ON c.id = ls.clip_id AND ls.rn = 1
+                                WHERE c.ingest_state = 'pending_review'
+                                AND (c.updated_at > %s OR (c.updated_at = %s AND c.id > %s))
+                                ORDER BY c.updated_at ASC, c.id ASC LIMIT 1;
+                             """
+                             cur.execute(sql_next_clip_join, (current_clip_ref_for_fetch['updated_at'], current_clip_ref_for_fetch['updated_at'], current_clip_ref_for_fetch['id']))
+                             next_clip = cur.fetchone()
 
-                else: # Event logging failed (event_id is None) for a non-undo action
+                             if next_clip: # Prepare preload for the clip *after* this next one
+                                 sql_after_next_preload = """
+                                     WITH AfterNextClip AS (
+                                         SELECT c.id
+                                         FROM clips c
+                                         WHERE c.ingest_state = 'pending_review'
+                                           AND (c.updated_at > %(next_clip_ts)s OR (c.updated_at = %(next_clip_ts)s AND c.id > %(next_clip_id)s))
+                                         ORDER BY c.updated_at ASC, c.id ASC
+                                         LIMIT 1
+                                     ), AfterNextSprite AS (
+                                         SELECT a.s3_key
+                                         FROM clip_artifacts a JOIN AfterNextClip anc ON a.clip_id = anc.id
+                                         WHERE a.artifact_type = 'sprite_sheet'
+                                         ORDER BY a.created_at DESC
+                                         LIMIT 1
+                                     )
+                                     SELECT s3_key FROM AfterNextSprite;
+                                 """
+                                 params_after_next = {'next_clip_ts': next_clip['updated_at'], 'next_clip_id': next_clip['id']}
+                                 cur.execute(sql_after_next_preload, params_after_next)
+                                 art = cur.fetchone()
+                                 if art: next_clip_sprite_url_preload = get_sprite_display_url(art.get('s3_key'))
+                        else: # Fallback if ref not found
+                             print(f"Warning: Could not get reference for clip {clip_id}. Fetching first pending.")
+                             sql_fallback_clip = """
+                                WITH LatestSprite AS (
+                                    SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
+                                    FROM clip_artifacts WHERE artifact_type = 'sprite_sheet'
+                                )
+                                SELECT c.*, sv.fps AS source_fps, ls.s3_key as sprite_s3_key, ls.metadata as sprite_metadata
+                                FROM clips c JOIN source_videos sv ON c.source_video_id = sv.id
+                                LEFT JOIN LatestSprite ls ON c.id = ls.clip_id AND ls.rn = 1
+                                WHERE c.ingest_state = 'pending_review' ORDER BY c.updated_at ASC, c.id ASC LIMIT 1;
+                             """
+                             cur.execute(sql_fallback_clip)
+                             next_clip = cur.fetchone()
+                        # Set undo context for the UI response
+                        new_undo_context = {'clip_id': clip_id, 'action': action}
+
+                else: # Event logging failed
                     print(f"ERROR: Failed to log event for action '{action}' on clip {clip_id}. Re-displaying current clip.")
-                    new_undo_context = session.get('undo_context', None) # Keep existing undo context
-                    # Try to fetch the *current* clip again to redisplay it without change
+                    new_undo_context = session.get('undo_context', None) # Keep existing context
+                    # Re-fetch current clip
                     sql_get_current_clip = """
                          WITH LatestSprite AS (
                             SELECT clip_id, s3_key, metadata, ROW_NUMBER() OVER(PARTITION BY clip_id ORDER BY created_at DESC) as rn
@@ -463,17 +454,19 @@ def post(clip_id: int, req: Request, session: dict):
                          cur.execute(sql_get_current_clip, (clip_id,))
                          next_clip = cur.fetchone() # Set next_clip to the current one for re-display
                     except Exception as refetch_err:
-                          print(f"    DB Error during fallback re-fetch: {refetch_err}")
-                          next_clip = None # Cannot even refetch current
-
+                          print(f"DB Error during fallback re-fetch: {refetch_err}")
+                          next_clip = None
 
                 # End of cursor block (commit happens when 'with conn' exits)
 
-            # --- Update Session State (after commit/rollback) ---
-            if new_undo_context is not None:
-                 session['undo_context'] = new_undo_context
-            elif action == 'undo': # Explicitly clear for undo if successful
-                session.pop('undo_context', None)
+            # --- Update Session State (after DB transaction completes) ---
+            # Only change session if event logging was successful
+            if event_id is not None:
+                if new_undo_context is not None:
+                     session['undo_context'] = new_undo_context
+                elif action == 'undo': # If action was undo and event was logged, clear context
+                     session.pop('undo_context', None)
+            # If event logging failed, session remains unchanged
 
     except (Exception, psycopg2.DatabaseError) as e:
         # Error logged by context manager
@@ -485,9 +478,10 @@ def post(clip_id: int, req: Request, session: dict):
         # --- Render Response ---
         if not final_html: # Render only if no DB error occurred earlier
             if next_clip:
+                # Pass the fetched clip data, None for artifact, preload URL, and new undo context
                 final_html = review_page_content(next_clip, None, next_clip_sprite_url_preload, new_undo_context)
-            else:
-                final_html = no_clips_ui(undo_context=new_undo_context)
+            else: # No clip found to display (either end of queue or error during fetch)
+                final_html = no_clips_ui(undo_context=new_undo_context) # Show context if applicable
 
     if not final_html:
         print(f"ERROR: final_html was not set for action '{action}' on clip {clip_id}.")
