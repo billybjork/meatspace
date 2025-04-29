@@ -2,14 +2,17 @@ import argparse
 import os
 import sys
 from pathlib import Path
+import importlib.util
 
 import psycopg2
 from dotenv import load_dotenv
 
-# Resolve project root and load .env
-project_root = Path(__file__).resolve().parent.parent
-dotenv_path = project_root / '.env'
+# Determine repository and backend roots
+repo_root = Path(__file__).resolve().parent.parent
+backend_root = repo_root / 'backend'
 
+# Load .env from backend directory
+dotenv_path = backend_root / '.env'
 if dotenv_path.exists():
     load_dotenv(dotenv_path=dotenv_path)
     print(f"Loaded environment variables from: {dotenv_path}")
@@ -23,18 +26,20 @@ if not DATABASE_URL:
     print("ERROR: DATABASE_URL environment variable not found.")
     sys.exit(1)
 
-# Add project root to sys.path if needed
-if str(project_root) not in sys.path:
-    sys.path.insert(0, str(project_root))
+# Dynamically load the intake task module to avoid import path issues
+intake_file = backend_root / 'tasks' / 'intake.py'
+if not intake_file.exists():
+    print(f"ERROR: intake.py not found at {intake_file}")
+    sys.exit(1)
 
-# Try importing intake task
+spec = importlib.util.spec_from_file_location('backend.tasks.intake', str(intake_file))
+intake_mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(intake_mod)
+
 try:
-    from tasks.intake import intake_task
-except ImportError as e:
-    print(f"Error importing Prefect task 'intake_task': {e}")
-    print(f"Ensure you're running this script from the project root (e.g., python scripts/{Path(__file__).name})")
-    print(f"Project root added to sys.path: {project_root}")
-    print("Check that the 'tasks' directory and 'intake.py' exist.")
+    intake_task = intake_mod.intake_task
+except AttributeError:
+    print("ERROR: 'intake_task' not found in intake.py")
     sys.exit(1)
 
 
@@ -44,10 +49,9 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
     and returns the ID.
     Uses direct psycopg2 connection.
     """
-    conn = None # Use standard psycopg2 connection
+    conn = None
     new_id = None
     is_url = input_url_or_path.lower().startswith(('http://', 'https://'))
-    # Use provided title or derive a basic one from input path/URL stem
     title_to_insert = initial_title if initial_title else Path(input_url_or_path).stem[:250]
     web_scraped_flag = is_url
 
@@ -57,18 +61,18 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
 
     try:
         conn = psycopg2.connect(DATABASE_URL)
-
         with conn.cursor() as cur:
-            # Insert record, including original_url and web_scraped flag
             cur.execute(
                 """
                 INSERT INTO source_videos (title, ingest_state, original_url, web_scraped)
                 VALUES (%s, 'new', %s, %s)
                 RETURNING id;
                 """,
-                (title_to_insert,
-                 input_url_or_path if is_url else None, # Store URL only if it's a URL
-                 web_scraped_flag) # Set the flag
+                (
+                    title_to_insert,
+                    input_url_or_path if is_url else None,
+                    web_scraped_flag,
+                ),
             )
             result = cur.fetchone()
             if result:
@@ -97,11 +101,28 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Manually submit a video URL or local path for the Prefect intake workflow.")
-    parser.add_argument("input_source", help="The URL (http/https) or absolute local file path of the video to process.")
-    parser.add_argument("--title", help="Optional initial title for the database record (recommended for local files). If omitted, derived from filename/URL.", default=None)
-    parser.add_argument("--no-reencode", action="store_true", help="Tell the intake task *not* to re-encode the video (default is True for re-encoding).")
-    parser.add_argument("--overwrite", action="store_true", help="Tell the intake task to overwrite existing files/data if necessary (use with caution).")
+    parser = argparse.ArgumentParser(
+        description="Manually submit a video URL or local path for the Prefect intake workflow."
+    )
+    parser.add_argument(
+        "input_source",
+        help="The URL (http/https) or absolute local file path of the video to process.",
+    )
+    parser.add_argument(
+        "--title",
+        help="Optional initial title for the database record (recommended for local files).",
+        default=None,
+    )
+    parser.add_argument(
+        "--no-reencode",
+        action="store_true",
+        help="Tell the intake task *not* to re-encode the video (default is True for re-encoding).",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Tell the intake task to overwrite existing files/data if necessary (use with caution).",
+    )
 
     args = parser.parse_args()
 
@@ -110,48 +131,49 @@ def main():
     input_path_obj = Path(args.input_source)
 
     if not is_url:
-        # Check if local path exists if it's not a URL
         if not input_path_obj.exists():
-             print(f"ERROR: Local file path provided does not exist: {args.input_source}")
-             sys.exit(1)
-        # Resolve to absolute path for clarity and consistency
+            print(f"ERROR: Local file path provided does not exist: {args.input_source}")
+            sys.exit(1)
         args.input_source = str(input_path_obj.resolve())
         print(f"Processing local file: {args.input_source}")
         if not args.title:
-             print("WARNING: Processing a local file without providing an explicit --title. Title will be derived from filename.")
+            print(
+                "WARNING: Processing a local file without providing an explicit --title. Title will be derived from filename."
+            )
     else:
-         print(f"Processing URL: {args.input_source}")
+        print(f"Processing URL: {args.input_source}")
 
-    # 1. Create the DB record (Uses direct psycopg2 connection)
+    # 1. Create the DB record
     source_id = create_new_source_video_record(args.input_source, args.title)
-
     if not source_id:
         print("Failed to create database record. Aborting task submission.")
         sys.exit(1)
 
-    # 2. Submit the Prefect task run using .delay()
+    # 2. Submit the Prefect task
     print(f"\nSubmitting intake_task for source_video_id: {source_id}...")
     print(f"  Input: {args.input_source}")
-    print(f"  Re-encode: {not args.no_reencode}") # --no-reencode flag means re_encode_for_qt=False
+    print(f"  Re-encode: {not args.no_reencode}")
     print(f"  Overwrite: {args.overwrite}")
 
     try:
-        # Use .delay() for submitting from outside a flow
-        # Pass arguments matching the intake_task function signature
         intake_task.delay(
-             source_video_id=source_id,
-             input_source=args.input_source,
-             re_encode_for_qt=(not args.no_reencode), # Pass the calculated boolean
-             overwrite_existing=args.overwrite
+            source_video_id=source_id,
+            input_source=args.input_source,
+            re_encode_for_qt=(not args.no_reencode),
+            overwrite_existing=args.overwrite,
         )
-        print(f"\nTask submission request sent successfully using .delay() for source_id={source_id}!")
+        print(
+            f"\nTask submission request sent successfully using .delay() for source_id={source_id}!"
+        )
         print("Monitor your Prefect worker logs or the Prefect UI for task execution.")
     except Exception as e:
         print(f"\nERROR submitting task to Prefect using .delay(): {e}")
-        # This usually indicates a problem connecting to the Prefect API
         print("Check that your Prefect server is running and accessible.")
-        print(f"Verify PREFECT_API_URL environment variable if set (should point to server API, e.g., http://127.0.0.1:4200/api)")
+        print(
+            "Verify PREFECT_API_URL environment variable if set (should point to server API, e.g., http://127.0.0.1:4200/api)"
+        )
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

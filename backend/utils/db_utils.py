@@ -185,10 +185,9 @@ def _update_state_sync(
             ]
             params = [new_state, error_message]
             # Clear action_committed_at when moving *out* of a committed state
-            # or into a final state like 'skipped', 'archived'.
-            # Keep it when moving into a '..._pending_deletion' state for the cleanup flow.
-            if new_state not in ['approved_pending_deletion', 'archived_pending_deletion']:
-                 sets.append(sql.SQL("action_committed_at = NULL"))
+            # Only clear action_committed_at on the clips table
+            if table_name == 'clips' and new_state not in ['approved_pending_deletion', 'archived_pending_deletion']:
+                sets.append(sql.SQL("action_committed_at = NULL"))
 
             if new_state == processing_state: sets.append(sql.SQL("retry_count = 0"))
 
