@@ -1,36 +1,57 @@
-class SpritePlayerController {
-    constructor(el) {
-      this.el = el;
-      const clipId = el.dataset.clipId;
-      const meta = JSON.parse(el.dataset.player || "{}");
+export const SpritePlayerController = {
+    mounted() {
+      const clipId = this.el.dataset.clipId;
+      const playerData = this.el.dataset.player;
   
-      if (!meta || !meta.isValid || !clipId) {
-        console.error("[SpritePlayer] Invalid or missing metadata.");
+      if (!playerData) {
+        console.warn("[SpritePlayer] data-player attribute missing on element", this.el);
         return;
       }
   
-      this.player = new SpritePlayer(clipId, el, null, null, null, meta, null);
-    }
+      let meta;
+      try {
+        meta = JSON.parse(playerData);
+      } catch (err) {
+        console.error("[SpritePlayer] Failed to parse JSON in data-player", playerData, err);
+        return;
+      }
   
-    destroy() {
+      if (!meta.isValid) {
+        console.error("[SpritePlayer] Invalid meta", meta);
+        return;
+      }
+  
+      const container = this.el.parentElement;
+      const scrub = container.querySelector(`#scrub-${clipId}`);
+      const playPause = container.querySelector(`#playpause-${clipId}`);
+      const frameLabel = container.querySelector(`#frame-display-${clipId}`);
+  
+      if (!scrub || !playPause || !frameLabel) {
+        console.warn("[SpritePlayer] Controls missing for clip", clipId);
+        return;
+      }
+  
+      this.player = new SpritePlayer(
+        clipId, this.el, scrub, playPause, frameLabel, meta, null
+      );
+  
+      // auto-play on mount
+      this.player.play("mounted");
+    },
+  
+    updated() {
+      if (this.player) {
+        this.player.cleanup();
+      }
+      this.mounted(); // re-mount on patch
+    },
+  
+    destroyed() {
       if (this.player) {
         this.player.cleanup();
       }
     }
-  }
-  
-  export const SpritePlayer = {
-    mounted() {
-      this.controller = new SpritePlayerController(this.el);
-    },
-    updated() {
-      this.controller?.destroy();
-      this.controller = new SpritePlayerController(this.el);
-    },
-    destroyed() {
-      this.controller?.destroy();
-    }
-  };
+  };   
 
 class SpritePlayer {
     constructor(clipId, viewerElement, scrubElement, playPauseBtn, frameDisplayElement, meta, updateSplitUICallback) { // Added callback parameter
