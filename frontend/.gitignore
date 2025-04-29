@@ -27,3 +27,18 @@ frontend-*.tar
 
 # sensitive environment variables
 .env
+.envrc
+.env.*
+
+# Node & asset build artifacts
+/assets/node_modules/
+assets/node_modules/
+*.js.map
+*.css.map
+
+# Editor/OS junk
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/
