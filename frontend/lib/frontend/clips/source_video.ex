@@ -13,6 +13,6 @@ defmodule Frontend.Clips.SourceVideo do
     field :last_error,       :string
     field :retry_count,      :integer, default: 0
     field :original_url,     :string
-    timestamps()
+    timestamps(inserted_at: :created_at, updated_at: :updated_at)
   end
 end

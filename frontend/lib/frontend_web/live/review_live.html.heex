@@ -1,0 +1,8 @@
+<%= if @page_state == :empty do %>
+  <h2>All clips reviewed!</h2>
+  <.undo_toast undo_ctx={@undo_ctx} />
+<% else %>
+  <.sprite_player clip={@clip} />
+  <.review_buttons clip={@clip} />
+  <.undo_toast undo_ctx={@undo_ctx} />
+<% end %>

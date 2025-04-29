@@ -21,6 +21,6 @@ defmodule Frontend.Clips.Clip do
     belongs_to :source_video, Frontend.Clips.SourceVideo
     has_many   :clip_artifacts, Frontend.Clips.ClipArtifact
     has_many   :clip_events,    Frontend.Clips.ClipEvent
-    timestamps()
+    timestamps(inserted_at: :created_at, updated_at: :updated_at)
   end
 end

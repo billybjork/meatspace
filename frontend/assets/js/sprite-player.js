@@ -1,3 +1,37 @@
+class SpritePlayerController {
+    constructor(el) {
+      this.el = el;
+      const clipId = el.dataset.clipId;
+      const meta = JSON.parse(el.dataset.player || "{}");
+  
+      if (!meta || !meta.isValid || !clipId) {
+        console.error("[SpritePlayer] Invalid or missing metadata.");
+        return;
+      }
+  
+      this.player = new SpritePlayer(clipId, el, null, null, null, meta, null);
+    }
+  
+    destroy() {
+      if (this.player) {
+        this.player.cleanup();
+      }
+    }
+  }
+  
+  export const SpritePlayer = {
+    mounted() {
+      this.controller = new SpritePlayerController(this.el);
+    },
+    updated() {
+      this.controller?.destroy();
+      this.controller = new SpritePlayerController(this.el);
+    },
+    destroyed() {
+      this.controller?.destroy();
+    }
+  };
+
 class SpritePlayer {
     constructor(clipId, viewerElement, scrubElement, playPauseBtn, frameDisplayElement, meta, updateSplitUICallback) { // Added callback parameter
         this.clipId = clipId;

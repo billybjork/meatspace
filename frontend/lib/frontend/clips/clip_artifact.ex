@@ -9,6 +9,6 @@ defmodule Frontend.Clips.ClipArtifact do
     field :metadata,      :map
 
     belongs_to :clip, Frontend.Clips.Clip
-    timestamps()
+    timestamps(inserted_at: :created_at, updated_at: :updated_at)
   end
 end

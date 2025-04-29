@@ -7,6 +7,14 @@ defmodule Frontend.Clips.ClipEvent do
     field :event_data,  :map
 
     belongs_to :clip, Frontend.Clips.Clip
-    timestamps(inserted_at: :created_at)  # matches your SQL default
+
+    timestamps(inserted_at: :created_at, updated_at: :updated_at)
+  end
+
+  @doc false
+  def changeset(event, attrs) do
+    event
+    |> cast(attrs, [:clip_id, :action, :reviewer_id, :event_data])
+    |> validate_required([:clip_id, :action])
   end
 end
