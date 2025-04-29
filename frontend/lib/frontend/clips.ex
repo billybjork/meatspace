@@ -53,7 +53,7 @@ defmodule Frontend.Clips do
   def next_pending_review_clip do
     Clip
     |> where([c], c.ingest_state == "pending_review" and is_nil(c.reviewed_at))
-    |> order_by([c], [asc: c.updated_at, asc: c.id])
+    |> order_by([c], asc: c.id)
     |> preload([:source_video, :clip_artifacts])
     |> limit(1)
     |> Repo.one()
@@ -84,7 +84,7 @@ defmodule Frontend.Clips do
         FROM   clips
         WHERE  ingest_state = 'pending_review'
           AND  reviewed_at IS NULL
-        ORDER  BY updated_at, id
+        ORDER  BY id
         LIMIT  1;
         """,
         [action, clip_id, reviewer_id]
