@@ -51,7 +51,7 @@ defmodule FrontendWeb.ReviewComponents do
     ~H"""
     <%= if @undo_ctx do %>
       <div class="undo-toast fixed bottom-4 right-4 bg-yellow-300 p-4 rounded">
-        <p>Action undone.</p>
+        <p>Action recorded.  Click to undo.</p>
         <button phx-click="undo" phx-value-id={@undo_ctx.clip_id}>↩️ Undo</button>
       </div>
     <% end %>

@@ -22,7 +22,7 @@ defmodule Frontend.Clips do
   """
   def next_pending_review_clip do
     Clip
-    |> where([c], c.ingest_state == "pending_review")
+    |> where([c], c.ingest_state == "pending_review" and is_nil(c.reviewed_at))
     |> order_by([c], [asc: c.updated_at, asc: c.id])
     |> preload([:source_video, :clip_artifacts])
     |> limit(1)
@@ -32,13 +32,25 @@ defmodule Frontend.Clips do
   @doc """
   Logs an action taken on a clip, and returns the next clip.
   """
-  def select_clip_and_fetch_next(%Clip{id: clip_id} = _clip, action) do
+  def select_clip_and_fetch_next(%Clip{} = clip, action) do
     Repo.transaction(fn ->
-      reviewer = "admin" # or get from session later
-      log_clip_action!(clip_id, action, reviewer)
+      reviewer = "admin" # TODO: pull from session
+      log_clip_action!(clip.id, action, reviewer)
+
+      # If the user is *undo*-ing, clear the flag again,
+      # otherwise mark the clip as reviewed right now.
+      change =
+        case action do
+          "undo" -> %{reviewed_at: nil}
+          _other -> %{reviewed_at: DateTime.utc_now()}
+        end
+
+      clip
+      |> Ecto.Changeset.change(change)
+      |> Repo.update!()
 
       next = next_pending_review_clip()
-      undo = %{clip_id: clip_id, action: action}
+      undo = %{clip_id: clip.id, action: action}
       {next, undo}
     end)
   end
