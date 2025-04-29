@@ -2,7 +2,14 @@
   <h2>All clips reviewed!</h2>
   <.undo_toast undo_ctx={@undo_ctx} />
 <% else %>
-  <.sprite_player clip={@clip} />
-  <.review_buttons clip={@clip} />
+  <!-- Pre-load the sprite sheet of the *next* clip, if any -->
+  <%= if @future != [] do %>
+    <link rel="preload"
+          as="image"
+          href={@future |> List.first() |> FrontendWeb.ReviewComponents.sprite_url()} />
+  <% end %>
+
+  <.sprite_player clip={@current} />
+  <.review_buttons clip={@current} />
   <.undo_toast undo_ctx={@undo_ctx} />
 <% end %>

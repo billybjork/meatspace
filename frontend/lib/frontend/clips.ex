@@ -2,26 +2,24 @@ defmodule Frontend.Clips do
   @moduledoc """
   The **Clips** context — fetch, review and annotate clips.
 
-  ### Performance note (2025-04-29)
-  `select_clip_and_fetch_next/2` now completes the three critical steps
+  * `next_pending_review_clips/2` — bulk, duplicate-free fetch that the
+    LiveView uses to keep its in-memory queue full.
+  * `select_clip_and_fetch_next/2` — writes the `clip_events` row, flips
+    the `reviewed_at` flag **and** returns the id of the next clip,
+    guarded by `FOR UPDATE SKIP LOCKED` so no two reviewers collide.
 
-  1. Insert a `clip_events` row
-  2. Mark (or un-mark) the current clip as reviewed
-  3. Return the *next* pending-review clip id
-
-  in **one SQL round-trip** using a `WITH` CTE.  This removes two network
-  RTTs when the database is remote (e.g. Railway) and noticeably cuts
-  click-to-next-clip latency.
+  All three steps happen in **one** SQL round-trip.
   """
 
   import Ecto.Query, warn: false
   alias Frontend.Repo
   alias Frontend.Clips.{Clip, ClipEvent}
 
-  # --------------------------------------------------------------------
-  # 🛠  Helper – single query that preloads associations
-  # --------------------------------------------------------------------
-  @spec load_clip_with_assocs(integer()) :: Clip.t()
+  # ------------------------------------------------------------------
+  # helpers
+  # ------------------------------------------------------------------
+
+  @spec load_clip_with_assocs(integer) :: Clip.t()
   defp load_clip_with_assocs(id) do
     from(c in Clip,
       where: c.id == ^id,
@@ -32,42 +30,46 @@ defmodule Frontend.Clips do
     |> Repo.one!()
   end
 
-  # --------------------------------------------------------------------
-  # Public API
-  # --------------------------------------------------------------------
+  # ------------------------------------------------------------------
+  # public API
+  # ------------------------------------------------------------------
 
   @doc """
-  Fetch a single clip **by id**, eagerly pre-loading the associations we
-  always need in the review UI.
-  """
-  def get_clip!(id) do
-    Clip
-    |> Repo.get!(id)
-    |> Repo.preload([:source_video, :clip_artifacts])
-  end
+  Fetch **`limit`** clips still awaiting review, omitting any ids in
+  **`exclude_ids`** (used to avoid duplicates already held in memory).
 
-  @doc """
-  Return *the* next clip that still needs review, or `nil` if the queue
-  is empty.
+  The list is ordered solely by **`id`** to remain stable even if
+  background jobs touch `updated_at`.
   """
-  def next_pending_review_clip do
+  def next_pending_review_clips(limit, exclude_ids \\ []) when is_integer(limit) do
     Clip
     |> where([c], c.ingest_state == "pending_review" and is_nil(c.reviewed_at))
+    |> where([c], c.id not in ^exclude_ids)
     |> order_by([c], asc: c.id)
+    |> limit(^limit)
     |> preload([:source_video, :clip_artifacts])
-    |> limit(1)
-    |> Repo.one()
+    |> Repo.all()
   end
 
   @doc """
-  Log an **`action`** taken on `clip`, mutate its `reviewed_at` flag as
-  appropriate, and stream back the next clip to review **in one shot**.
+  Legacy single-row wrapper so any old call-sites keep compiling.
+  """
+  def next_pending_review_clip do
+    next_pending_review_clips(1) |> List.first()
+  end
 
-  Returns `{:ok, {next_clip_or_nil, undo_ctx}}`, where `undo_ctx` is used
-  by the LiveView to render the "undo" toast.
+  @doc """
+  Log **`action`** for **`clip`** and return the next clip to review.
+
+  * Inserts a row into **`clip_events`**
+  * Sets / clears `reviewed_at`
+  * Streams back the *next* clip id **with a row-level lock**
+
+  Returns `{:ok, {next_clip_or_nil, ctx}}`.
+  The LiveView ignores the result but you might want it elsewhere.
   """
   def select_clip_and_fetch_next(%Clip{id: clip_id}, action) do
-    reviewer_id = "admin"  # TODO: pull from session / auth layer
+    reviewer_id = "admin"   # TODO: pull from session / auth layer
 
     {:ok, %{rows: rows}} =
       Repo.query(
@@ -77,7 +79,10 @@ defmodule Frontend.Clips do
           VALUES ($1, $2, $3)
         ), upd AS (
           UPDATE clips
-          SET reviewed_at = CASE WHEN $1 = 'undo' THEN NULL ELSE now() END
+          SET reviewed_at = CASE WHEN $1 = 'undo'
+                                 THEN NULL
+                                 ELSE now()
+                             END
           WHERE id = $2
         )
         SELECT id
@@ -85,24 +90,23 @@ defmodule Frontend.Clips do
         WHERE  ingest_state = 'pending_review'
           AND  reviewed_at IS NULL
         ORDER  BY id
-        LIMIT  1;
+        LIMIT  1
+        FOR UPDATE SKIP LOCKED;        -- <-- prevents duplicates
         """,
         [action, clip_id, reviewer_id]
       )
 
     next_clip =
       case rows do
-        [[next_id]] -> load_clip_with_assocs(next_id)
-        _ -> nil
+        [[id]] -> load_clip_with_assocs(id)
+        _      -> nil
       end
 
-    undo_ctx = %{clip_id: clip_id, action: action}
-    {:ok, {next_clip, undo_ctx}}
+    {:ok, {next_clip, %{clip_id: clip_id, action: action}}}
   end
 
   @doc """
-  Convenience helper to create a `ClipEvent` in places *outside* the
-  batched path above.
+  Convenience helper for one-off writes outside the batched path above.
   """
   def log_clip_action!(clip_id, action, reviewer_id) do
     %ClipEvent{}
