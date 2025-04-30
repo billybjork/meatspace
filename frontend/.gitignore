@@ -30,6 +30,13 @@ frontend-*.tar
 .envrc
 .env.*
 
+# Ignore generated assets
+priv/static/
+
+# Ignore compiled gettext files
+priv/gettext/*.pot
+priv/gettext/**/*.po~
+
 # Node & asset build artifacts
 /assets/node_modules/
 assets/node_modules/
