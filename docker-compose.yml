@@ -63,9 +63,6 @@ services:
         echo '⏳ Waiting for Prefect server…';
         until curl -fs http://prefect-server:4200/api/health; do sleep 2; done;
         echo '✅ Prefect is up — starting your API + worker';
-        # start your FastAPI (or whatever) AND a Prefect worker in parallel
-        # adjust the first part to your actual API startup command:
-        uvicorn meatspace_api.main:app --host 0.0.0.0 & 
         exec prefect worker start --pool default-agent-pool
       "
 

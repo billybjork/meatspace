@@ -9,46 +9,34 @@ build: null
 deployments:
   - name: scheduled-ingest-dispatcher
     description: Periodically checks DB for new ingest work and triggers tasks/flows.
-    entrypoint: flows/ingest_flows.py:scheduled_ingest_initiator # Path to file:flow_function
+    entrypoint: flows/ingest_flows.py:scheduled_ingest_initiator # Relative to /app inside container
     work_pool:
-      name: default-agent-pool # Target work pool for your agent
-      work_queue_name: default # Target work queue (optional, defaults often work)
+      name: default-agent-pool
+      work_queue_name: default
     schedule:
-      # Run every minute
       interval: 60
-      # Example Cron: Run every 5 minutes
-      # cron: "*/5 * * * *"
-      timezone: "UTC" # Optional, but recommended
+      timezone: "UTC"
     tags: ["ingest", "scheduled", "dispatcher"]
-    parameters: {} # Flow parameters (if any)
+    parameters: {}
 
   - name: scheduled-clip-cleanup
     description: Periodically cleans up sprites for approved/archived clips after a delay.
-    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Path to the ASYNC flow function
+    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Relative to /app
     work_pool:
-      name: default-agent-pool # Target the same pool (or a different one if needed)
+      name: default-agent-pool
       work_queue_name: default
-      # job_variables: # Optional overrides
-        # image: "your-dockerhub-username/meatspace-ingest:latest"
     schedule:
-      # Example Cron: Run every 15 minutes (adjust as needed)
       cron: "*/15 * * * *"
-      # Example Interval: Run every 900 seconds (15 minutes)
-      # interval: 900
-      timezone: "UTC" # Recommended
+      timezone: "UTC"
     tags: ["cleanup", "scheduled", "maintenance"]
-    parameters: {} # Add parameters here if you make `cleanup_delay_minutes` a flow parameter
-    # is_async: True # Prefect detects async flows automatically
+    parameters: {}
 
-  - name: process-clip-post-review-default # Deployment name (can be different from flow name)
-    flow_name: process-clip-post-review # Explicitly link to the flow function name
+  - name: process-clip-post-review-default
+    flow_name: process-clip-post-review
     description: Processes a single clip after review (keyframing, embedding). Triggered by ingest dispatcher.
-    entrypoint: flows/ingest_flows.py:process_clip_post_review # Path to file:flow_function
+    entrypoint: flows/ingest_flows.py:process_clip_post_review # Relative to /app
     work_pool:
-      name: default-agent-pool # Use the same pool or a dedicated one
+      name: default-agent-pool
       work_queue_name: default
-      # job_variables: # Optional overrides
-        # image: "your-dockerhub-username/meatspace-ingest:latest"
-    parameters: {} # Parameters are expected to be passed dynamically via run_deployment
+    parameters: {}
     tags: ["ingest", "processing", "post-review", "triggered"]
-    # No schedule needed - it's triggered on demand by scheduled-ingest-dispatcher
