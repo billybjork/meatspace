@@ -15,6 +15,13 @@ defmodule Frontend.Clips do
   alias Frontend.Repo
   alias Frontend.Clips.{Clip, ClipEvent}
 
+  @action_map %{
+    "approve"  => "selected_approve",
+    "skip"     => "selected_skip",
+    "archive"  => "selected_archive",
+    "undo"     => "selected_undo"
+  }
+
   # ------------------------------------------------------------------
   # helpers
   # ------------------------------------------------------------------
@@ -68,22 +75,22 @@ defmodule Frontend.Clips do
   Returns `{:ok, {next_clip_or_nil, ctx}}`.
   The LiveView ignores the result but you might want it elsewhere.
   """
-  def select_clip_and_fetch_next(%Clip{id: clip_id}, action) do
-    reviewer_id = "admin"   # TODO: pull from session / auth layer
+  def select_clip_and_fetch_next(%Clip{id: clip_id}, ui_action) do
+    reviewer_id = "admin"        # TODO: pull from session / auth
+    db_action   = Map.get(@action_map, ui_action, ui_action)
 
     {:ok, %{rows: rows}} =
-      Repo.query(
-        """
+      Repo.query("""
         WITH ins AS (
           INSERT INTO clip_events (action, clip_id, reviewer_id)
           VALUES ($1, $2, $3)
         ), upd AS (
           UPDATE clips
-          SET reviewed_at = CASE WHEN $1 = 'undo'
-                                 THEN NULL
-                                 ELSE now()
-                             END
-          WHERE id = $2
+          SET    reviewed_at = CASE WHEN $1 = 'selected_undo'
+                                    THEN NULL
+                                    ELSE NOW()
+                               END
+          WHERE  id = $2
         )
         SELECT id
         FROM   clips
@@ -91,10 +98,8 @@ defmodule Frontend.Clips do
           AND  reviewed_at IS NULL
         ORDER  BY id
         LIMIT  1
-        FOR UPDATE SKIP LOCKED;        -- <-- prevents duplicates
-        """,
-        [action, clip_id, reviewer_id]
-      )
+        FOR UPDATE SKIP LOCKED;
+      """, [db_action, clip_id, reviewer_id])
 
     next_clip =
       case rows do
@@ -102,7 +107,7 @@ defmodule Frontend.Clips do
         _      -> nil
       end
 
-    {:ok, {next_clip, %{clip_id: clip_id, action: action}}}
+    {:ok, {next_clip, %{clip_id: clip_id, action: db_action}}}
   end
 
   @doc """
@@ -117,4 +122,50 @@ defmodule Frontend.Clips do
     })
     |> Repo.insert!()
   end
+
+  def request_merge_and_fetch_next(%Clip{id: prev_id},
+                                  %Clip{id: curr_id}) do
+      reviewer_id = "admin"
+      now         = DateTime.utc_now()
+
+      Repo.transaction(fn ->
+        # ①  log both sides of the merge request -------------------------------
+        Repo.insert_all(ClipEvent, [
+          %{clip_id: prev_id, action: "selected_merge_target",
+            reviewer_id: reviewer_id, inserted_at: now, updated_at: now},
+          %{clip_id: curr_id, action: "selected_merge_source",
+            reviewer_id: reviewer_id, inserted_at: now, updated_at: now}
+        ])
+
+        # ②  just mark them as *reviewed* and record the metadata --------------
+        Repo.update_all(
+          from(c in Clip, where: c.id == ^prev_id),
+          set: [reviewed_at: now,
+                processing_metadata: %{"merge_source_clip_id" => curr_id}]
+        )
+
+        Repo.update_all(
+          from(c in Clip, where: c.id == ^curr_id),
+          set: [reviewed_at: now,
+                processing_metadata: %{"merge_target_clip_id" => prev_id}]
+        )
+
+        # ③  grab the next clip, same as the other path ------------------------
+        next_id =
+          Repo.one("""
+            SELECT id
+            FROM   clips
+            WHERE  ingest_state = 'pending_review'
+              AND  reviewed_at IS NULL
+            ORDER  BY id
+            LIMIT  1
+            FOR UPDATE SKIP LOCKED
+        """)
+
+      next_clip = if next_id, do: load_clip_with_assocs(next_id)
+      {next_clip,
+      %{clip_id_source: curr_id, clip_id_target: prev_id, action: "merge"}}
+    end)
+  end
+
 end

@@ -1,5 +1,9 @@
 import Config
 
+if config_env() in [:dev, :test] and Code.ensure_loaded?(Dotenvy) and File.exists?(".env") do
+  Dotenvy.source!(".env") |> Enum.each(fn {k, v} -> System.put_env(k, v) end)
+end
+
 # config/runtime.exs is executed for all environments, including
 # during releases. It is executed after compilation and before the
 # system starts, so it is typically used to load production configuration

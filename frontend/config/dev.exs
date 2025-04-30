@@ -74,3 +74,14 @@ config :phoenix, :plug_init_mode, :runtime
 
 # Include HEEx debug annotations as HTML comments in rendered markup
 config :phoenix_live_view, :debug_heex_annotations, true
+
+# Load .env
+if Code.ensure_loaded?(Dotenvy) and File.exists?(".env") do
+  Dotenvy.load()
+end
+
+config :frontend, Frontend.Repo,
+  url: System.get_env("DATABASE_URL") || "ecto://postgres:postgres@localhost/frontend_dev",
+  pool_size: 10,
+  show_sensitive_data_on_connection_error: true,
+  stacktrace: true

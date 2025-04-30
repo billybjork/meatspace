@@ -54,6 +54,19 @@ defmodule FrontendWeb.ReviewLive do
   # ---------- main click ---------------------------------------------------
 
   @impl true
+  def handle_event("select", %{"action" => "merge"},
+                  %{assigns: %{current: curr, history: [prev | _]}} = s) do
+    s =
+      s
+      |> push_history(curr)
+      |> advance_queue()
+      |> assign(:undo_ctx, %{clip_id: curr.id, action: "merge", extra: %{target_id: prev.id}})
+      |> refill_future()
+
+    {:noreply, persist_async(s, {:merge, prev, curr})}
+  end
+
+  @impl true
   def handle_event("select", %{"action" => act}, %{assigns: %{current: c}} = s) do
     s =
       s
@@ -109,6 +122,12 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   # -- background persistence ----------------------------------------------
+
+  defp persist_async(socket, {:merge, prev, curr}) do
+    Phoenix.LiveView.start_async(socket, {:persist, {prev.id, curr.id}}, fn ->
+      Clips.request_merge_and_fetch_next(prev, curr)
+    end)
+  end
 
   defp persist_async(socket, clip_id, action) do
     Phoenix.LiveView.start_async(socket, {:persist, clip_id}, fn ->

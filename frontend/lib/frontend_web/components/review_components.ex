@@ -65,6 +65,12 @@ defmodule FrontendWeb.ReviewComponents do
       <button phx-click="select" phx-value-action="approve">✅ Approve</button>
       <button phx-click="select" phx-value-action="skip">➡️ Skip</button>
       <button phx-click="select" phx-value-action="archive">🗑️ Archive</button>
+      <button phx-click="select"
+              phx-value-action="merge"
+              disabled={@history == []}
+              class={if @history == [], do: "opacity-40 cursor-not-allowed", else: ""}>
+        🔀 Merge&nbsp;(with previous)
+      </button>
     </div>
     """
   end

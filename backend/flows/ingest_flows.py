@@ -143,11 +143,17 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                     action = action_info['action'] # e.g., 'selected_approve'
                     target_state = None
 
-                    if action == 'selected_approve': target_state = 'review_approved'
-                    elif action == 'selected_skip': target_state = 'skipped' # Assuming skip is final
-                    elif action == 'selected_archive': target_state = 'archived_pending_deletion' # Goes to cleanup flow
+                    if action == 'selected_approve':
+                        target_state = 'review_approved'
+                    elif action == 'selected_skip':
+                        target_state = 'skipped' # Assuming skip is final
+                    elif action == 'selected_archive':
+                        target_state = 'archived_pending_deletion' # Goes to cleanup flow
+                    elif action == 'selected_merge_target':
+                        target_state = 'pending_merge_target'
+                    elif action == 'selected_merge_source':
+                        target_state = 'marked_for_merge_into_previous'
                     # Add mappings for merge/split triggers if needed
-                    # elif action == 'selected_request_merge': target_state = 'pending_merge_target' # Example
                     # elif action == 'selected_request_split': target_state = 'pending_split' # Example
 
                     if target_state:
