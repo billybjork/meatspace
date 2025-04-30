@@ -1,70 +1,163 @@
+# Defines services for local development:
+# - Prefect Database (Postgres)
+# - Application Database (Postgres + pgvector)
+# - Prefect Server (API & UI)
+# - Backend Service (Prefect Worker + Your Code)
+
 services:
-  # ────────────────────────────
+  # ---------------------------
   # 1) Postgres (for Prefect)
-  # ────────────────────────────
-  postgres:
+  # ---------------------------
+  prefect-postgres:
     image: postgres:16-alpine
+    container_name: prefect-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: prefect
-      POSTGRES_PASSWORD: prefect
-      POSTGRES_DB: prefect
+      POSTGRES_USER: ${PREFECT_POSTGRES_USER:-prefect} # Reads from .env or uses default
+      POSTGRES_PASSWORD: ${PREFECT_POSTGRES_PASSWORD:-prefect} # Reads from .env or uses default
+      POSTGRES_DB: ${PREFECT_POSTGRES_DB:-prefect}
     volumes:
-      - prefect_pgdata:/var/lib/postgresql/data
+      - prefect_pgdata:/var/lib/postgresql/data # Named volume for persistence
     ports:
-      - "5432:5432"
+      # Host port 5432 maps to Prefect DB container port 5432
+      - "${PREFECT_POSTGRES_PORT:-5432}:5432" # Allow overriding host port via .env if needed
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
+      test: ["CMD-SHELL", "pg_isready -U ${PREFECT_POSTGRES_USER:-prefect} -d ${PREFECT_POSTGRES_DB:-prefect}"]
       interval: 5s
       timeout: 3s
       retries: 10
+    networks:
+      - app-network # Add service to the network
 
-  # ────────────────────────────────────
-  # 2) Prefect API & UI (Orion) server
-  # ────────────────────────────────────
+  # ------------------------------------
+  # 2) App Postgres (with pgvector)
+  # ------------------------------------
+  app-postgres:
+    image: pgvector/pgvector:pg16 # Official image with pgvector
+    container_name: app-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${APP_DB_USER:-app_user}
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:-app_password}
+      POSTGRES_DB: ${APP_DB_NAME:-app_db}
+      # Optional: Add initdb args if needed
+      # POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - app_pgdata:/var/lib/postgresql/data # Named volume for persistence
+      # Optional: Mount init script to ensure pgvector extension is created if needed by image
+      # - ./scripts/init-app-db.sql:/docker-entrypoint-initdb.d/init-app-db.sql
+    ports:
+      # Host port (e.g., 5433) maps to App DB container port 5432
+      - "${APP_DB_PORT_EXTERNAL:-5433}:5432" # Host port for external access (e.g., frontend)
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${APP_DB_USER:-app_user} -d ${APP_DB_NAME:-app_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - app-network # Add service to the network
+
+  # ------------------------------------
+  # 3) Prefect API & UI (Orion) server
+  # ------------------------------------
   prefect-server:
-    image: prefecthq/prefect:3-python3.11
+    image: prefecthq/prefect:3-python3.11 # Use the Prefect version matching your worker
+    container_name: prefect-server
     restart: unless-stopped
     depends_on:
-      - postgres
+      prefect-postgres: # Wait for Prefect DB to be healthy
+        condition: service_healthy
     environment:
-      # tell Prefect where its database lives
-      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres:5432/prefect
-      PREFECT_API_DATABASE_TIMEOUT: 600
+      # Point Prefect Server to its specific database container using service name
+      PREFECT_API_DATABASE_CONNECTION_URL: "postgresql+asyncpg://${PREFECT_POSTGRES_USER:-prefect}:${PREFECT_POSTGRES_PASSWORD:-prefect}@prefect-postgres:${PREFECT_POSTGRES_PORT:-5432}/${PREFECT_POSTGRES_DB:-prefect}"
+      PREFECT_API_DATABASE_TIMEOUT: ${PREFECT_API_DATABASE_TIMEOUT:-600}
+      # Optional: If accessing UI from host machine, tell it where the API is
+      # PREFECT_UI_API_URL: "http://localhost:4200/api"
     command: >
-      prefect server start
-        --host 0.0.0.0
-        --port 4200
+      prefect server start --host 0.0.0.0 --port 4200
     ports:
-      - "4200:4200"
+      - "4200:4200" # Expose Prefect UI/API port
     healthcheck:
       test: ["CMD-SHELL", "curl -fs http://localhost:4200/api/health || exit 1"]
       interval: 10s
       timeout: 3s
       retries: 10
+    networks:
+      - app-network # Add service to the network
 
-  # ────────────────────────────
-  # 3) Your backend + Prefect worker
-  # ────────────────────────────
+  # ------------------------------------
+  # 4) Your backend + Prefect worker
+  # ------------------------------------
   backend:
     build:
       context: .
       dockerfile: Dockerfile
+    container_name: backend-worker
+    restart: unless-stopped
     depends_on:
-      - postgres
-      - prefect-server
+      # Wait for both databases and Prefect Server to be healthy
+      prefect-postgres:
+        condition: service_healthy
+      app-postgres:
+        condition: service_healthy
+      prefect-server:
+        condition: service_healthy
     environment:
-      # point Prefect CLI / workers at the in-stack server
-      PREFECT_API_URL: http://prefect-server:4200/api
-      # any other env your app needs, e.g. AWS creds
-    # no ports exposed here (UI is on prefect-server)
+      # --- Prefect Worker Configuration ---
+      # Point Prefect Worker to the Prefect Server container using service name
+      PREFECT_API_URL: ${PREFECT_API_URL:-http://prefect-server:4200/api}
+
+      # --- Application Database URL ---
+      # Construct the URL for the application code (db_utils.py, database.py)
+      # Uses service name 'app-postgres' for internal Docker network resolution
+      APP_DATABASE_URL: "postgresql://${APP_DB_USER:-app_user}:${APP_DB_PASSWORD:-app_password}@app-postgres:${APP_DB_PORT_INTERNAL:-5432}/${APP_DB_NAME:-app_db}"
+
+      # --- AWS Credentials & Config ---
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+      AWS_REGION: ${AWS_REGION}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      CLOUDFRONT_DOMAIN: ${CLOUDFRONT_DOMAIN}
+
+      # --- Pass through necessary runtime variables from Dockerfile ---
+      # These are set in the Dockerfile, but ensuring they are available here is good practice
+      LD_PRELOAD: ${LD_PRELOAD}
+      OMP_NUM_THREADS: ${OMP_NUM_THREADS:-1} # Provide default if not set in .env
+      PYTHONUNBUFFERED: ${PYTHONUNBUFFERED:-1} # Provide default
+
+      # --- Optional: Database Pool Sizes (if needed directly by app code) ---
+      # MIN_POOL_SIZE: ${MIN_POOL_SIZE:-1}
+      # MAX_POOL_SIZE: ${MAX_POOL_SIZE:-10}
+      # PREFECT_DB_MIN_POOL: ${PREFECT_DB_MIN_POOL:-2} # Can be renamed
+      # PREFECT_DB_MAX_POOL: ${PREFECT_DB_MAX_POOL:-10} # Can be renamed
+
     command: >
       sh -c "
-        echo '⏳ Waiting for Prefect server…';
-        until curl -fs http://prefect-server:4200/api/health; do sleep 2; done;
-        echo '✅ Prefect is up — starting your API + worker';
-        exec prefect worker start --pool default-agent-pool
+      echo '--- Starting Backend Service ---' &&
+      echo '🔧 Configuring Prefect Agent...' &&
+      prefect config set PREFECT_API_URL=${PREFECT_API_URL:-http://prefect-server:4200/api} &&
+      echo '⏳ Waiting for Prefect server at ${PREFECT_API_URL:-http://prefect-server:4200/api}...' &&
+      # Use curl with --fail to exit non-zero on error, retry mechanism
+      until curl -fsS ${PREFECT_API_URL:-http://prefect-server:4200/api}/health; do
+        echo '... Prefect server not ready, sleeping ...';
+        sleep 5;
+      done;
+      echo '✅ Prefect server is up!' &&
+      echo '🚀 Starting Prefect worker for pool: default-agent-pool ...' &&
+      exec prefect worker start --pool default-agent-pool
       "
+    # Optional: Mount your backend code for live updates during development
+    # volumes:
+    #  - ./backend:/app
+    networks:
+      - app-network # Add service to the network
 
+# Define named volumes for persistent data storage
 volumes:
   prefect_pgdata:
+  app_pgdata:
+
+# Define a network for services to communicate
+networks:
+  app-network:
+    driver: bridge
