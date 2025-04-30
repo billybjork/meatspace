@@ -4,7 +4,6 @@
 # Builder stage
 # -----------------------
 FROM python:3.11-slim-buster AS deps
-# Consider updating to a specific patch version or newer OS (e.g., bookworm) later for security
 
 # Core OS dependencies
 RUN apt-get update && \
@@ -24,7 +23,8 @@ WORKDIR /deps
 COPY backend/requirements.txt .
 
 # Build wheels from source for scikit-learn
-RUN --mount=type=cache,id=pipcache,target=/root/.cache/pip \ 
+RUN --mount=type=cache,id=pip-cache-${TARGETOS}-${TARGETARCH},target=/root/.cache/pip \
+    --mount=type=bind,source=backend/requirements.txt,target=requirements.txt \
     PIP_NO_BINARY=scikit-learn \
     pip install --no-cache-dir -r requirements.txt
 
@@ -32,7 +32,6 @@ RUN --mount=type=cache,id=pipcache,target=/root/.cache/pip \
 # Runtime stage (slimmer image)
 # -----------------------
 FROM python:3.11-slim-buster AS runtime
-# Consider updating to a specific patch version or newer OS (e.g., bookworm) later for security
 
 # Copy built site-packages
 COPY --from=deps /usr/local /usr/local
