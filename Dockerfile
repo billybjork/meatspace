@@ -24,7 +24,7 @@ WORKDIR /deps
 COPY backend/requirements.txt .
 
 # Build wheels from source for scikit-learn
-RUN --mount=type=cache,id=s/d26617b4-84b9-44ca-92fd-1c7259296ecc-/root/.cache/pip,target=/root/.cache/pip \
+RUN --mount=type=cache,id=s/d26617b4-84b9-44ca-92fd-1c7259296ecc-/root/cache/pip,target=/root/.cache/pip \
     PIP_NO_BINARY=scikit-learn \
     pip install --no-cache-dir -r requirements.txt
 
