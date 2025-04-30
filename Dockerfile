@@ -6,8 +6,7 @@
 FROM python:3.11-slim-buster AS deps
 # Consider updating to a specific patch version or newer OS (e.g., bookworm) later for security
 
-# Core OS dependencies – keep this lean but include everything we need to
-# build numpy / scipy / scikit‑learn from source and to run FFmpeg + OpenCV
+# Core OS dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -16,19 +15,16 @@ RUN apt-get update && \
         libgl1 \
         libglib2.0-0 \
         libgomp1 && \
-    # Clean up apt cache
     rm -rf /var/lib/apt/lists/*
 
-# Workdir just for installing Python deps so layers cache nicely
+# Workdir for installing Python deps
 WORKDIR /deps
 
-# Copy the requirements file *only* – this lets us leverage Docker cache
+# Copy requirements file
 COPY backend/requirements.txt .
 
-# Build wheels **from source** for scikit‑learn to avoid pre‑built wheels that
-# pull in a conflicting libgomp binary.
-# The combo of PIP_NO_BINARY + --no-cache-dir guarantees a clean, fresh build.
-RUN --mount=type=cache,target=/root/.cache/pip \
+# Build wheels from source for scikit-learn
+RUN --mount=type=cache,id=pipcache,target=/root/.cache/pip \ 
     PIP_NO_BINARY=scikit-learn \
     pip install --no-cache-dir -r requirements.txt
 
@@ -38,11 +34,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM python:3.11-slim-buster AS runtime
 # Consider updating to a specific patch version or newer OS (e.g., bookworm) later for security
 
-# Copy the built Python site‑packages and binaries from the builder layer
+# Copy built site-packages
 COPY --from=deps /usr/local /usr/local
 
-# Install runtime OS dependencies including curl
-# libgomp needs to be available *and* pre‑loaded...
+# Install runtime OS dependencies
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         ffmpeg \
@@ -50,21 +45,19 @@ RUN apt-get update && \
         libglib2.0-0 \
         libgomp1 \
         curl && \
-    # Clean up apt cache - Note: VSCode linter might flag the 'rm' below incorrectly
     rm -rf /var/lib/apt/lists/*
 
-# IMPORTANT ➜ preload libgomp so the dynamic loader reserves TLS space early
-# Adjust path if building for x86_64 (/usr/lib/x86_64-linux-gnu/libgomp.so.1)
+# Preload libgomp
 ENV LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 \
     OMP_NUM_THREADS=1 \
     PYTHONUNBUFFERED=1
 
 WORKDIR /app
-# Copy your backend code into the image
+# Copy backend code
 COPY backend/ .
 
-# Prefect home inside the container
+# Prefect home
 ENV PREFECT_HOME=/root/.prefect
 
-# Default entry (override in docker‑compose)
+# Default entry
 CMD ["bash"]
