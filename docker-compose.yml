@@ -1,4 +1,7 @@
 services:
+  # ────────────────────────────
+  # 1) Postgres (for Prefect)
+  # ────────────────────────────
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
@@ -11,31 +14,59 @@ services:
     ports:
       - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U prefect -d prefect"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # ────────────────────────────────────
+  # 2) Prefect API & UI (Orion) server
+  # ────────────────────────────────────
+  prefect-server:
+    image: prefecthq/prefect:3-python3.11
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    environment:
+      # tell Prefect where its database lives
+      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres:5432/prefect
+      PREFECT_API_DATABASE_TIMEOUT: 600
+    command: >
+      prefect server start
+        --host 0.0.0.0
+        --port 4200
+    ports:
+      - "4200:4200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:4200/api/health || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ────────────────────────────
+  # 3) Your backend + Prefect worker
+  # ────────────────────────────
   backend:
     build:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      postgres:
-        condition: service_healthy
+      - postgres
+      - prefect-server
     environment:
-      PREFECT_API_DATABASE_CONNECTION_URL: postgresql+asyncpg://prefect:prefect@postgres:5432/prefect
-      PREFECT_API_DATABASE_TIMEOUT: 600
-      PREFECT_API_URL: http://backend:4200/api
-    ports:
-      - "4200:4200"
-    restart: unless-stopped
+      # point Prefect CLI / workers at the in-stack server
+      PREFECT_API_URL: http://prefect-server:4200/api
+      # any other env your app needs, e.g. AWS creds
+    # no ports exposed here (UI is on prefect-server)
     command: >
       sh -c "
-        echo '⏳ Waiting for Postgres…';
-        until pg_isready -h postgres -p 5432 -U prefect -d prefect; do sleep 2; done;
-        echo '✅ Postgres is up — launching Prefect';
-        exec prefect server start --host 0.0.0.0
+        echo '⏳ Waiting for Prefect server…';
+        until curl -fs http://prefect-server:4200/api/health; do sleep 2; done;
+        echo '✅ Prefect is up — starting your API + worker';
+        # start your FastAPI (or whatever) AND a Prefect worker in parallel
+        # adjust the first part to your actual API startup command:
+        uvicorn meatspace_api.main:app --host 0.0.0.0 & 
+        exec prefect worker start --pool default-agent-pool
       "
 
 volumes:
