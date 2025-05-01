@@ -1,16 +1,13 @@
 services:
-
   # 1) Prefect metadata Postgres
   prefect-postgres:
     image: postgres:16-alpine
     container_name: prefect-postgres
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       POSTGRES_USER: ${PREFECT_POSTGRES_USER:-prefect}
       POSTGRES_PASSWORD: ${PREFECT_POSTGRES_PASSWORD:-prefect}
-      POSTGRES_DB: ${PREFECT_POSTGRES_DB:-prefect}
+      POSTGRES_DB:   ${PREFECT_POSTGRES_DB:-prefect}
     volumes:
       - prefect_pgdata:/var/lib/postgresql/data
     ports:
@@ -29,12 +26,10 @@ services:
     image: pgvector/pgvector:pg16
     container_name: app-postgres
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
       POSTGRES_USER: ${APP_DB_USER:-app_user}
       POSTGRES_PASSWORD: ${APP_DB_PASSWORD:-app_password}
-      POSTGRES_DB: ${APP_DB_NAME:-meatspace_app}
+      POSTGRES_DB:   ${APP_DB_NAME:-meatspace_app}
     volumes:
       - app_pgdata:/var/lib/postgresql/data
     ports:
@@ -44,7 +39,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-      start_period: 30s
     networks:
       - app-network
 
@@ -55,12 +49,15 @@ services:
       dockerfile: Dockerfile.prefect-server
     container_name: prefect-server
     restart: unless-stopped
-    env_file:
-      - .env
     depends_on:
       prefect-postgres:
         condition: service_healthy
     environment:
+      # Tell Orion to bind on all interfaces inside the container:
+      PREFECT_SERVER_API_HOST: 0.0.0.0
+      # And tell the UI to connect to the API via localhost on your host machine:
+      PREFECT_UI_API_URL: http://localhost:4200/api
+      # Database settings
       PREFECT_API_DATABASE_CONNECTION_URL: "postgresql+asyncpg://${PREFECT_POSTGRES_USER}:${PREFECT_POSTGRES_PASSWORD}@prefect-postgres:${PREFECT_POSTGRES_PORT}/${PREFECT_POSTGRES_DB}"
       PREFECT_API_DATABASE_TIMEOUT: ${PREFECT_API_DATABASE_TIMEOUT:-600}
     command: >
@@ -83,8 +80,6 @@ services:
       dockerfile: Dockerfile
     container_name: backend-worker
     restart: unless-stopped
-    env_file:
-      - .env
     depends_on:
       prefect-postgres:
         condition: service_healthy
@@ -92,18 +87,17 @@ services:
         condition: service_healthy
       prefect-server:
         condition: service_healthy
-    working_dir: /app/backend
-    volumes:
-      - ./backend:/app/backend:cached
-      - ./scripts:/app/scripts:cached
     environment:
-      PREFECT_API_URL: ${PREFECT_API_URL:-http://prefect-server:4200/api}
+      PREFECT_API_URL: ${PREFECT_API_URL}
       APP_DATABASE_URL: "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
       S3_BUCKET_NAME: ${S3_BUCKET_NAME}
-      AWS_REGION: ${AWS_REGION}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_REGION:       ${AWS_REGION}
+      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      CLOUDFRONT_DOMAIN: ${CLOUDFRONT_DOMAIN}
+      CLOUDFRONT_DOMAIN:     ${CLOUDFRONT_DOMAIN}
+    volumes:
+      - ./backend:/app
+      - ./scripts:/app/scripts
     command: >
       sh -c "
         echo '⏳ Waiting for Prefect…' &&
@@ -121,22 +115,19 @@ services:
       dockerfile: Dockerfile
     container_name: frontend
     restart: unless-stopped
-    env_file:
-      - .env
     depends_on:
       app-postgres:
         condition: service_healthy
-    working_dir: /app
-    volumes:
-      - ./frontend:/app:cached
     environment:
-      MIX_ENV: ${MIX_ENV:-dev}
+      MIX_ENV: dev
       DATABASE_URL: "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
     ports:
       - "4000:4000"
-    command: mix phx.server
+    volumes:
+      - ./frontend:/app
     networks:
       - app-network
+    command: mix phx.server
 
 volumes:
   prefect_pgdata:
