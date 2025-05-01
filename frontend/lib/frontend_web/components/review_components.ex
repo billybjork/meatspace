@@ -59,6 +59,7 @@ defmodule FrontendWeb.ReviewComponents do
 
   @doc "Review action buttons."
   attr :clip, :map, required: true
+  attr :history, :list, default: []
   def review_buttons(assigns) do
     ~H"""
     <div class="review-buttons flex space-x-4 mt-4">

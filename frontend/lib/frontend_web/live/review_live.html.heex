@@ -10,6 +10,6 @@
   <% end %>
 
   <.sprite_player clip={@current} />
-  <.review_buttons clip={@current} />
+  <.review_buttons clip={@current} history={@history} />
   <.undo_toast undo_ctx={@undo_ctx} />
 <% end %>
