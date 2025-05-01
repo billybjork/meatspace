@@ -4,13 +4,8 @@ defmodule Frontend.Repo.Migrations.AddUpdatedAtToClipEvents do
 
   def change do
     alter table(:clip_events) do
-      add :updated_at, :utc_datetime_usec,
-          null: false,
-          default: fragment("timezone('utc', now())")
-          # or simply: default: fragment("now()")
+      add_if_not_exists :updated_at, :utc_datetime_usec
     end
-
-    # keep timestamps in sync for existing rows
-    execute("UPDATE clip_events SET updated_at = created_at")
   end
+
 end
