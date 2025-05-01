@@ -51,7 +51,7 @@
     
     WORKDIR /app
     
-    # Copy your backend code (everything under ./backend)
+    # Copy backend code (everything under ./backend)
     COPY . .
     
     # Set Prefect home

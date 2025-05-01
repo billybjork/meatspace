@@ -10,7 +10,7 @@ from typing import List, Tuple, Dict, Any, Optional
 import psycopg2
 from psycopg2 import sql, pool
 from psycopg2.extras import RealDictCursor
-from psycopg2.extensions import connection as PgConnection # Type hint for connection
+from psycopg2.extensions import connection as PgConnection
 from prefect import get_run_logger
 
 # --- Configuration ---
@@ -20,9 +20,6 @@ logging.basicConfig(level=logging.INFO)
 
 # Get Application DB URL from environment (set by docker-compose)
 APP_DATABASE_URL = os.getenv("APP_DATABASE_URL")
-
-# --- REMOVED dotenv loading ---
-# Environment variables should be injected by the container runtime (docker-compose)
 
 # --- Pool Configuration ---
 # Using ThreadedConnectionPool, suitable for multi-threaded Prefect workers
@@ -169,7 +166,6 @@ def close_db_pool() -> None:
 
 # ─────────────────────────────────── Application Helper Functions ────────────────────────────────────
 # These functions interact with the application schema (source_videos, clips) using the sync pool.
-# NO CHANGES needed here as they rely on the correctly configured get/release functions above.
 
 def get_all_pending_work(limit_per_stage: int = 50) -> List[Dict[str, Any]]:
     """
@@ -404,21 +400,5 @@ def update_source_video_state_sync(source_video_id: int, new_state: str, error_m
     processing_state = "downloading" # Example: Reset retry count when starting 'downloading'
     # Adjust 'processing_state' based on where this function is called and if retry should reset
     return _update_state_sync("source_videos", source_video_id, new_state, processing_state, error_message)
-
-
-# --- Optional: Add a function to be called on worker startup/shutdown ---
-def on_worker_startup():
-    """Initialize resources needed by tasks, like the DB pool."""
-    log.info("Worker starting up. Initializing database pool...")
-    try:
-        initialize_db_pool()
-    except Exception as e:
-        log.critical(f"Failed to initialize database pool during worker startup: {e}", exc_info=True)
-        # Depending on requirements, you might want to prevent worker start here.
-
-def on_worker_shutdown():
-    """Clean up resources, like closing the DB pool."""
-    log.info("Worker shutting down. Closing database pool...")
-    close_db_pool()
 
 # Prefect can call these via deployment configuration or directly in flow definitions if needed.

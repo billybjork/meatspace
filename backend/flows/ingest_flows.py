@@ -25,7 +25,7 @@ from tasks.merge import merge_clips_task
 from tasks.split import split_clip_task
 
 # --- DB Util Imports ---
-from utils.db_utils import (
+from db.sync_db import (
     get_all_pending_work,
     get_source_input_from_db,
     get_pending_merge_pairs,
@@ -33,14 +33,13 @@ from utils.db_utils import (
     initialize_db_pool,
     update_clip_state_sync,
     update_source_video_state_sync,
-    close_db_pool as close_sync_pool, # Alias for clarity
     get_db_connection,
     release_db_connection
 )
 
 # --- Async DB and S3 client imports ---
 try:
-    from database import connect_db, close_db
+    from backend.db.async_db import connect_db, close_db
     ASYNC_DB_CONFIGURED = True
 except ImportError:
     ASYNC_DB_CONFIGURED = False
