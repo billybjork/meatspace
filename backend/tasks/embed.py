@@ -29,7 +29,7 @@ if project_root not in sys.path:
     sys.path.insert(0, project_root)
 try:
     # Import both connection getter/releaser and initializer
-    from utils.db_utils import get_db_connection, release_db_connection, initialize_db_pool
+    from db.sync_db import get_db_connection, release_db_connection, initialize_db_pool
 except ImportError as e:
     print(f"Error importing DB utils in embed.py: {e}")
     def get_db_connection(): raise NotImplementedError("DB Utils not loaded")

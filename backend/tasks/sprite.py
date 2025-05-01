@@ -20,10 +20,10 @@ try:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
-    from utils.db_utils import get_db_connection, release_db_connection
+    from db.sync_db import get_db_connection, release_db_connection
 except ImportError:
     try:
-        from utils.db_utils import get_db_connection, release_db_connection
+        from db.sync_db import get_db_connection, release_db_connection
     except ImportError as e:
         print(f"ERROR: Cannot find db_utils. {e}", file=sys.stderr)
         def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB getter")

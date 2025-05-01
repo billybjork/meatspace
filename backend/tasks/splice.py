@@ -14,14 +14,14 @@ import psycopg2
 from psycopg2 import sql
 
 try:
-    from utils.db_utils import get_db_connection
+    from db.sync_db import get_db_connection
 except ImportError:
     import sys
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if project_root not in sys.path:
         sys.path.insert(0, project_root)
     try:
-        from utils.db_utils import get_db_connection
+        from db.sync_db import get_db_connection
     except ImportError as e:
         print(f"Failed to import db_utils even after path adjustment: {e}")
         def get_db_connection(): raise NotImplementedError("Dummy get_db_connection")

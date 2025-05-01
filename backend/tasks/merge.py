@@ -15,12 +15,12 @@ from botocore.exceptions import ClientError
 
 # --- Project Root Setup ---
 try:
-    from utils.db_utils import get_db_connection, release_db_connection
+    from db.sync_db import get_db_connection, release_db_connection
 except ImportError:
     project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
     if project_root not in sys.path: sys.path.insert(0, project_root)
     try:
-        from utils.db_utils import get_db_connection, release_db_connection
+        from db.sync_db import get_db_connection, release_db_connection
     except ImportError as e:
         print(f"ERROR importing db_utils in merge.py: {e}")
         def get_db_connection(cursor_factory=None): raise NotImplementedError("Dummy DB connection")
