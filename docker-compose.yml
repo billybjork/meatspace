@@ -5,9 +5,9 @@ services:
     container_name: prefect-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${PREFECT_POSTGRES_USER:-prefect}
+      POSTGRES_USER:     ${PREFECT_POSTGRES_USER:-prefect}
       POSTGRES_PASSWORD: ${PREFECT_POSTGRES_PASSWORD:-prefect}
-      POSTGRES_DB:   ${PREFECT_POSTGRES_DB:-prefect}
+      POSTGRES_DB:       ${PREFECT_POSTGRES_DB:-prefect}
     volumes:
       - prefect_pgdata:/var/lib/postgresql/data
     ports:
@@ -27,9 +27,9 @@ services:
     container_name: app-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ${APP_DB_USER:-app_user}
+      POSTGRES_USER:     ${APP_DB_USER:-app_user}
       POSTGRES_PASSWORD: ${APP_DB_PASSWORD:-app_password}
-      POSTGRES_DB:   ${APP_DB_NAME:-meatspace_app}
+      POSTGRES_DB:       ${APP_DB_NAME:-meatspace_app}
     volumes:
       - app_pgdata:/var/lib/postgresql/data
     ports:
@@ -88,13 +88,13 @@ services:
       prefect-server:
         condition: service_healthy
     environment:
-      PREFECT_API_URL: ${PREFECT_API_URL}
-      APP_DATABASE_URL: "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
-      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
-      AWS_REGION:       ${AWS_REGION}
-      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID}
+      PREFECT_API_URL:      ${PREFECT_API_URL}
+      APP_DATABASE_URL:     "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
+      S3_BUCKET_NAME:       ${S3_BUCKET_NAME}
+      AWS_REGION:           ${AWS_REGION}
+      AWS_ACCESS_KEY_ID:    ${AWS_ACCESS_KEY_ID}
       AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
-      CLOUDFRONT_DOMAIN:     ${CLOUDFRONT_DOMAIN}
+      CLOUDFRONT_DOMAIN:    ${CLOUDFRONT_DOMAIN}
     volumes:
       - ./backend:/app
       - ./scripts:/app/scripts
@@ -119,8 +119,8 @@ services:
       app-postgres:
         condition: service_healthy
     environment:
-      MIX_ENV: dev
-      DATABASE_URL: "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
+      MIX_ENV:       dev
+      DATABASE_URL:  "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
     ports:
       - "4000:4000"
     volumes:
@@ -128,6 +128,48 @@ services:
     networks:
       - app-network
     command: mix phx.server
+
+  # 6) Automated DB Backup Service
+  db-backup:
+    image: postgres:16-alpine
+    container_name: db-backup
+    restart: unless-stopped
+    depends_on:
+      - app-postgres
+      - prefect-postgres
+    # Load your repo-root .env so all APP_DB_* and AWS_* vars are available
+    env_file:
+      - .env
+    volumes:
+      # mount both PG data volumes read-only
+      - app_pgdata:/var/lib/postgresql/data:ro
+      - prefect_pgdata:/var/lib/postgresql/data:ro
+      # location for dumps on the host
+      - ./backups:/backups
+      # your backup script
+      - ./scripts:/scripts:ro
+    environment:
+      # map your APP_* names into the PG_* names the script expects
+      PG_HOST:     ${APP_DB_HOST}
+      PG_PORT:     ${APP_DB_PORT_INTERNAL}
+      PG_USER:     ${APP_DB_USER}
+      PG_DB:       ${APP_DB_NAME}
+      # let the script use PGPASSWORD
+      PGPASSWORD:  ${APP_DB_PASSWORD}
+      # retention and optional S3 upload
+      RETENTION_DAYS: ${RETENTION_DAYS:-7}
+      AWS_S3_BUCKET:  ${S3_BUCKET_NAME}
+      AWS_ACCESS_KEY_ID:    ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+    command: >
+      sh -c "
+        while true; do
+          /scripts/pg_backup.sh
+          sleep 24h
+        done
+      "
+    networks:
+      - app-network
 
 volumes:
   prefect_pgdata:
