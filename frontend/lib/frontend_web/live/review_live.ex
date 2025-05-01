@@ -42,8 +42,7 @@ defmodule FrontendWeb.ReviewLive do
            future:   fut,
            history:  [],
            undo_ctx: nil,
-           page_state: :reviewing),
-         temporary_assigns: [history: []]}
+           page_state: :reviewing)}
     end
   end
 
