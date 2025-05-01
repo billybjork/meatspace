@@ -1,0 +1,18 @@
+# Dockerfile.prefect-server
+FROM prefecthq/prefect:3-python3.11
+
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/* \
+    \
+    # prep the UI static build output dir
+    && mkdir -p /usr/local/lib/python3.11/site-packages/prefect/server/ui_build \
+    && chmod -R a+rwx /usr/local/lib/python3.11/site-packages/prefect/server/ui_build \
+    \
+    # ensure the Prefect home can be created
+    && mkdir -p /.prefect \
+    && chmod a+rwx /.prefect
+
+# drop back to the Prefect user
+USER 1000

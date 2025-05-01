@@ -1,12 +1,61 @@
-.env
+# ───────────────────────────────
+# General system/editor ignores
+# ───────────────────────────────
 .DS_Store
-__pycache__/
-/venv
-backend/venv/
-.sesskey
-**/.sesskey
-*.pyc
-*.pyo
-*.pyd
-*.~
 *.swp
+*.swo
+*.~
+.idea/
+.vscode/
+
+# ───────────────────────────────
+# Python-specific ignores
+# ───────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyd
+*.pyo
+*.pyc
+
+# Virtual environments
+venv/
+backend/venv/
+
+# ───────────────────────────────
+# Elixir & Phoenix-specific ignores
+# ───────────────────────────────
+
+# Build and dependency artifacts
+/frontend/_build/
+/frontend/deps/
+/frontend/tmp/
+/frontend/cover/
+/frontend/doc/
+/frontend/frontend-*.tar
+
+# Local package/dependency files
+/frontend/.fetch
+*.ez
+
+# Generated assets and localization
+/frontend/priv/static/
+/frontend/priv/gettext/*.pot
+/frontend/priv/gettext/**/*.po~
+
+# Node.js & asset pipeline
+/frontend/assets/node_modules/
+*.js.map
+*.css.map
+
+# ───────────────────────────────
+# Docker-related
+# ───────────────────────────────
+*.sesskey
+**/.sesskey
+
+# ───────────────────────────────
+# Environment variable files
+# ───────────────────────────────
+.env
+.env.*
+.envrc

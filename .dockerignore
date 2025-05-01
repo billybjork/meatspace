@@ -1,0 +1,61 @@
+# ───────────────────────────────
+# General files to ignore
+# ───────────────────────────────
+**/.DS_Store
+**/*.swp
+**/*.swo
+**/*~
+**/.idea/
+**/.vscode/
+
+# ───────────────────────────────
+# Git-related
+# ───────────────────────────────
+.git
+.gitignore
+
+# ───────────────────────────────
+# Python-related
+# ───────────────────────────────
+**/__pycache__/
+**/*.py[cod]
+**/*.pyo
+**/*.pyd
+**/venv/
+**/*.egg-info/
+
+# ───────────────────────────────
+# Elixir / Phoenix-related
+# ───────────────────────────────
+frontend/_build/
+frontend/deps/
+frontend/cover/
+frontend/tmp/
+frontend/doc/
+frontend/frontend-*.tar
+frontend/.fetch
+frontend/assets/node_modules/
+frontend/priv/static/
+
+# ───────────────────────────────
+# Environment / Secrets
+# ───────────────────────────────
+.env
+.env.*
+.envrc
+.sesskey
+**/.sesskey
+
+# ───────────────────────────────
+# Dockerfiles themselves (optional)
+# ───────────────────────────────
+Dockerfile
+**/Dockerfile
+
+# ───────────────────────────────
+# Misc
+# ───────────────────────────────
+*.log
+*.tar
+*.bak
+*.old
