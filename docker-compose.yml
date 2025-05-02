@@ -122,6 +122,7 @@ services:
       - .env
     environment:
       MIX_ENV:       dev
+      DISABLE_ASSET_WATCHERS: "true"
       DATABASE_URL:  "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
     ports:
       - "4000:4000"

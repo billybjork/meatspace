@@ -7,7 +7,10 @@
     
     # Copy only what we need for npm
     COPY assets/package.json assets/package-lock.json ./
-    COPY assets/js ./js
+    COPY assets/js     ./js
+    COPY assets/css    ./css
+    COPY assets/postcss.config.js ./postcss.config.js
+    COPY assets/tailwind.config.js ./tailwind.config.js
     
     # Ensure output dir exists (esbuild deploy writes to ../priv/static/assets)
     RUN mkdir -p ../priv/static/assets
@@ -37,14 +40,13 @@
      && mix deps.compile
     
     # 2b) Copy over the JS assets we already built
-    # node_build put them at /app/priv/static/assets
     COPY --from=node_build /app/priv/static/assets ./priv/static/assets
     
     # 2c) Copy the rest of your app and compile
-    COPY lib ./lib
-    COPY config ./config
+    COPY lib       ./lib
+    COPY config    ./config
     COPY priv/repo ./priv/repo
-    # (note: priv/static is already populated)
+    # (priv/static is already populated)
     RUN mix compile
     
     # -----------------------
@@ -52,9 +54,18 @@
     # -----------------------
     FROM build AS app
     
-    # Install inotify-tools so Phoenix LiveReload can watch filesystem changes
-    RUN apk add --no-cache inotify-tools
+    # Install Node, npm, and inotify-tools so watchers work
+    RUN apk add --no-cache nodejs npm inotify-tools
     
     WORKDIR /app
     
-    CMD ["mix", "phx.server"]    
+    # Copy entrypoint script
+    COPY entrypoint.sh /app/entrypoint.sh
+    RUN chmod +x /app/entrypoint.sh
+    
+    # Expose Phoenix port
+    EXPOSE 4000
+    
+    # Use entrypoint to rebuild assets then start server
+    ENTRYPOINT ["/app/entrypoint.sh"]
+    
