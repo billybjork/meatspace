@@ -4,12 +4,12 @@ defmodule FrontendWeb.ReviewLive do
 
   * **current**  – clip on screen
   * **future**   – pre-fetched queue (max 5)
-  * **history**  – last 5 clips, supports Undo
+  * **history**  – last 5 clips, supports Undo (via back button)
   """
 
   use FrontendWeb, :live_view
   import FrontendWeb.ReviewComponents,
-    only: [sprite_player: 1, review_buttons: 1, undo_toast: 1]
+    only: [sprite_player: 1, review_buttons: 1] # Removed undo_toast import
 
   alias Frontend.Clips
   alias Frontend.Clips.Clip
@@ -31,16 +31,14 @@ defmodule FrontendWeb.ReviewLive do
                 page_state: :empty,
                 current:    nil,
                 future:     [],
-                history:    [],
-                undo_ctx:   nil)}
+                history:    [])} # Removed undo_ctx
 
       [cur | fut] ->
         {:ok, socket
           |> assign(
             current:    cur,
             future:     fut,
-            history:    [],
-            undo_ctx:   nil,
+            history:    [], # Removed undo_ctx
             page_state: :reviewing)}
     end
   end
@@ -57,11 +55,7 @@ defmodule FrontendWeb.ReviewLive do
       socket
       |> push_history(curr)
       |> advance_queue()
-      |> assign(:undo_ctx, %{
-           clip_id: curr.id,
-           action: "merge",
-           extra: %{target_id: prev.id}
-         })
+      # Removed assign(:undo_ctx, ...)
       |> refill_future()
 
     {:noreply, persist_async(socket, {:merge, prev, curr})}
@@ -74,16 +68,17 @@ defmodule FrontendWeb.ReviewLive do
       socket
       |> push_history(clip)
       |> advance_queue()
-      |> assign(:undo_ctx, %{clip_id: clip.id, action: action})
+      # Removed assign(:undo_ctx, ...)
       |> refill_future()
 
     {:noreply, persist_async(socket, clip.id, action)}
   end
 
-  # Undo with no history: clear undo_ctx
+  # Undo with no history: should not be clickable, but handle defensively
   @impl true
   def handle_event("undo", _params, %{assigns: %{history: []}} = socket) do
-    {:noreply, assign(socket, undo_ctx: nil)}
+    # The button should be disabled, but if event fires, do nothing harmful
+    {:noreply, socket} # Simplified return
   end
 
   # Undo with history: revert to previous clip
@@ -95,7 +90,7 @@ defmodule FrontendWeb.ReviewLive do
            current:  prev,
            future:   [cur | fut],
            history:  rest,
-           undo_ctx: nil,
+           # Removed undo_ctx: nil
            page_state: :reviewing
          )
       |> refill_future()

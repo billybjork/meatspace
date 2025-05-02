@@ -1,15 +1,51 @@
 <%= if @page_state == :empty do %>
-  <h2>All clips reviewed!</h2>
-  <.undo_toast undo_ctx={@undo_ctx} />
+  <div class="relative flex flex-col items-center justify-center h-screen">
+    <%# Back button available even when queue is empty, if history exists %>
+    <div class="absolute top-4 left-4">
+      <button
+        phx-click="undo"
+        disabled={@history == []}
+        class={"px-3 py-1 rounded text-2xl font-semibold " <>
+               if @history == [],
+                 do: "text-gray-400 cursor-not-allowed",
+                 else: "text-gray-700 hover:text-gray-900 hover:bg-gray-200"
+              }
+        aria-label="Go back to previous clip"
+        title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
+        ⬅️
+      </button>
+    </div>
+    <h2 class="text-2xl font-semibold">All clips reviewed!</h2>
+  </div>
 <% else %>
-  <!-- Pre-load the sprite sheet of the *next* clip, if any -->
+  <%# Pre-load the sprite sheet of the *next* clip, if any %>
   <%= if @future != [] do %>
     <link rel="preload"
           as="image"
           href={@future |> List.first() |> FrontendWeb.ReviewComponents.sprite_url()} />
   <% end %>
 
-  <.sprite_player clip={@current} />
-  <.review_buttons clip={@current} history={@history} />
-  <.undo_toast undo_ctx={@undo_ctx} />
+  <div class="p-4 space-y-4">
+    <%# Header Row with Back Button %>
+    <div class="flex items-center h-10">
+      <button
+        phx-click="undo"
+        disabled={@history == []}
+        class={"px-3 py-1 rounded text-2xl font-semibold " <>
+               if @history == [],
+                 do: "text-gray-400 cursor-not-allowed",
+                 else: "text-gray-700 hover:text-gray-900 hover:bg-gray-200"
+              }
+        aria-label="Go back to previous clip"
+        title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
+        ⬅️
+      </button>
+    </div>
+
+    <%# Main Content Area (player and action buttons) %>
+    <div class="flex flex-col items-center">
+      <.sprite_player clip={@current} />
+      <.review_buttons clip={@current} history={@history} />
+    </div>
+  </div>
 <% end %>

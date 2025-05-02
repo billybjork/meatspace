@@ -1,6 +1,7 @@
 defmodule FrontendWeb.ReviewComponents do
   @moduledoc false
   use Phoenix.Component
+  alias Frontend.Clips.Clip
 
   # ------------------------------------------------------------------------
   # public helpers
@@ -12,8 +13,8 @@ defmodule FrontendWeb.ReviewComponents do
   Used by the `<link rel="preload">` tag in *review_live.html.heex* and by
   any place that needs the sprite image outside the main player.
   """
-  @spec sprite_url(Frontend.Clips.Clip.t()) :: String.t()
-  def sprite_url(%Frontend.Clips.Clip{clip_artifacts: arts}) do
+  @spec sprite_url(Clip.t()) :: String.t()
+  def sprite_url(%Clip{clip_artifacts: arts}) do
     case Enum.find(arts, &(&1.artifact_type == "sprite_sheet")) do
       nil -> "/images/placeholder_sprite.png"
       art -> cdn_url(art.s3_key)
@@ -73,19 +74,6 @@ defmodule FrontendWeb.ReviewComponents do
         🔀 Merge&nbsp;(with previous)
       </button>
     </div>
-    """
-  end
-
-  @doc "Undo toast."
-  attr :undo_ctx, :map
-  def undo_toast(assigns) do
-    ~H"""
-    <%= if @undo_ctx do %>
-      <div class="undo-toast fixed bottom-4 right-4 bg-yellow-300 p-4 rounded">
-        <p>Action recorded. Click to undo.</p>
-        <button phx-click="undo">↩️ Undo</button>
-      </div>
-    <% end %>
     """
   end
 
