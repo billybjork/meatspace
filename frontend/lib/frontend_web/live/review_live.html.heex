@@ -1,27 +1,21 @@
 <%= if @page_state == :empty do %>
   <%# --- EMPTY STATE --- %>
-  <div class="relative flex flex-col items-center h-screen">
-    <%# Back button available even when queue is empty, if history exists %>
+  <div class="relative flex flex-col items-center justify-center h-screen text-center">
     <div class="absolute top-4 left-4">
       <button
         phx-click="undo"
         disabled={@history == []}
-        class={"px-3 py-1 rounded text-2xl font-semibold " <>
-               if @history == [],
-                 do: "text-gray-400 cursor-not-allowed",
-                 else: "text-gray-700 hover:text-gray-900 hover:bg-gray-200"
-              }
+        class="px-3 py-1 rounded text-2xl font-semibold text-gray-700 hover:text-gray-900 hover:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-transparent"
         aria-label="Go back to previous clip"
         title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
         ⬅️
       </button>
     </div>
     <h2 class="text-2xl font-semibold">All clips reviewed!</h2>
+    <p class="text-gray-600 mt-2">Check back later for more.</p>
   </div>
 <% else %>
   <%# --- REVIEWING STATE --- %>
-
-  <%# Pre‐load the sprite sheet of the *next* clip, if any %>
   <%= if @future != [] do %>
     <link rel="preload"
           as="image"
@@ -29,11 +23,8 @@
   <% end %>
 
   <div class="p-4 space-y-4">
-    <%# Simple container div. Vertical spacing between player and buttons is handled here. %>
-    <%# Centering is handled by mx-auto within the components themselves. %>
     <div class="space-y-4">
       <.sprite_player clip={@current} />
-
       <.review_buttons clip={@current} history={@history} />
     </div>
   </div>

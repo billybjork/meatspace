@@ -4,7 +4,7 @@ defmodule FrontendWeb.ReviewComponents do
   alias Frontend.Clips.Clip
 
   # ------------------------------------------------------------------------
-  # public helpers (No changes needed here)
+  # public helpers
   # ------------------------------------------------------------------------
 
   @doc """
@@ -29,7 +29,7 @@ defmodule FrontendWeb.ReviewComponents do
   def sprite_player(assigns) do
     clip       = assigns.clip
     sprite_art = Enum.find(clip.clip_artifacts, &(&1.artifact_type == "sprite_sheet"))
-    meta       = build_player_meta(clip, sprite_art)
+    meta       = build_sprite_player_meta(clip, sprite_art)
     json_meta  = Jason.encode!(meta)
 
     assigns =
@@ -38,11 +38,10 @@ defmodule FrontendWeb.ReviewComponents do
       |> assign(:json_meta, json_meta)
 
     ~H"""
-    <%# Apply mx-auto to center this container horizontally. %>
     <div class="clip-display-container mx-auto"
          style={"width: #{@meta["tile_width"]}px;"}>
 
-      <%# This div contains the actual sprite background (No class changes needed) %>
+      <%# This div contains the actual sprite background %>
       <div id={"viewer-#{@clip.id}"}
            phx-hook="SpritePlayer"
            data-clip-id={@clip.id}
@@ -53,8 +52,6 @@ defmodule FrontendWeb.ReviewComponents do
            <%# Intentionally empty - background is styled by the hook %>
       </div>
 
-      <%# These are the controls below the sprite viewer %>
-      <%# Use flex items-center justify-center to center controls *within this bar*. %>
       <div class="sprite-controls flex items-center justify-center mt-2">
         <button id={"playpause-#{@clip.id}"} data-action="toggle">⏯️</button>
         <input id={"scrub-#{@clip.id}"} type="range" min="0" step="1" class="mx-2 flex-grow">
@@ -70,7 +67,6 @@ defmodule FrontendWeb.ReviewComponents do
   def review_buttons(assigns) do
     ~H"""
     <div class="review-buttons flex items-center justify-center space-x-4 mx-auto">
-      <!-- Undo / Back -->
       <button
         phx-click="undo"
         disabled={@history == []}
@@ -80,15 +76,15 @@ defmodule FrontendWeb.ReviewComponents do
         ⬅️
       </button>
 
-      <!-- Main actions -->
-      <button phx-click="select" phx-value-action="approve">✅ Approve</button>
-      <button phx-click="select" phx-value-action="skip">➡️ Skip</button>
-      <button phx-click="select" phx-value-action="archive">🗑️ Archive</button>
+      <button phx-click="select" phx-value-action="approve" class="px-4 py-2 rounded bg-green-500 text-black hover:bg-green-600">✅ Approve</button>
+      <button phx-click="select" phx-value-action="skip" class="px-4 py-2 rounded bg-gray-500 text-black hover:bg-gray-600">➡️ Skip</button>
+      <button phx-click="select" phx-value-action="archive" class="px-4 py-2 rounded bg-red-500 text-black hover:bg-red-600">🗑️ Archive</button>
+
       <button
         phx-click="select"
         phx-value-action="merge"
         disabled={@history == []}
-        class={if @history == [], do: "opacity-40 cursor-not-allowed", else: ""}>
+        class="px-4 py-2 rounded bg-purple-500 text-black hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed">
         🔀 Merge (with previous)
       </button>
     </div>
@@ -99,7 +95,7 @@ defmodule FrontendWeb.ReviewComponents do
   # private helpers
   # ------------------------------------------------------------------------
 
-  defp build_player_meta(clip, art) do
+  defp build_sprite_player_meta(clip, art) do
     base = art.metadata || %{}
 
     cols    = base["cols"]               || 5
