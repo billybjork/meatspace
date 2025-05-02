@@ -1,6 +1,24 @@
 defmodule Frontend.Clips.SourceVideo do
   use Frontend.Clips.Schema
 
+  @type t() :: %__MODULE__{
+    id: integer(),
+    filepath: String.t() | nil,
+    duration_seconds: float() | nil,
+    fps: float() | nil,
+    width: integer() | nil,
+    height: integer() | nil,
+    published_date: Date.t() | nil,
+    title: String.t() | nil,
+    ingest_state: String.t(),
+    last_error: String.t() | nil,
+    retry_count: integer(),
+    original_url: String.t() | nil,
+    # Ecto timestamps
+    created_at: NaiveDateTime.t(),
+    updated_at: NaiveDateTime.t()
+  }
+
   schema "source_videos" do
     field :filepath,         :string
     field :duration_seconds, :float

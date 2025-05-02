@@ -1,6 +1,16 @@
 defmodule Frontend.Clips.Clip do
   use Frontend.Clips.Schema
 
+  @type t() :: %__MODULE__{
+    id: integer(),
+    clip_filepath: String.t() | nil,
+    clip_identifier: String.t() | nil,
+    start_frame: integer() | nil,
+    end_frame: integer() | nil,
+    source_video: Frontend.Clips.SourceVideo.t() | Ecto.Association.NotLoaded.t(),
+    clip_artifacts: [Frontend.Clips.ClipArtifact.t()] | Ecto.Association.NotLoaded.t()
+  }
+
   schema "clips" do
     field :clip_filepath,        :string
     field :clip_identifier,      :string
