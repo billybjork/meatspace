@@ -39,7 +39,7 @@ defmodule FrontendWeb.ReviewComponents do
 
     ~H"""
     <%# Apply mx-auto to center this container horizontally. %>
-    <div class="clip-display-container mx-auto"  # <--- CHANGED THIS LINE
+    <div class="clip-display-container mx-auto"
          style={"width: #{@meta["tile_width"]}px;"}>
 
       <%# This div contains the actual sprite background (No class changes needed) %>
@@ -69,17 +69,27 @@ defmodule FrontendWeb.ReviewComponents do
   attr :history, :list, default: []
   def review_buttons(assigns) do
     ~H"""
-    <%# Use mx-auto to center the button bar horizontally. %>
-    <%# Use flex justify-center to center the buttons *within* the bar. %>
-    <div class="review-buttons flex justify-center space-x-4 mx-auto">
+    <div class="review-buttons flex items-center justify-center space-x-4 mx-auto">
+      <!-- Undo / Back -->
+      <button
+        phx-click="undo"
+        disabled={@history == []}
+        class="px-3 py-1 rounded text-2xl font-semibold text-gray-700 hover:text-gray-900 hover:bg-gray-200 disabled:opacity-40 disabled:cursor-not-allowed"
+        aria-label="Go back to previous clip"
+        title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
+        ⬅️
+      </button>
+
+      <!-- Main actions -->
       <button phx-click="select" phx-value-action="approve">✅ Approve</button>
       <button phx-click="select" phx-value-action="skip">➡️ Skip</button>
       <button phx-click="select" phx-value-action="archive">🗑️ Archive</button>
-      <button phx-click="select"
-              phx-value-action="merge"
-              disabled={@history == []}
-              class={if @history == [], do: "opacity-40 cursor-not-allowed", else: ""}>
-        🔀 Merge (with previous)
+      <button
+        phx-click="select"
+        phx-value-action="merge"
+        disabled={@history == []}
+        class={if @history == [], do: "opacity-40 cursor-not-allowed", else: ""}>
+        🔀 Merge (with previous)
       </button>
     </div>
     """
