@@ -8,8 +8,11 @@ defmodule FrontendWeb.ReviewLive do
   """
 
   use FrontendWeb, :live_view
-  import FrontendWeb.ReviewComponents,
-    only: [sprite_player: 1, review_buttons: 1]
+
+  # Import the sprite-player helpers from your sprite_player.ex
+  import FrontendWeb.SpritePlayer, only: [sprite_player: 1, sprite_url: 1]
+  # Import your buttons component
+  import FrontendWeb.ReviewButtons, only: [review_buttons: 1]
 
   alias Frontend.Clips
   alias Frontend.Clips.Clip
@@ -47,7 +50,6 @@ defmodule FrontendWeb.ReviewLive do
   # Events: Handle user actions
   # -------------------------------------------------------------------------
 
-  # Merge action: logs merge, optimistically advances UI
   @impl true
   def handle_event("select", %{"action" => "merge"},
                    %{assigns: %{current: curr, history: [prev | _]}} = socket) do
@@ -60,7 +62,6 @@ defmodule FrontendWeb.ReviewLive do
     {:noreply, persist_async(socket, {:merge, prev, curr})}
   end
 
-  # Other actions: approve, skip, archive
   @impl true
   def handle_event("select", %{"action" => action}, %{assigns: %{current: clip}} = socket) do
     socket =
@@ -72,22 +73,19 @@ defmodule FrontendWeb.ReviewLive do
     {:noreply, persist_async(socket, clip.id, action)}
   end
 
-  # Undo with no history: should not be clickable, but handle defensively
   @impl true
   def handle_event("undo", _params, %{assigns: %{history: []}} = socket) do
-    # The button should be disabled, but if event fires, do nothing harmful
-    {:noreply, socket} # Simplified return
+    {:noreply, socket}
   end
 
-  # Undo with history: revert to previous clip
   @impl true
   def handle_event("undo", _params, %{assigns: %{history: [prev | rest], current: cur, future: fut}} = socket) do
     socket =
       socket
       |> assign(
-           current:  prev,
-           future:   [cur | fut],
-           history:  rest,
+           current:    prev,
+           future:     [cur | fut],
+           history:    rest,
            page_state: :reviewing
          )
       |> refill_future()
@@ -96,17 +94,15 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   # -------------------------------------------------------------------------
-  # Background persistence: fire off DB writes asynchronously
+  # Background persistence
   # -------------------------------------------------------------------------
 
-  # Merge: call request_merge_and_fetch_next to log both clips
   defp persist_async(socket, {:merge, prev, curr}) do
     Phoenix.LiveView.start_async(socket, {:merge_pair, {prev.id, curr.id}}, fn ->
       Clips.request_merge_and_fetch_next(prev, curr)
     end)
   end
 
-  # Single-clip actions: call select_clip_and_fetch_next
   defp persist_async(socket, clip_id, action) do
     Phoenix.LiveView.start_async(socket, {:persist, clip_id}, fn ->
       Clips.select_clip_and_fetch_next(%Clip{id: clip_id}, action)
@@ -114,10 +110,9 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   # -------------------------------------------------------------------------
-  # Queue refill: fetch more clips when running low
+  # Queue refill
   # -------------------------------------------------------------------------
 
-  # No refill when empty
   defp refill_future(%{assigns: %{current: nil}} = socket), do: socket
 
   defp refill_future(%{assigns: assigns} = socket) do
@@ -127,7 +122,7 @@ defmodule FrontendWeb.ReviewLive do
         |> Enum.filter(& &1)
         |> Enum.map(& &1.id)
 
-      needed = @prefetch - (length(assigns.future) + 1)
+      needed    = @prefetch - (length(assigns.future) + 1)
       new_clips = Clips.next_pending_review_clips(needed, exclude_ids)
 
       update(socket, :future, &(&1 ++ new_clips))
@@ -155,34 +150,26 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   # -------------------------------------------------------------------------
-  # Async callbacks: handle completion of DB writes
+  # Async callbacks
   # -------------------------------------------------------------------------
 
-  # Generic single-clip persistence success
   @impl true
-  def handle_async({:persist, _clip_id}, {:ok, _result}, socket) do
-    {:noreply, socket}
-  end
+  def handle_async({:persist, _}, {:ok, _}, socket), do: {:noreply, socket}
 
-  # Generic single-clip persistence failure
   @impl true
   def handle_async({:persist, clip_id}, {:exit, reason}, socket) do
     require Logger
-    Logger.error("Persist task for clip #{clip_id} crashed: #{inspect(reason)}")
+    Logger.error("Persist for clip #{clip_id} crashed: #{inspect(reason)}")
     {:noreply, socket}
   end
 
-  # Merge success: nothing else to update
   @impl true
-  def handle_async({:merge_pair, _ids}, {:ok, _result}, socket) do
-    {:noreply, socket}
-  end
+  def handle_async({:merge_pair, _}, {:ok, _}, socket), do: {:noreply, socket}
 
-  # Merge failure: log both IDs
   @impl true
   def handle_async({:merge_pair, {prev_id, curr_id}}, {:exit, reason}, socket) do
     require Logger
-    Logger.error("Merge task for clips #{prev_id} → #{curr_id} crashed: #{inspect(reason)}")
+    Logger.error("Merge #{prev_id}→#{curr_id} crashed: #{inspect(reason)}")
     {:noreply, socket}
   end
 end

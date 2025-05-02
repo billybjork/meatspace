@@ -19,7 +19,7 @@
   <%= if @future != [] do %>
     <link rel="preload"
           as="image"
-          href={@future |> List.first() |> FrontendWeb.ReviewComponents.sprite_url()} />
+          href={@future |> List.first() |> sprite_url()} />
   <% end %>
 
   <div class="p-4 space-y-4">
