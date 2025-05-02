@@ -76,15 +76,15 @@ defmodule FrontendWeb.ReviewComponents do
         ⬅️
       </button>
 
-      <button phx-click="select" phx-value-action="approve" class="px-4 py-2 rounded bg-green-500 text-black hover:bg-green-600">✅ Approve</button>
-      <button phx-click="select" phx-value-action="skip" class="px-4 py-2 rounded bg-gray-500 text-black hover:bg-gray-600">➡️ Skip</button>
-      <button phx-click="select" phx-value-action="archive" class="px-4 py-2 rounded bg-red-500 text-black hover:bg-red-600">🗑️ Archive</button>
+      <button phx-click="select" phx-value-action="approve" class="px-4 py-2 text-black hover:bg-green-600">✅ Approve</button>
+      <button phx-click="select" phx-value-action="skip" class="px-4 py-2 text-black hover:bg-gray-600">➡️ Skip</button>
+      <button phx-click="select" phx-value-action="archive" class="px-4 py-2 text-black hover:bg-red-600">🗑️ Archive</button>
 
       <button
         phx-click="select"
         phx-value-action="merge"
         disabled={@history == []}
-        class="px-4 py-2 rounded bg-purple-500 text-black hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed">
+        class="px-4 py-2 text-black hover:bg-purple-600 disabled:opacity-40 disabled:cursor-not-allowed">
         🔀 Merge (with previous)
       </button>
     </div>
