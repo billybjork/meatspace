@@ -1,4 +1,4 @@
-# This file is responsible for configuring your application
+# This file is responsible for configuring the application
 # and its dependencies with the aid of the Config module.
 #
 # This configuration file is loaded before any dependency and
@@ -20,7 +20,7 @@ config :frontend, FrontendWeb.Endpoint,
     layout: false
   ],
   pubsub_server: Frontend.PubSub,
-  live_view: [signing_salt: "KWvQc1I2"]
+  live_view: [signing_salt: "KWvQc1I2"] # Replace with a secure salt, e.g. from `mix phx.gen.secret 32`
 
 # Configures Elixir's Logger
 config :logger, :console,
@@ -32,12 +32,20 @@ config :phoenix, :json_library, Jason
 
 # Configure esbuild (the bundler used for JS/CSS)
 config :esbuild,
-  version: "0.18.17",
+  version: "0.18.17", # Use the latest appropriate version
   default: [
     args:
-      ~w(js/app.js --bundle --target=es2017 --outdir=../priv/static/assets),
+      ~w(js/app.js --bundle --target=es2017 --outdir=../priv/static/assets --external:/fonts/* --external:/images/*), # Added common externals
     cd: Path.expand("../assets", __DIR__),
     env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
+  ],
+  tailwind: [
+    args: ~w(
+      --config=tailwind.config.js
+      --input=css/app.css
+      --output=../priv/static/assets/app.css
+    ),
+    cd: Path.expand("../assets", __DIR__)
   ]
 
 # Import environment specific config. This must remain at the bottom

@@ -1,5 +1,9 @@
+<%# Determine the container class based on assigns. Defaults to constrained width. %>
+<% container_class = if assigns[:full_width], do: "", else: "mx-auto max-w-2xl" %>
+
 <main class="px-4 py-20 sm:px-6 lg:px-8">
-  <div class="mx-auto max-w-2xl">
+  <%# Apply the determined container class %>
+  <div class={container_class}>
     <.flash_group flash={@flash} />
     <%= @inner_content %>
   </div>

@@ -1,7 +1,8 @@
 import Config
 
-# Configure your database
+# Configure the database
 config :frontend, Frontend.Repo,
+  # Note: These settings might be overridden by the DATABASE_URL setting near the end of the file
   username: "postgres",
   password: "postgres",
   hostname: "localhost",
@@ -23,8 +24,30 @@ config :frontend, FrontendWeb.Endpoint,
   check_origin: false,
   code_reloader: true,
   debug_errors: true,
-  secret_key_base: "1yyvat8bVNahXZFsX5tOvQ2sc75yXYCOC8dTG6pzDpBR4w32TTFftWpI+suyC1jc",
-  watchers: []
+  secret_key_base: "Hcf01GGw0FYxDuBv8DYlZVdkYmxTfFai9aTdCBHzKowVAZE6/nQrGcYm5btt06wI",
+  watchers: [
+    # Watch node_modules for changes for esbuild (JS compilation)
+    node: [
+      "node_modules/esbuild/bin/esbuild", # Path to esbuild binary
+      "--watch", # Run esbuild in watch mode
+      "--bundle", "js/app.js",
+      "--target=es2017",
+      "--outdir=../priv/static/assets",
+      "--external:/fonts/*", # Prevent bundling fonts
+      "--external:/images/*", # Prevent bundling images
+      cd: Path.expand("../assets", __DIR__),
+      env: %{"NODE_PATH" => Path.expand("../deps", __DIR__)}
+    ],
+    # Watch CSS, config, and template files for Tailwind changes (CSS compilation)
+    node: [
+      "node_modules/tailwindcss/lib/cli.js", # Path to Tailwind CLI binary
+      "--input=css/app.css", # Input CSS file (with @import directives)
+      "--output=../priv/static/assets/app.css", # Output compiled CSS
+      "--config=tailwind.config.js", # Tailwind config file
+      "--watch", # Run Tailwind in watch mode
+      cd: Path.expand("../assets", __DIR__)
+    ]
+  ]
 
 # ## SSL Support
 #
@@ -53,9 +76,9 @@ config :frontend, FrontendWeb.Endpoint,
 config :frontend, FrontendWeb.Endpoint,
   live_reload: [
     patterns: [
-      ~r"priv/static/.*(js|css|png|jpeg|jpg|gif|svg)$",
+      ~r"priv/static/assets/.*(js|css|png|jpeg|jpg|gif|svg)$", # Updated path to watch compiled assets
       ~r"priv/gettext/.*(po)$",
-      ~r"lib/frontend_web/(controllers|live|components)/.*(ex|heex)$"
+      ~r"lib/frontend_web/(controllers|live|components|layouts)/.*(ex|heex)$" # Added layouts
     ]
   ]
 
@@ -75,13 +98,15 @@ config :phoenix, :plug_init_mode, :runtime
 # Include HEEx debug annotations as HTML comments in rendered markup
 config :phoenix_live_view, :debug_heex_annotations, true
 
-# Load .env
+# Load .env - Make sure Dotenvy is added to mix.exs if you use this
+# Consider using config/runtime.exs for runtime configuration instead
 if Code.ensure_loaded?(Dotenvy) and File.exists?(".env") do
   Dotenvy.load()
 end
 
+# Override DB config potentially with ENV var (keep this logic if needed)
 config :frontend, Frontend.Repo,
   url: System.get_env("DATABASE_URL") || "ecto://postgres:postgres@localhost/frontend_dev",
-  pool_size: 10,
+  pool_size: String.to_integer(System.get_env("POOL_SIZE") || "10"), # Added pool size from env
   show_sensitive_data_on_connection_error: true,
   stacktrace: true

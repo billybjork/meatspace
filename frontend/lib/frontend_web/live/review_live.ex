@@ -9,7 +9,7 @@ defmodule FrontendWeb.ReviewLive do
 
   use FrontendWeb, :live_view
   import FrontendWeb.ReviewComponents,
-    only: [sprite_player: 1, review_buttons: 1] # Removed undo_toast import
+    only: [sprite_player: 1, review_buttons: 1]
 
   alias Frontend.Clips
   alias Frontend.Clips.Clip
@@ -31,14 +31,14 @@ defmodule FrontendWeb.ReviewLive do
                 page_state: :empty,
                 current:    nil,
                 future:     [],
-                history:    [])} # Removed undo_ctx
+                history:    [])}
 
       [cur | fut] ->
         {:ok, socket
           |> assign(
             current:    cur,
             future:     fut,
-            history:    [], # Removed undo_ctx
+            history:    [],
             page_state: :reviewing)}
     end
   end
@@ -55,7 +55,6 @@ defmodule FrontendWeb.ReviewLive do
       socket
       |> push_history(curr)
       |> advance_queue()
-      # Removed assign(:undo_ctx, ...)
       |> refill_future()
 
     {:noreply, persist_async(socket, {:merge, prev, curr})}
@@ -68,7 +67,6 @@ defmodule FrontendWeb.ReviewLive do
       socket
       |> push_history(clip)
       |> advance_queue()
-      # Removed assign(:undo_ctx, ...)
       |> refill_future()
 
     {:noreply, persist_async(socket, clip.id, action)}
@@ -90,7 +88,6 @@ defmodule FrontendWeb.ReviewLive do
            current:  prev,
            future:   [cur | fut],
            history:  rest,
-           # Removed undo_ctx: nil
            page_state: :reviewing
          )
       |> refill_future()

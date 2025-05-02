@@ -1,5 +1,6 @@
 <%= if @page_state == :empty do %>
-  <div class="relative flex flex-col items-center justify-center h-screen">
+  <%# --- EMPTY STATE --- %>
+  <div class="relative flex flex-col items-center h-screen">
     <%# Back button available even when queue is empty, if history exists %>
     <div class="absolute top-4 left-4">
       <button
@@ -18,7 +19,9 @@
     <h2 class="text-2xl font-semibold">All clips reviewed!</h2>
   </div>
 <% else %>
-  <%# Pre-load the sprite sheet of the *next* clip, if any %>
+  <%# --- REVIEWING STATE --- %>
+
+  <%# Pre‐load the sprite sheet of the *next* clip, if any %>
   <%= if @future != [] do %>
     <link rel="preload"
           as="image"
@@ -42,9 +45,11 @@
       </button>
     </div>
 
-    <%# Main Content Area (player and action buttons) %>
-    <div class="flex flex-col items-center">
+    <%# Simple container div. Vertical spacing between player and buttons is handled here. %>
+    <%# Centering is handled by mx-auto within the components themselves. %>
+    <div class="space-y-4">
       <.sprite_player clip={@current} />
+
       <.review_buttons clip={@current} history={@history} />
     </div>
   </div>

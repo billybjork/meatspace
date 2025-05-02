@@ -2,11 +2,18 @@
   "name": "frontend-assets",
   "version": "0.1.0",
   "scripts": {
-    "deploy": "esbuild js/app.js --bundle --target=es2017 --outdir=../priv/static/assets --minify"
+    "deploy": "postcss css/app.css -o ../priv/static/assets/app.css && esbuild js/app.js --bundle --target=es2017 --outdir=../priv/static/assets --minify"
   },
   "dependencies": {
     "esbuild": "^0.17.11",
     "phoenix": "^1.7.10",
     "phoenix_live_view": "^0.20.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/forms": "^0.5.10",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.3",
+    "postcss-cli": "^11.0.1",
+    "tailwindcss": "^3.4.17"
   }
 }

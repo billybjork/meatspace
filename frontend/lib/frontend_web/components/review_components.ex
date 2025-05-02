@@ -4,7 +4,7 @@ defmodule FrontendWeb.ReviewComponents do
   alias Frontend.Clips.Clip
 
   # ------------------------------------------------------------------------
-  # public helpers
+  # public helpers (No changes needed here)
   # ------------------------------------------------------------------------
 
   @doc """
@@ -26,7 +26,6 @@ defmodule FrontendWeb.ReviewComponents do
   # ------------------------------------------------------------------------
 
   @doc "Renders the sprite-sheet player for one clip."
-  attr :clip, :map, required: true
   def sprite_player(assigns) do
     clip       = assigns.clip
     sprite_art = Enum.find(clip.clip_artifacts, &(&1.artifact_type == "sprite_sheet"))
@@ -39,20 +38,27 @@ defmodule FrontendWeb.ReviewComponents do
       |> assign(:json_meta, json_meta)
 
     ~H"""
-    <div class="clip-display-container">
+    <%# Apply mx-auto to center this container horizontally. %>
+    <div class="clip-display-container mx-auto"  # <--- CHANGED THIS LINE
+         style={"width: #{@meta["tile_width"]}px;"}>
+
+      <%# This div contains the actual sprite background (No class changes needed) %>
       <div id={"viewer-#{@clip.id}"}
            phx-hook="SpritePlayer"
            data-clip-id={@clip.id}
            data-player={@json_meta}
            class="sprite-viewer bg-gray-200 border border-gray-400"
            style={"width: #{@meta["tile_width"]}px; height: #{@meta["tile_height_calculated"]}px;
-                   background-repeat:no-repeat; overflow:hidden; margin:0 auto;"}>
+                  background-repeat:no-repeat; overflow:hidden;"}>
+           <%# Intentionally empty - background is styled by the hook %>
       </div>
 
-      <div class="sprite-controls flex items-center mt-2">
+      <%# These are the controls below the sprite viewer %>
+      <%# Use flex items-center justify-center to center controls *within this bar*. %>
+      <div class="sprite-controls flex items-center justify-center mt-2">
         <button id={"playpause-#{@clip.id}"} data-action="toggle">⏯️</button>
-        <input  id={"scrub-#{@clip.id}"} type="range" min="0" step="1">
-        <span   id={"frame-display-#{@clip.id}"}>Frame: 0</span>
+        <input id={"scrub-#{@clip.id}"} type="range" min="0" step="1" class="mx-2 flex-grow">
+        <span id={"frame-display-#{@clip.id}"} class="text-sm min-w-[70px] text-right">Frame: 0</span>
       </div>
     </div>
     """
@@ -63,7 +69,9 @@ defmodule FrontendWeb.ReviewComponents do
   attr :history, :list, default: []
   def review_buttons(assigns) do
     ~H"""
-    <div class="review-buttons flex space-x-4 mt-4">
+    <%# Use mx-auto to center the button bar horizontally. %>
+    <%# Use flex justify-center to center the buttons *within* the bar. %>
+    <div class="review-buttons flex justify-center space-x-4 mx-auto">
       <button phx-click="select" phx-value-action="approve">✅ Approve</button>
       <button phx-click="select" phx-value-action="skip">➡️ Skip</button>
       <button phx-click="select" phx-value-action="archive">🗑️ Archive</button>
@@ -71,7 +79,7 @@ defmodule FrontendWeb.ReviewComponents do
               phx-value-action="merge"
               disabled={@history == []}
               class={if @history == [], do: "opacity-40 cursor-not-allowed", else: ""}>
-        🔀 Merge&nbsp;(with previous)
+        🔀 Merge (with previous)
       </button>
     </div>
     """
@@ -115,7 +123,7 @@ defmodule FrontendWeb.ReviewComponents do
 
   defp cdn_url(key) do
     domain = System.get_env("CLOUDFRONT_DOMAIN") ||
-               raise "CLOUDFRONT_DOMAIN is not set"
+               raise "CLOUDFRONT_DOMAIN environment variable is not set"
     "https://#{domain}/#{String.trim_leading(key, "/")}"
   end
 end
