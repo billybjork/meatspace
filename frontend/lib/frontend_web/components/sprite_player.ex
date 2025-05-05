@@ -25,46 +25,63 @@ defmodule FrontendWeb.SpritePlayer do
   # live-component pieces
   # ------------------------------------------------------------------------
 
-  @doc "Renders the sprite-sheet player for one clip."
-  def sprite_player(assigns) do
-    clip       = assigns.clip
-    sprite_art = Enum.find(clip.clip_artifacts, &(&1.artifact_type == "sprite_sheet"))
-    meta       = build_sprite_player_meta(clip, sprite_art)
-    json_meta  = Jason.encode!(meta)
+@doc "Renders the sprite-sheet player for one clip."
+def sprite_player(assigns) do
+  clip       = assigns.clip
+  sprite_art = Enum.find(clip.clip_artifacts, &(&1.artifact_type == "sprite_sheet"))
+  meta       = build_sprite_player_meta(clip, sprite_art)
+  json_meta  = Jason.encode!(meta)
 
-    assigns =
-      assigns
-      |> assign(:meta, meta)
-      |> assign(:json_meta, json_meta)
+  assigns =
+    assigns
+    |> assign(:meta, meta)
+    |> assign(:json_meta, json_meta)
 
-    ~H"""
-    <div class="clip-display-container mx-auto"
-         style={"width: #{@meta["tile_width"]}px;"}>
-
-      <%# This div contains the actual sprite background %>
-      <div id={"viewer-#{@clip.id}"}
-           phx-hook="SpritePlayer"
-           phx-update="ignore"
-           data-clip-id={@clip.id}
-           data-player={@json_meta}
-           class="sprite-viewer bg-gray-200 border border-gray-400"
-           style={"width: #{@meta["tile_width"]}px;
-                  height: #{@meta["tile_height_calculated"]}px;
-                  background-repeat:no-repeat;
-                  overflow:hidden;"}>
-          <%# Intentionally empty - background is styled by the hook %>
-      </div>
-
-      <div class="sprite-controls flex items-center justify-center mt-2">
-        <button id={"playpause-#{@clip.id}"} data-action="toggle">⏯️</button>
-        <input id={"scrub-#{@clip.id}"} type="range" min="0" step="1" class="mx-2 flex-grow">
-        <span id={"frame-display-#{@clip.id}"} class="text-sm min-w-[70px] text-right">
-          Frame: 0
-        </span>
-      </div>
+  ~H"""
+  <div
+    class="clip-display-container"
+    style={"width: #{@meta["tile_width"]}px;"}
+  >
+    <%# This element contains the actual sprite background %>
+    <div
+      id={"viewer-#{@clip.id}"}
+      phx-hook="SpritePlayer"
+      phx-update="ignore"
+      data-clip-id={@clip.id}
+      data-player={@json_meta}
+      class="sprite-viewer"
+      style={"width: #{@meta["tile_width"]}px;
+              height: #{@meta["tile_height_calculated"]}px;
+              background-repeat: no-repeat;
+              overflow: hidden;"}
+    >
+      <%# Intentionally empty - background is styled by the hook %>
     </div>
-    """
-  end
+
+    <div class="sprite-controls">
+      <button
+        id={"playpause-#{@clip.id}"}
+        data-action="toggle"
+      >
+        ⏯️
+      </button>
+
+      <input
+        id={"scrub-#{@clip.id}"}
+        type="range"
+        min="0"
+        step="1"
+      />
+
+      <span
+        id={"frame-display-#{@clip.id}"}
+      >
+        Frame: 0
+      </span>
+    </div>
+  </div>
+  """
+end
 
   # ------------------------------------------------------------------------
   # private helpers

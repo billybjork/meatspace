@@ -1,31 +1,40 @@
 <%= if @page_state == :empty do %>
   <%# --- EMPTY STATE --- %>
-  <div class="relative flex flex-col items-center justify-center h-screen text-center">
-    <div class="absolute top-4 left-4">
+  <div>
+    <div>
       <button
         phx-click="undo"
         disabled={@history == []}
-        class="px-3 py-1 rounded text-2xl font-semibold text-gray-700 hover:text-gray-900 hover:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed disabled:hover:bg-transparent"
         aria-label="Go back to previous clip"
         title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
         ⬅️
       </button>
     </div>
-    <h2 class="text-2xl font-semibold">All clips reviewed!</h2>
-    <p class="text-gray-600 mt-2">Check back later for more.</p>
+
+    <h2>
+      All clips reviewed!
+    </h2>
+
+    <p>
+      Check back later for more.
+    </p>
   </div>
 <% else %>
   <%# --- REVIEWING STATE --- %>
   <%= if @future != [] do %>
-    <link rel="preload"
-          as="image"
-          href={@future |> List.first() |> sprite_url()} />
+    <link
+      rel="preload"
+      as="image"
+      href={@future |> List.first() |> sprite_url()} />
   <% end %>
 
-  <div class="p-4 space-y-4">
-    <div class="space-y-4">
-      <.sprite_player clip={@current} />
-      <.review_buttons clip={@current} history={@history} />
+  <div>
+    <div>
+      <.sprite_player
+        clip={@current} />
+      <.review_buttons
+        clip={@current}
+        history={@history} />
     </div>
   </div>
 <% end %>

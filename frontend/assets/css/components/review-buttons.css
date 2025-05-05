@@ -1,0 +1,46 @@
+/* components/review-buttons.css */
+.review-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 1rem;            /* replaces space-x-4 */
+    margin: 0 auto;       /* replaces mx-auto */
+}
+
+.review-buttons__undo,
+.review-buttons__action {
+    padding: 0.25rem 0.75rem;   /* px-3 py-1 */
+    border-radius: 0.25rem;     /* rounded */
+    font-weight: 600;           /* font-semibold */
+}
+
+.review-buttons__undo {
+    font-size: 1.5rem;          /* text-2xl */
+    color: #4a5568;             /* text-gray-700 */
+}
+.review-buttons__undo:hover {
+    color: #1a202c;             /* text-gray-900 */
+    background-color: #edf2f7;  /* bg-gray-200 */
+}
+.review-buttons__undo:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Approve / Skip / Archive / Merge share common styles... */
+.review-buttons__action {
+    background: none;
+    color: black;
+}
+/* .review-buttons__action:hover {
+    /* override per action via modifier class or data-action attribute */
+/*} */
+
+.review-buttons__action--approve:hover { background-color: #48bb78; }
+.review-buttons__action--skip:hover    { background-color: #a0aec0; }
+.review-buttons__action--archive:hover { background-color: #f56565; }
+.review-buttons__action--merge:hover   { background-color: #9f7aea; }
+.review-buttons__action:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}  
