@@ -6,6 +6,8 @@ import os
 import time
 import logging
 from typing import List, Tuple, Dict, Any, Optional
+from pathlib import Path
+from dotenv import load_dotenv
 
 import psycopg2
 from psycopg2 import sql, pool
@@ -18,16 +20,21 @@ from prefect import get_run_logger
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
 
-# Get Application DB URL from environment (set by docker-compose)
-APP_DATABASE_URL = os.getenv("APP_DATABASE_URL")
+# Load .env from project root so DATABASE_URL is available here
+project_root = Path(__file__).resolve().parents[2]
+load_dotenv(project_root / ".env")
+
+# Get Application DB URL from environment (set by docker-compose or .env)
+DATABASE_URL = os.getenv("DATABASE_URL")
+logging.getLogger().info(f"[sync_db] env DATABASE_URL = {DATABASE_URL!r}")
 
 # --- Pool Configuration ---
 # Using ThreadedConnectionPool, suitable for multi-threaded Prefect workers
 db_pool: Optional[pool.ThreadedConnectionPool] = None
 # Allow configuring pool size via env vars, maybe rename for clarity vs asyncpg pool
-MIN_POOL_CONN = int(os.getenv("PSYCOPG2_MIN_POOL", 2)) # Example rename
+MIN_POOL_CONN = int(os.getenv("PSYCOPG2_MIN_POOL", 2))  # Example rename
 MAX_POOL_CONN = int(os.getenv("PSYCOPG2_MAX_POOL", 10)) # Example rename
-_pool_initialized = False # Flag to prevent redundant init attempts
+_pool_initialized = False  # Flag to prevent redundant init attempts
 
 
 # ─────────────────────────────────────────── Pool Management ───────────────────────────────────────────
@@ -40,22 +47,22 @@ def initialize_db_pool() -> None:
         return
 
     # Check DATABASE_URL (only needs to happen once)
-    if not APP_DATABASE_URL:
-        log.critical("FATAL ERROR: APP_DATABASE_URL environment variable not set for db_utils (psycopg2).")
-        raise RuntimeError("APP_DATABASE_URL missing for sync pool initialization")
+    if not DATABASE_URL:
+        log.critical("FATAL ERROR: DATABASE_URL environment variable not set for db_utils (psycopg2).")
+        raise RuntimeError("DATABASE_URL missing for sync pool initialization")
 
     # Check again using the flag (more robust than checking db_pool directly for None in threaded env)
     if _pool_initialized:
         return
 
     # Attempt to initialize
-    log_url = APP_DATABASE_URL.split('@')[-1] # Avoid logging password
+    log_url = DATABASE_URL.split('@')[-1] # Avoid logging password
     log.info(f"Creating psycopg2 ThreadedConnectionPool for APPLICATION DB ({log_url})... (Min: {MIN_POOL_CONN}, Max: {MAX_POOL_CONN})")
     try:
         db_pool = psycopg2.pool.ThreadedConnectionPool(
             MIN_POOL_CONN,
             MAX_POOL_CONN,
-            dsn=APP_DATABASE_URL # Connect to the application DB
+            dsn=DATABASE_URL # Connect to the application DB
             # Consider adding application_name for easier PG monitoring:
             # application_name="prefect_worker"
         )

@@ -6,25 +6,30 @@ import logging
 import os
 from typing import AsyncGenerator, Optional
 from contextlib import asynccontextmanager
+from pathlib import Path
+from dotenv import load_dotenv
 
 import asyncpg
 
 # --- Configuration ---
 # Use standard logging
 log = logging.getLogger(__name__)
-logging.basicConfig(level=logging.INFO) # Adjust level as needed
+logging.basicConfig(level=logging.INFO)  # Adjust level as needed
 
-# Get Application DB URL from environment (set by docker-compose)
-APP_DATABASE_URL = os.getenv("APP_DATABASE_URL")
+# Load .env from project root so DATABASE_URL is available here
+project_root = Path(__file__).resolve().parents[2]
+load_dotenv(project_root / ".env")
+
+# Get Application DB URL from environment (set by docker-compose or .env)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Define pool size constants (can also get from os.getenv if preferred)
 MIN_POOL_SIZE = int(os.getenv("MIN_POOL_SIZE", 1))
 MAX_POOL_SIZE = int(os.getenv("MAX_POOL_SIZE", 10))
 
-
 # --- Internal State ---
-_pool: asyncpg.Pool | None = None # Module-level variable for the pool
-_pool_lock = asyncio.Lock() # Lock to prevent race conditions during pool creation
+_pool: asyncpg.Pool | None = None  # Module-level variable for the pool
+_pool_lock = asyncio.Lock()        # Lock to prevent race conditions during pool creation
 
 
 # --- Initialization for new connections ---
@@ -69,15 +74,15 @@ async def get_db_pool() -> asyncpg.Pool:
             return _pool
 
         # Proceed with pool creation
-        if not APP_DATABASE_URL:
-            log.critical("FATAL ERROR: APP_DATABASE_URL environment variable not set.")
-            raise RuntimeError("APP_DATABASE_URL not configured.")
+        if not DATABASE_URL:
+            log.critical("FATAL ERROR: DATABASE_URL environment variable not set.")
+            raise RuntimeError("DATABASE_URL not configured.")
 
-        log_url = APP_DATABASE_URL.split('@')[-1] # Avoid logging password
+        log_url = DATABASE_URL.split('@')[-1] # Avoid logging password
         log.info(f"Creating asyncpg pool for APPLICATION DB ({log_url})... (Min: {MIN_POOL_SIZE}, Max: {MAX_POOL_SIZE})")
         try:
             _pool = await asyncpg.create_pool(
-                dsn=APP_DATABASE_URL,
+                dsn=DATABASE_URL,
                 min_size=MIN_POOL_SIZE,
                 max_size=MAX_POOL_SIZE,
                 init=_init_connection # Setup codecs for every new connection
@@ -168,10 +173,10 @@ async def _test_connection():
 
 if __name__ == "__main__":
     # This allows running python backend/database.py to test connection
-    # Make sure APP_DATABASE_URL is set in your environment if running directly
-    if not APP_DATABASE_URL:
-         print("Error: APP_DATABASE_URL environment variable is not set.")
+    # Make sure DATABASE_URL is set in your environment if running directly
+    if not DATABASE_URL:
+         print("Error: DATABASE_URL environment variable is not set.")
          print("Please set it before running this script directly for testing.")
-         # Example: export APP_DATABASE_URL='postgresql://user:pass@host:port/db'
+         # Example: export DATABASE_URL='postgresql://user:pass@host:port/db'
     else:
         asyncio.run(_test_connection())

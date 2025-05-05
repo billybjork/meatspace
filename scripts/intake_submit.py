@@ -7,32 +7,31 @@ import importlib.util
 import psycopg2
 from dotenv import load_dotenv
 
-# Determine repository and backend roots
+# Determine project root (two levels up from this script)
 repo_root = Path(__file__).resolve().parent.parent
-backend_root = repo_root / 'backend'
 
-# Load .env from repo root
-dotenv_path = repo_root / '.env'
+nested = repo_root / "backend"
+backend_root = nested if nested.is_dir() else repo_root
+
+# Load .env (optional; env_file in Docker Compose should also provide vars)
+dotenv_path = repo_root / ".env"
 if dotenv_path.exists():
     load_dotenv(dotenv_path=dotenv_path)
     print(f"Loaded environment variables from: {dotenv_path}")
 else:
-    print(f"Warning: .env file not found at {dotenv_path}. Attempting to load from current environment.")
-    load_dotenv()
+    print(f"Warning: .env file not found at {dotenv_path}. Relying on existing environment.")
 
-# Check for required env variable
-APP_DATABASE_URL = os.getenv("APP_DATABASE_URL")
-if not APP_DATABASE_URL:
-    print("ERROR: APP_DATABASE_URL environment variable not found.")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    print("ERROR: DATABASE_URL environment variable not found.")
     sys.exit(1)
 
-# Dynamically load the intake task module to avoid import path issues
-intake_file = backend_root / 'tasks' / 'intake.py'
+intake_file = backend_root / "tasks" / "intake.py"
 if not intake_file.exists():
     print(f"ERROR: intake.py not found at {intake_file}")
     sys.exit(1)
 
-spec = importlib.util.spec_from_file_location('backend.tasks.intake', str(intake_file))
+spec = importlib.util.spec_from_file_location("tasks.intake", str(intake_file))
 intake_mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(intake_mod)
 
@@ -60,7 +59,7 @@ def create_new_source_video_record(input_url_or_path: str, initial_title: str = 
     print(f"Setting web_scraped: {web_scraped_flag}")
 
     try:
-        conn = psycopg2.connect(APP_DATABASE_URL)
+        conn = psycopg2.connect(DATABASE_URL)
         with conn.cursor() as cur:
             cur.execute(
                 """

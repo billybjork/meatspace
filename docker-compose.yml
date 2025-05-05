@@ -78,6 +78,8 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    env_file:
+      -  .env
     container_name: backend-worker
     restart: unless-stopped
     depends_on:
@@ -89,7 +91,7 @@ services:
         condition: service_healthy
     environment:
       PREFECT_API_URL:      ${PREFECT_API_URL}
-      APP_DATABASE_URL:     "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
+      DATABASE_URL:     "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
       S3_BUCKET_NAME:       ${S3_BUCKET_NAME}
       AWS_REGION:           ${AWS_REGION}
       AWS_ACCESS_KEY_ID:    ${AWS_ACCESS_KEY_ID}
