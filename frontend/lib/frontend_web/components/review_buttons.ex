@@ -38,8 +38,19 @@ defmodule FrontendWeb.ReviewButtons do
       <button
         phx-click="select"
         phx-value-action="merge"
-        disabled={@history == []}>
-        🔀 Merge (with previous)
+        disabled={@history == []}
+        title={if @history == [], do: "No previous clip to merge with",
+                                   else: "Merge with previous clip"}>
+        🔗 Merge (with previous)
+      </button>
+
+      <button
+        phx-click="select"
+        phx-value-action="group"
+        disabled={@history == []}
+        title={if @history == [], do: "No previous clip to group with",
+                                   else: "Group with previous clip"}>
+        🖇️ Group (with previous)
       </button>
     </div>
     """

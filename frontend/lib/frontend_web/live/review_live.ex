@@ -51,6 +51,7 @@ defmodule FrontendWeb.ReviewLive do
   # -------------------------------------------------------------------------
 
   @impl true
+  # merge action
   def handle_event("select", %{"action" => "merge"},
                    %{assigns: %{current: curr, history: [prev | _]}} = socket) do
     socket =
@@ -63,7 +64,22 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   @impl true
-  def handle_event("select", %{"action" => action}, %{assigns: %{current: clip}} = socket) do
+  # group action
+  def handle_event("select", %{"action" => "group"},
+                  %{assigns: %{current: curr, history: [prev | _]}} = socket) do
+    socket =
+      socket
+      |> push_history(curr)
+      |> advance_queue()
+      |> refill_future()
+
+    {:noreply, persist_async(socket, {:group, prev, curr})}
+  end
+
+  @impl true
+  # any other select action (e.g. "flag", etc.)
+  def handle_event("select", %{"action" => action}, %{assigns: %{current: clip}} = socket)
+      when action not in ["merge", "group"] do
     socket =
       socket
       |> push_history(clip)
@@ -71,6 +87,13 @@ defmodule FrontendWeb.ReviewLive do
       |> refill_future()
 
     {:noreply, persist_async(socket, clip.id, action)}
+  end
+
+  # ignore merge and group actions if history is empty (extra protection beyond disabled buttons)
+  @impl true
+  def handle_event("select", %{"action" => action}, %{assigns: %{history: []}} = socket)
+      when action in ["merge", "group"] do
+    {:noreply, socket}
   end
 
   @impl true
@@ -100,6 +123,12 @@ defmodule FrontendWeb.ReviewLive do
   defp persist_async(socket, {:merge, prev, curr}) do
     Phoenix.LiveView.start_async(socket, {:merge_pair, {prev.id, curr.id}}, fn ->
       Clips.request_merge_and_fetch_next(prev, curr)
+    end)
+  end
+
+  defp persist_async(socket, {:group, prev, curr}) do
+    Phoenix.LiveView.start_async(socket, {:group_pair, {prev.id, curr.id}}, fn ->
+      Clips.request_group_and_fetch_next(prev, curr)
     end)
   end
 
@@ -154,8 +183,7 @@ defmodule FrontendWeb.ReviewLive do
   # -------------------------------------------------------------------------
 
   @impl true
-  def handle_async({:persist, _}, {:ok, _}, socket), do: {:noreply, socket}
-
+  def handle_async({:persist, _}, {:ok, _}, socket),   do: {:noreply, socket}
   @impl true
   def handle_async({:persist, clip_id}, {:exit, reason}, socket) do
     require Logger
@@ -164,12 +192,20 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   @impl true
-  def handle_async({:merge_pair, _}, {:ok, _}, socket), do: {:noreply, socket}
-
+  def handle_async({:merge_pair, _}, {:ok, _}, socket),   do: {:noreply, socket}
   @impl true
   def handle_async({:merge_pair, {prev_id, curr_id}}, {:exit, reason}, socket) do
     require Logger
     Logger.error("Merge #{prev_id}→#{curr_id} crashed: #{inspect(reason)}")
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_async({:group_pair, _}, {:ok, _}, socket),   do: {:noreply, socket}
+  @impl true
+  def handle_async({:group_pair, {prev_id, curr_id}}, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("Group #{prev_id}→#{curr_id} crashed: #{inspect(reason)}")
     {:noreply, socket}
   end
 end

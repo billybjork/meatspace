@@ -10,7 +10,6 @@
     COPY assets/js     ./js
     COPY assets/css    ./css
     COPY assets/postcss.config.js ./postcss.config.js
-    COPY assets/tailwind.config.js ./tailwind.config.js
     
     # Ensure output dir exists (esbuild deploy writes to ../priv/static/assets)
     RUN mkdir -p ../priv/static/assets

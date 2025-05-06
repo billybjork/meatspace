@@ -4,6 +4,7 @@ from pathlib import Path
 import traceback
 import time
 import psycopg2
+import psycopg2.extras
 from datetime import timedelta, timezone
 
 # --- Project Root Setup ---
@@ -69,119 +70,173 @@ ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet"
 # =============================================================================
 # ===                        COMMIT WORKER LOGIC                            ===
 # =============================================================================
-
 def _commit_pending_review_actions(grace_period_seconds: int):
     """
-    Finds logged review actions older than the grace period, checks for undos,
-    and updates the clips table state accordingly. Runs synchronously.
-    Returns the number of clips successfully committed.
+    Find the newest ‘selected_*’ event for every clip that is still in
+    ‘pending_review’, has survived the grace period and was *not* undone,
+    then atomically:
+
+      • (for grouping) populate grouped_with_clip_id
+      • move the clip to its post‑review ingest_state
+      • stamp action_committed_at
     """
     logger = get_run_logger()
+
     if grace_period_seconds <= 0:
-        logger.debug("Commit grace period is zero or negative, skipping review action commits.")
+        logger.debug("Commit grace period ≤ 0 – skipping.")
         return 0
 
     committed_count = 0
     conn = None
     try:
+        # RealDictCursor → rows behave like dicts
         conn = get_db_connection(cursor_factory=psycopg2.extras.RealDictCursor)
-        with conn: # Use transaction
-            with conn.cursor() as cur:
-                # Find the latest 'selected_*' action for each clip still in 'pending_review'
-                # that is older than the grace period and has not been undone since.
-                find_sql = """
-                WITH LatestSelectedAction AS (
-                    SELECT
-                        clip_id,
-                        action,
-                        created_at,
-                        id as event_id,
-                        ROW_NUMBER() OVER (PARTITION BY clip_id ORDER BY created_at DESC) as rn
-                    FROM clip_events
-                    WHERE action LIKE 'selected_%%' -- Consider only initial selections
-                      AND action <> 'selected_undo' -- Explicitly exclude selections of undo itself if logged that way
-                )
-                SELECT
-                    lsa.clip_id,
-                    lsa.action,
-                    lsa.created_at AS action_time
-                FROM LatestSelectedAction lsa
-                JOIN clips c ON lsa.clip_id = c.id
-                WHERE lsa.rn = 1                         -- Latest selected action
-                  AND c.ingest_state = 'pending_review'  -- Clip must still be pending
-                  AND lsa.created_at < (NOW() - interval '%s seconds') -- Grace period passed
-                  AND NOT EXISTS (                       -- Check no subsequent UNDO event exists
-                      SELECT 1
-                      FROM clip_events undo_e
-                      WHERE undo_e.clip_id = lsa.clip_id
-                        AND undo_e.action = 'undo'
-                        AND undo_e.created_at > lsa.created_at
-                  )
-                ORDER BY lsa.created_at ASC; -- Process oldest first
-                """
-                cur.execute(find_sql, (grace_period_seconds,))
-                committable_actions = cur.fetchall()
 
-                if not committable_actions:
+        with conn:                              # outer TX
+            with conn.cursor() as cur:
+
+                # 1) newest selected_* event per clip that’s ready to commit
+                find_sql = """
+                WITH latest AS (
+                  SELECT  ce.clip_id,
+                          ce.action,
+                          ce.created_at,
+                          ce.event_data,
+                          ROW_NUMBER() OVER (PARTITION BY ce.clip_id
+                                             ORDER BY ce.created_at DESC) AS rn
+                  FROM    clip_events ce
+                  WHERE   ce.action LIKE 'selected_%%'
+                    AND   ce.action <> 'selected_undo'
+                )
+                SELECT  l.clip_id,
+                        l.action,
+                        l.event_data,
+                        l.created_at AS action_time
+                FROM    latest l
+                JOIN    clips  c ON c.id = l.clip_id
+                WHERE   l.rn = 1
+                  AND   c.ingest_state = 'pending_review'
+                  AND   l.created_at < (NOW() - INTERVAL %s)
+                  AND   NOT EXISTS (
+                         SELECT 1
+                         FROM   clip_events u
+                         WHERE  u.clip_id = l.clip_id
+                           AND  u.action  = 'selected_undo'
+                           AND  u.created_at > l.created_at )
+                ORDER BY l.created_at;
+                """
+                cur.execute(find_sql, (f'{grace_period_seconds} seconds',))
+                actions = cur.fetchall()
+
+                if not actions:
                     logger.debug("No review actions ready for commit.")
                     return 0
 
-                logger.info(f"Found {len(committable_actions)} review actions ready for commit.")
+                logger.info(f"Committing {len(actions)} clip actions…")
 
-                update_sql = """
-                    UPDATE clips
-                    SET ingest_state = %s,
-                        action_committed_at = NOW(), -- Record commit time
-                        updated_at = NOW()
-                    WHERE id = %s
-                      AND ingest_state = 'pending_review'; -- Concurrency check
-                """
-
-                for action_info in committable_actions:
-                    clip_id = action_info['clip_id']
-                    action = action_info['action'] # e.g., 'selected_approve'
+                # 2) process each clip in turn
+                for row in actions:
+                    clip_id    = row["clip_id"]
+                    action     = row["action"]
+                    event_data = row.get("event_data") or {}
                     target_state = None
 
-                    if action == 'selected_approve':
-                        target_state = 'review_approved'
-                    elif action == 'selected_skip':
-                        target_state = 'skipped' # Assuming skip is final
-                    elif action == 'selected_archive':
-                        target_state = 'archived_pending_deletion' # Goes to cleanup flow
-                    elif action == 'selected_merge_target':
-                        target_state = 'pending_merge_target'
-                    elif action == 'selected_merge_source':
-                        target_state = 'marked_for_merge_into_previous'
-                    # Add mappings for merge/split triggers if needed
-                    # elif action == 'selected_request_split': target_state = 'pending_split' # Example
-
-                    if target_state:
-                        try:
-                            cur.execute(update_sql, (target_state, clip_id, ))
-                            if cur.rowcount == 1:
-                                logger.info(f"Committed clip {clip_id}: '{action}' -> '{target_state}'.")
-                                committed_count += 1
-                                # Optionally log a 'committed_...' event here using the same cursor 'cur'
-                                # insert_clip_event(clip_id, f"committed_{action.split('_')[-1]}", 'commit_worker', cur=cur)
-                            else:
-                                logger.warning(f"Commit failed for clip {clip_id} action '{action}'. State likely changed concurrently (Expected 'pending_review', got {cur.rowcount} updates).")
-                        except Exception as update_err:
-                             logger.error(f"Error committing action '{action}' for clip {clip_id}: {update_err}", exc_info=True)
-                             conn.rollback() # Rollback this specific update attempt if needed, though outer transaction might handle it
-                             # Decide whether to continue processing others or raise error
+                    # ---------- mapping UI action → ingest_state --------------
+                    if   action == "selected_approve":
+                        target_state = "review_approved"
+                    elif action == "selected_skip":
+                        target_state = "skipped"
+                    elif action == "selected_archive":
+                        target_state = "archived_pending_deletion"
+                    elif action == "selected_merge_source":
+                        target_state = "marked_for_merge_into_previous"
+                    elif action == "selected_group_source":
+                        target_state = "review_approved"
+                    elif action == "selected_merge_target":
+                        target_state = "pending_merge_target"
                     else:
-                        logger.warning(f"No target state mapping found for action '{action}' on clip {clip_id}. Skipping commit.")
+                        logger.warning(f"[Clip {clip_id}] Unknown action '{action}'.")
+                        continue
 
-                # Transaction commits automatically via 'with conn:' if no errors caused rollback/exception
+                    # ----------- one inner TX per clip ------------------------
+                    try:
+                        with conn.cursor() as tx:
+
+                            # 2.a  write grouped_with_clip_id if grouping
+                            if action == "selected_group_source":
+                                group_target_id = None
+
+                                # prefer payload captured when event logged
+                                if "group_with_clip_id" in event_data:
+                                    group_target_id = int(event_data["group_with_clip_id"])
+
+                                # fallback for very old events (no payload)
+                                if not group_target_id:
+                                    tx.execute(
+                                        """
+                                        SELECT event_data ->> 'group_with_clip_id'
+                                        FROM   clip_events
+                                        WHERE  clip_id = %s
+                                          AND  action  = 'selected_group_source'
+                                        ORDER  BY created_at DESC
+                                        LIMIT  1;
+                                        """,
+                                        (clip_id,),
+                                    )
+                                    res = tx.fetchone()
+                                    if res and res[0]:
+                                        group_target_id = int(res[0])
+
+                                if group_target_id:
+                                    tx.execute(
+                                        """
+                                        UPDATE clips
+                                        SET    grouped_with_clip_id = %s
+                                        WHERE  id = %s;
+                                        """,
+                                        (group_target_id, clip_id),
+                                    )
+                                else:
+                                    logger.warning(
+                                        f"[Clip {clip_id}] Group requested but "
+                                        "no target id found – leaving grouped_with_clip_id NULL."
+                                    )
+
+                            # 2.b  set new ingest_state + action_committed_at
+                            tx.execute(
+                                """
+                                UPDATE clips
+                                SET    ingest_state        = %s,
+                                       action_committed_at = NOW(),
+                                       updated_at          = NOW()
+                                WHERE  id = %s
+                                  AND  ingest_state = 'pending_review';
+                                """,
+                                (target_state, clip_id),
+                            )
+
+                            if tx.rowcount == 1:
+                                committed_count += 1
+                                logger.info(
+                                    f"[Clip {clip_id}] '{action}' → '{target_state}' committed."
+                                )
+                            else:
+                                logger.warning(
+                                    f"[Clip {clip_id}] ingest_state changed concurrently; "
+                                    "commit skipped."
+                                )
+
+                    except Exception as e:
+                        logger.error(f"[Clip {clip_id}] commit failed: {e}", exc_info=True)
+                        # keep looping
 
     except (Exception, psycopg2.Error) as db_err:
-        logger.error(f"Error during commit worker DB operations: {db_err}", exc_info=True)
-        # No count returned on error
+        logger.error(f"Commit‑worker DB error: {db_err}", exc_info=True)
     finally:
         if conn:
             release_db_connection(conn)
 
-    logger.info(f"Finished review action commit step. Committed {committed_count} clip(s).")
+    logger.info(f"Finished commit step. Committed {committed_count} clip(s).")
     return committed_count
 
 
@@ -368,53 +423,234 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
 # =============================================================================
 # ===                  CLEANUP FLOW                                         ===
 # =============================================================================
+
 @flow(name="Scheduled Clip Cleanup", log_prints=True)
-async def cleanup_reviewed_clips_flow(cleanup_delay_minutes: int = CLIP_CLEANUP_DELAY_MINUTES):
+async def cleanup_reviewed_clips_flow(
+    cleanup_delay_minutes: int = CLIP_CLEANUP_DELAY_MINUTES,
+):
     """ (Code remains identical to previous version) """
-    logger = get_run_logger(); logger.info(f"FLOW: Running Scheduled Clip Cleanup (Delay: {cleanup_delay_minutes} mins)...")
-    if not S3_CONFIGURED or not s3_client: logger.error("S3 Client/Config not available."); return
-    if not ASYNC_DB_CONFIGURED or connect_db is None: logger.error("Async DB not configured."); return
-    pool, conn = None, None; processed_count, s3_deleted_count, db_artifact_deleted_count, db_clip_updated_count, error_count = 0, 0, 0, 0, 0
+    logger = get_run_logger()
+    logger.info(
+        f"FLOW: Running Scheduled Clip Cleanup (Delay: {cleanup_delay_minutes} mins)..."
+    )
+
+    # Validate configurations
+    if not S3_CONFIGURED or not s3_client:
+        logger.error("S3 Client/Config not available.")
+        return
+
+    if not ASYNC_DB_CONFIGURED or connect_db is None:
+        logger.error("Async DB not configured.")
+        return
+
+    # Initialize counters and connections
+    pool = None
+    conn = None
+    processed_count = 0
+    s3_deleted_count = 0
+    db_artifact_deleted_count = 0
+    db_clip_updated_count = 0
+    error_count = 0
+
     try:
         pool = await connect_db()
-        if not pool: logger.error("Failed to get asyncpg pool."); return
+        if not pool:
+            logger.error("Failed to get asyncpg pool.")
+            return
+
         async with pool.acquire() as conn:
             logger.info("Acquired asyncpg connection.")
+
+            # Fetch clips ready for cleanup
             delay_interval = timedelta(minutes=cleanup_delay_minutes)
-            pending_states = ['approved_pending_deletion', 'archived_pending_deletion']
-            query_clips = """SELECT id, ingest_state FROM clips WHERE ingest_state = ANY($1::text[]) AND action_committed_at IS NOT NULL AND action_committed_at < (NOW() - $2::INTERVAL) ORDER BY id ASC;"""
-            clips_to_cleanup = await conn.fetch(query_clips, pending_states, delay_interval)
-            processed_count = len(clips_to_cleanup); logger.info(f"Found {processed_count} clips ready for cleanup.")
-            if not clips_to_cleanup: logger.info("No clips require cleanup."); return
+            pending_states = [
+                "approved_pending_deletion",
+                "archived_pending_deletion",
+            ]
+            query_clips = """
+            SELECT id, ingest_state
+              FROM clips
+             WHERE ingest_state = ANY($1::text[])
+               AND action_committed_at IS NOT NULL
+               AND action_committed_at < (NOW() - $2::INTERVAL)
+             ORDER BY id ASC;
+            """
+
+            clips_to_cleanup = await conn.fetch(
+                query_clips, pending_states, delay_interval
+            )
+            processed_count = len(clips_to_cleanup)
+            logger.info(f"Found {processed_count} clips ready for cleanup.")
+
+            if not clips_to_cleanup:
+                logger.info("No clips require cleanup.")
+                return
+
             for clip_record in clips_to_cleanup:
-                clip_id = clip_record['id']; current_state = clip_record['ingest_state']; log_prefix = f"[Cleanup Clip {clip_id}]"; logger.info(f"{log_prefix} Processing state: {current_state}")
-                sprite_artifact_s3_key, s3_deletion_successful = None, False
+                clip_id = clip_record["id"]
+                current_state = clip_record["ingest_state"]
+                log_prefix = f"[Cleanup Clip {clip_id}]"
+                logger.info(f"{log_prefix} Processing state: {current_state}")
+
+                sprite_artifact_s3_key = None
+                s3_deletion_successful = False
+
                 try:
-                    query_artifact = """SELECT s3_key FROM clip_artifacts WHERE clip_id = $1 AND artifact_type = $2 LIMIT 1;"""
-                    artifact_record = await conn.fetchrow(query_artifact, clip_id, ARTIFACT_TYPE_SPRITE_SHEET)
-                    if artifact_record: sprite_artifact_s3_key = artifact_record['s3_key']
-                    else: logger.warning(f"{log_prefix} No sprite artifact found."); s3_deletion_successful = True
+                    # Retrieve sprite artifact key
+                    artifact_query = """
+                    SELECT s3_key
+                      FROM clip_artifacts
+                     WHERE clip_id = $1
+                       AND artifact_type = $2
+                     LIMIT 1;
+                    """
+                    artifact_record = await conn.fetchrow(
+                        artifact_query, clip_id, ARTIFACT_TYPE_SPRITE_SHEET
+                    )
+                    if artifact_record:
+                        sprite_artifact_s3_key = artifact_record["s3_key"]
+                    else:
+                        logger.warning(f"{log_prefix} No sprite artifact found.")
+                        s3_deletion_successful = True
+
+                    # Delete from S3 if key exists
                     if sprite_artifact_s3_key:
-                        if not S3_BUCKET_NAME: logger.error(f"{log_prefix} S3_BUCKET_NAME missing."); s3_deletion_successful = False; error_count += 1
+                        if not S3_BUCKET_NAME:
+                            logger.error(f"{log_prefix} S3_BUCKET_NAME missing.")
+                            error_count += 1
                         else:
-                            try: s3_client.delete_object(Bucket=S3_BUCKET_NAME, Key=sprite_artifact_s3_key); logger.info(f"{log_prefix} Deleted S3 object."); s3_deletion_successful = True; s3_deleted_count += 1
-                            except ClientError as e: error_code = e.response.get('Error', {}).get('Code', 'Unknown'); logger.warning(f"{log_prefix} S3 object not found (NoSuchKey).") if error_code == 'NoSuchKey' else logger.error(f"{log_prefix} Failed S3 delete: {e} (Code: {error_code})"); s3_deletion_successful = error_code == 'NoSuchKey'; error_count += 0 if s3_deletion_successful else 1
-                            except Exception as e: logger.error(f"{log_prefix} Unexpected S3 error: {e}", exc_info=True); error_count += 1; s3_deletion_successful = False
+                            try:
+                                s3_client.delete_object(
+                                    Bucket=S3_BUCKET_NAME,
+                                    Key=sprite_artifact_s3_key,
+                                )
+                                logger.info(f"{log_prefix} Deleted S3 object.")
+                                s3_deletion_successful = True
+                                s3_deleted_count += 1
+
+                            except ClientError as e:
+                                error_code = (
+                                    e.response.get("Error", {}).get("Code", "Unknown")
+                                )
+                                if error_code == "NoSuchKey":
+                                    logger.warning(
+                                        f"{log_prefix} S3 object not found (NoSuchKey)."
+                                    )
+                                    s3_deletion_successful = True
+                                else:
+                                    logger.error(
+                                        f"{log_prefix} Failed S3 delete: {e} (Code: {error_code})"
+                                    )
+                                if not s3_deletion_successful:
+                                    error_count += 1
+
+                            except Exception as e:
+                                logger.error(
+                                    f"{log_prefix} Unexpected S3 error: {e}",
+                                    exc_info=True,
+                                )
+                                error_count += 1
+
+                    # Proceed with DB updates if S3 deletion succeeded
                     if s3_deletion_successful:
-                        final_state_map = {'approved_pending_deletion': 'review_approved', 'archived_pending_deletion': 'archived'}; final_clip_state = final_state_map.get(current_state)
-                        if not final_clip_state: logger.error(f"{log_prefix} Unexpected state '{current_state}'."); error_count += 1; continue
+                        final_state_map = {
+                            "approved_pending_deletion": "review_approved",
+                            "archived_pending_deletion": "archived",
+                        }
+                        final_clip_state = final_state_map.get(current_state)
+                        if not final_clip_state:
+                            logger.error(
+                                f"{log_prefix} Unexpected state '{current_state}'."
+                            )
+                            error_count += 1
+                            continue
+
                         try:
                             async with conn.transaction():
-                                if sprite_artifact_s3_key: delete_artifact_sql = """DELETE FROM clip_artifacts WHERE clip_id = $1 AND artifact_type = $2;"""; del_res = await conn.execute(delete_artifact_sql, clip_id, ARTIFACT_TYPE_SPRITE_SHEET); db_artifact_deleted_count += int(del_res.split()[-1]) if del_res and del_res.startswith("DELETE") else 0
-                                update_clip_sql = """UPDATE clips SET ingest_state=$1, updated_at=NOW(), action_committed_at=NULL, last_error=NULL WHERE id=$2 AND ingest_state=$3;"""
-                                upd_res = await conn.execute(update_clip_sql, final_clip_state, clip_id, current_state)
-                                if upd_res == "UPDATE 1": logger.info(f"{log_prefix} Updated state to '{final_clip_state}'."); db_clip_updated_count += 1
-                                else: raise RuntimeError(f"Clip update affected {upd_res} rows")
-                        except Exception as tx_err: logger.error(f"{log_prefix} DB TX failed: {tx_err}", exc_info=True); error_count += 1
-                    else: logger.warning(f"{log_prefix} Skipping DB updates due to S3 fail.")
-                except Exception as inner_err: logger.error(f"{log_prefix} Error processing: {inner_err}", exc_info=True); error_count += 1
-    except Exception as outer_err: logger.error(f"FATAL Error during cleanup flow: {outer_err}", exc_info=True); error_count += 1
+                                # Delete artifact record
+                                if sprite_artifact_s3_key:
+                                    delete_artifact_sql = """
+                                    DELETE FROM clip_artifacts
+                                     WHERE clip_id = $1
+                                       AND artifact_type = $2;
+                                    """
+                                    del_res = await conn.execute(
+                                        delete_artifact_sql,
+                                        clip_id,
+                                        ARTIFACT_TYPE_SPRITE_SHEET,
+                                    )
+                                    deleted = (
+                                        int(del_res.split()[-1])
+                                        if del_res.startswith("DELETE")
+                                        else 0
+                                    )
+                                    db_artifact_deleted_count += deleted
+
+                                # Update clip state
+                                update_clip_sql = """
+                                UPDATE clips
+                                   SET ingest_state = $1,
+                                       updated_at = NOW(),
+                                       action_committed_at = NULL,
+                                       last_error = NULL
+                                 WHERE id = $2
+                                   AND ingest_state = $3;
+                                """
+                                upd_res = await conn.execute(
+                                    update_clip_sql,
+                                    final_clip_state,
+                                    clip_id,
+                                    current_state,
+                                )
+                                if upd_res == "UPDATE 1":
+                                    logger.info(
+                                        f"{log_prefix} Updated state to '{final_clip_state}'."
+                                    )
+                                    db_clip_updated_count += 1
+                                else:
+                                    raise RuntimeError(
+                                        f"Clip update affected {upd_res} rows"
+                                    )
+
+                        except Exception as tx_err:
+                            logger.error(
+                                f"{log_prefix} DB transaction failed: {tx_err}",
+                                exc_info=True,
+                            )
+                            error_count += 1
+                    else:
+                        logger.warning(
+                            f"{log_prefix} Skipping DB updates due to S3 failure."
+                        )
+
+                except Exception as inner_err:
+                    logger.error(
+                        f"{log_prefix} Error processing clip: {inner_err}",
+                        exc_info=True,
+                    )
+                    error_count += 1
+
+    except Exception as outer_err:
+        logger.error(
+            f"FATAL Error during cleanup flow: {outer_err}", exc_info=True
+        )
+        error_count += 1
+
     finally:
-        if pool and conn: await pool.release(conn); logger.info("Asyncpg connection released.")
-        elif pool and not conn: logger.warning("Asyncpg pool ok but conn acquisition failed.")
-    logger.info(f"FLOW: Cleanup complete. Found:{processed_count}, S3Del:{s3_deleted_count}, DBArtDel:{db_artifact_deleted_count}, DBClipUpd:{db_clip_updated_count}, Errors:{error_count}")
+        if pool and conn:
+            await pool.release(conn)
+            logger.info("Released asyncpg connection.")
+        elif pool:
+            logger.warning(
+                "Asyncpg pool initialized but connection acquisition failed."
+            )
+
+    # Summary
+    logger.info(
+        f"FLOW: Cleanup complete. "
+        f"Found: {processed_count}, "
+        f"S3Deleted: {s3_deleted_count}, "
+        f"DBArtifactsDeleted: {db_artifact_deleted_count}, "
+        f"DBClipsUpdated: {db_clip_updated_count}, "
+        f"Errors: {error_count}"
+    )

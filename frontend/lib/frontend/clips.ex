@@ -25,7 +25,8 @@ defmodule Frontend.Clips do
     "approve" => "selected_approve",
     "skip"    => "selected_skip",
     "archive" => "selected_archive",
-    "undo"    => "selected_undo"
+    "undo"    => "selected_undo",
+    "group"   => "selected_group_source"
   }
 
   # ------------------------------------------------------------------
@@ -190,4 +191,59 @@ defmodule Frontend.Clips do
        %{clip_id_source: curr_id, clip_id_target: prev_id, action: "merge"}}
     end)
   end
+
+  @doc """
+  Log a *group* request between two clips (prev ⇢ curr) and return the
+  next clip to review, just like `request_merge_and_fetch_next/2`.
+  """
+  def request_group_and_fetch_next(%Clip{id: prev_id}, %Clip{id: curr_id}) do
+  reviewer_id = "admin"
+  now         = DateTime.utc_now()
+
+  Repo.transaction(fn ->
+  # ① log the *target* side (pure marker – lets you add per‑group stats later)
+  %ClipEvent{}
+  |> ClipEvent.changeset(%{
+  clip_id:     prev_id,
+  action:      "selected_group_target",
+  reviewer_id: reviewer_id
+  })
+  |> Repo.insert!()
+
+  # ② log the *source* side and keep the relation in event_data
+  %ClipEvent{}
+  |> ClipEvent.changeset(%{
+  clip_id:     curr_id,
+  action:      "selected_group_source",
+  reviewer_id: reviewer_id,
+  event_data:  %{"group_with_clip_id" => prev_id}
+  })
+  |> Repo.insert!()
+
+  # ③ mark **current** clip as reviewed so the UI can advance
+  Repo.update_all(
+  from(c in Clip, where: c.id == ^curr_id),
+  set: [reviewed_at: now]
+  )
+
+  # ④ fetch the next job exactly the same way as merge does
+  next_id =
+  Q.from(c in Clip,
+  where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
+  order_by: c.id,
+  limit: 1,
+  lock: "FOR UPDATE SKIP LOCKED",
+  select: c.id
+  )
+  |> Repo.one()
+
+  next_clip = if next_id, do: load_clip_with_assocs(next_id)
+
+  {next_clip,
+  %{clip_id_source: curr_id,
+  clip_id_target: prev_id,
+  action: "group"}}
+  end)
+  end
+
 end
