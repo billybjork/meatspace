@@ -31,7 +31,7 @@ logging.getLogger().info(f"[sync_db] env DATABASE_URL = {DATABASE_URL!r}")
 # --- Pool Configuration ---
 # Using ThreadedConnectionPool, suitable for multi-threaded Prefect workers
 db_pool: Optional[pool.ThreadedConnectionPool] = None
-# Allow configuring pool size via env vars, maybe rename for clarity vs asyncpg pool
+# TODO: Allow configuring pool size via env vars, maybe rename for clarity vs asyncpg pool
 MIN_POOL_CONN = int(os.getenv("PSYCOPG2_MIN_POOL", 2))  # Example rename
 MAX_POOL_CONN = int(os.getenv("PSYCOPG2_MAX_POOL", 10)) # Example rename
 _pool_initialized = False  # Flag to prevent redundant init attempts

@@ -165,7 +165,7 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                         # Logic for 'grouped_with_clip_id' is handled below before the main update
                     elif action == "selected_merge_target":
                         target_state = "pending_merge_target"
-                    elif action == "selected_split": # NEW ACTION HANDLING
+                    elif action == "selected_split":
                         target_state = "pending_split"
                         split_at_frame_val = event_data.get("split_at_frame")
 

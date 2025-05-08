@@ -1,8 +1,7 @@
-<!-- START OF review_live.html.heex COMPLETE REPLACEMENT -->
 <%= if @page_state == :empty do %>
   <%# --- EMPTY STATE --- %>
   <div>
-    <div class="review-buttons"> <!-- Keep the class for styling -->
+    <div class="review-buttons">
       <button
         phx-click="undo"
         disabled={@history == []}
@@ -31,10 +30,9 @@
   <% end %>
 
   <div class="review-live-container-wrapper"> <!-- Wrapper for layout if needed -->
-    <div> <!-- This was your original inner div -->
+    <div>
       <.sprite_player clip={@current} />
 
-      <%# --- INLINED REVIEW BUTTONS --- %>
       <div class="review-buttons">
         <button
           phx-click="undo"
@@ -83,7 +81,6 @@
           🖇️ Group (with previous)
         </button>
 
-        <%!-- New Split Button --%>
         <button
           phx-click={if @split_mode_active?, do: "split_confirm", else: "split_initiate"}
           disabled={@split_mode_active? && is_nil(@selected_split_frame)}
@@ -102,7 +99,6 @@
           <button phx-click="split_cancel" class="split-cancel-button" title="Cancel Split (Esc)">❌ Cancel</button>
         <% end %>
       </div>
-      <%# --- END OF INLINED REVIEW BUTTONS --- %>
 
     </div>
 
@@ -118,4 +114,3 @@
     <% end %>
   </div>
 <% end %>
-<!-- END OF review_live.html.heex COMPLETE REPLACEMENT -->
