@@ -88,6 +88,7 @@ def _commit_pending_review_actions(grace_period_seconds: int):
     then atomically:
 
       • (for grouping) populate grouped_with_clip_id
+      • (for splitting) populate processing_metadata with split_request_at_frame
       • move the clip to its post‑review ingest_state
       • stamp action_committed_at
     """
@@ -110,7 +111,7 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                   SELECT  ce.clip_id,
                           ce.action,
                           ce.created_at,
-                          ce.event_data,
+                          ce.event_data, -- Ensure event_data is selected
                           ROW_NUMBER() OVER (PARTITION BY ce.clip_id
                                              ORDER BY ce.created_at DESC) AS rn
                   FROM    clip_events ce
@@ -119,7 +120,7 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                 )
                 SELECT  l.clip_id,
                         l.action,
-                        l.event_data,
+                        l.event_data, -- Ensure event_data is selected
                         l.created_at AS action_time
                 FROM    latest l
                 JOIN    clips  c ON c.id = l.clip_id
@@ -146,8 +147,10 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                 for row in actions:
                     clip_id    = row["clip_id"]
                     action     = row["action"]
-                    event_data = row.get("event_data") or {} # Ensure event_data is a dict
+                    # Ensure event_data is a dict, even if NULL/None from DB
+                    event_data = row.get("event_data") or {}
                     target_state = None
+                    processing_metadata_update_payload = None # For actions that need to update this field
 
                     if   action == "selected_approve":
                         target_state = "review_approved"
@@ -159,29 +162,51 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                         target_state = "marked_for_merge_into_previous"
                     elif action == "selected_group_source":
                         target_state = "review_approved" # Grouped clips are also approved
+                        # Logic for 'grouped_with_clip_id' is handled below before the main update
                     elif action == "selected_merge_target":
                         target_state = "pending_merge_target"
+                    elif action == "selected_split": # NEW ACTION HANDLING
+                        target_state = "pending_split"
+                        split_at_frame_val = event_data.get("split_at_frame")
+
+                        if split_at_frame_val is not None:
+                            try:
+                                frame_to_split = int(split_at_frame_val)
+                                # The split_clip_task expects "split_request_at_frame"
+                                processing_metadata_update_payload = psycopg2.extras.Json({
+                                    "split_request_at_frame": frame_to_split
+                                })
+                                logger.debug(f"[Clip {clip_id}] Action '{action}' will set processing_metadata with split_request_at_frame: {frame_to_split}")
+                            except (ValueError, TypeError):
+                                logger.warning(
+                                    f"[Clip {clip_id}] 'selected_split' action for clip {clip_id} has invalid "
+                                    f"'split_at_frame' ('{split_at_frame_val}') in event_data. Skipping commit for this action."
+                                )
+                                continue # Skip this action if data is bad
+                        else:
+                            logger.warning(
+                                f"[Clip {clip_id}] 'selected_split' action for clip {clip_id} is missing "
+                                f"'split_at_frame' in event_data. Skipping commit for this action."
+                            )
+                            continue # Skip if essential data is missing
                     else:
                         logger.warning(f"[Clip {clip_id}] Unknown action '{action}' encountered during commit. Skipping.")
                         continue
 
-                    # Inner transaction per clip to ensure atomicity for each update
+                    # Inner transaction per clip effectively (managed by outer `with conn:` and loop structure)
                     try:
-                        # Re-use outer transaction's cursor for this part
-                        # or create a new savepoint if more complex logic needed.
-                        # For simplicity, we continue in the same transaction context.
-
+                        # Specific pre-update logic for 'selected_group_source'
                         if action == "selected_group_source":
                             group_target_id = None
                             if "group_with_clip_id" in event_data:
                                 try:
                                     group_target_id = int(event_data["group_with_clip_id"])
                                 except (ValueError, TypeError):
-                                    logger.warning(f"[Clip {clip_id}] Invalid group_with_clip_id '{event_data.get('group_with_clip_id')}' in event_data.")
+                                    logger.warning(f"[Clip {clip_id}] Invalid group_with_clip_id '{event_data.get('group_with_clip_id')}' in event_data for grouping.")
                                     group_target_id = None # Ensure it's None if conversion fails
 
                             if not group_target_id: # Fallback for very old events
-                                cur.execute( # Use 'cur' from the outer scope
+                                cur.execute(
                                     """
                                     SELECT event_data ->> 'group_with_clip_id'
                                     FROM   clip_events
@@ -190,48 +215,71 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                                     """, (clip_id,)
                                 )
                                 res = cur.fetchone()
-                                if res and res[0]:
+                                if res and res[0]: # res[0] is the value of event_data ->> 'group_with_clip_id'
                                     try:
                                         group_target_id = int(res[0])
                                     except (ValueError, TypeError):
-                                        logger.warning(f"[Clip {clip_id}] Invalid group_with_clip_id '{res[0]}' from DB fallback.")
+                                        logger.warning(f"[Clip {clip_id}] Invalid group_with_clip_id '{res[0]}' from DB fallback for grouping.")
                                         group_target_id = None
 
 
                             if group_target_id:
-                                cur.execute( # Use 'cur' from the outer scope
+                                cur.execute(
                                     "UPDATE clips SET grouped_with_clip_id = %s WHERE id = %s;",
                                     (group_target_id, clip_id)
                                 )
+                                logger.info(f"[Clip {clip_id}] Updated grouped_with_clip_id to {group_target_id} for action '{action}'.")
                             else:
                                 logger.warning(
-                                    f"[Clip {clip_id}] Group requested but no valid target id found. "
-                                    "Leaving grouped_with_clip_id NULL."
+                                    f"[Clip {clip_id}] Group requested but no valid target id found for '{action}'. "
+                                    "Leaving grouped_with_clip_id NULL or unchanged."
                                 )
 
-                        cur.execute( # Use 'cur' from the outer scope
-                            """
-                            UPDATE clips
-                            SET    ingest_state = %s, action_committed_at = NOW(), updated_at = NOW()
-                            WHERE  id = %s AND ingest_state = 'pending_review';
-                            """, (target_state, clip_id)
-                        )
+                        # General update for ingest_state, action_committed_at, and conditionally processing_metadata
+                        if processing_metadata_update_payload:
+                            # This is for actions that need to update processing_metadata (e.g., split)
+                            cur.execute(
+                                """
+                                UPDATE clips
+                                SET    ingest_state = %s,
+                                       action_committed_at = NOW(),
+                                       updated_at = NOW(),
+                                       processing_metadata = COALESCE(processing_metadata, '{}'::jsonb) || %s::jsonb
+                                WHERE  id = %s AND ingest_state = 'pending_review';
+                                """, (target_state, processing_metadata_update_payload, clip_id)
+                            )
+                        else:
+                            # This is for actions that DO NOT update processing_metadata
+                            cur.execute(
+                                """
+                                UPDATE clips
+                                SET    ingest_state = %s,
+                                       action_committed_at = NOW(),
+                                       updated_at = NOW()
+                                WHERE  id = %s AND ingest_state = 'pending_review';
+                                """, (target_state, clip_id)
+                            )
 
                         if cur.rowcount == 1:
                             committed_count += 1
                             logger.info(f"[Clip {clip_id}] Action '{action}' → state '{target_state}' committed.")
+                            if processing_metadata_update_payload:
+                                logger.info(f"[Clip {clip_id}] Also updated processing_metadata for action '{action}'.")
                         else:
                             logger.warning(
-                                f"[Clip {clip_id}] State may have changed concurrently or item not found; "
-                                f"commit for action '{action}' skipped (rowcount: {cur.rowcount})."
+                                f"[Clip {clip_id}] State may have changed concurrently, item not found, or not in 'pending_review'; "
+                                f"commit for action '{action}' skipped (rowcount: {cur.rowcount}). Expected state 'pending_review'."
                             )
                     except Exception as e_inner:
                         logger.error(f"[Clip {clip_id}] Inner commit transaction failed for action '{action}': {e_inner}", exc_info=True)
-                        # Depending on desired atomicity, might re-raise to rollback outer TX
-                        # For now, we log and continue with other clips.
+                        # This error, if not re-raised, allows other clips to be processed.
+                        # The outer 'with conn:' block ensures atomicity for the entire batch if an error
+                        # propagates out of this loop (e.g., from db_err below).
+                        # For now, log and continue with other clips as per original structure.
 
     except (Exception, psycopg2.Error) as db_err: # Catch psycopg2 specific errors too
         logger.error(f"Commit-worker encountered a database error: {db_err}", exc_info=True)
+        # If this block is hit, the 'with conn:' context manager will trigger a rollback for all actions in this cycle.
     finally:
         if conn:
             release_db_connection(conn)

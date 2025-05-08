@@ -291,6 +291,7 @@ def get_pending_split_jobs() -> List[Tuple[int, int]]:
     """
     Returns list of (clip_id, split_frame).
     Queries based on FINALIZED ingest_state (set by Commit Worker).
+    Ensures 'split_request_at_frame' key exists in processing_metadata.
     """
     task_log = get_run_logger() or log
     conn: Optional[PgConnection] = None
@@ -300,28 +301,37 @@ def get_pending_split_jobs() -> List[Tuple[int, int]]:
         conn = get_db_connection(cursor_factory=RealDictCursor)
         with conn:
             with conn.cursor() as cur:
-                # Ensure 'processing_metadata' is jsonb and contains 'split_request_at_frame' as text convertible to int
-                # Ensure the state 'pending_split' is correct
+                # Ensure 'processing_metadata' is jsonb, contains 'split_request_at_frame',
+                # and the clip is in 'pending_split' state.
+                # The '::int' cast handles converting the text value to an integer.
                 query = sql.SQL("""
                     SELECT id,
                            (processing_metadata ->> 'split_request_at_frame')::int AS split_frame
                     FROM clips
-                    WHERE ingest_state = 'pending_split';
+                    WHERE ingest_state = 'pending_split'
+                      AND processing_metadata ? 'split_request_at_frame'; -- Ensures the key exists
                 """)
                 task_log.debug("Fetching pending split jobs...")
                 cur.execute(query)
                 # Convert list of dicts from RealDictCursor to list of tuples
-                jobs = [(row["id"], row["split_frame"]) for row in cur.fetchall()]
+                fetched_rows = cur.fetchall()
+                jobs = []
+                for row in fetched_rows:
+                    # Basic validation, though SQL cast should handle most issues
+                    if row["id"] is not None and row["split_frame"] is not None:
+                        jobs.append((row["id"], row["split_frame"]))
+                    else:
+                        task_log.warning(f"Skipping malformed split job data: {row}")
+
                 task_log.info(f"Found {len(jobs)} pending split jobs.")
     except (Exception, psycopg2.DatabaseError) as error:
         task_log.error(f"DB error fetching pending split jobs: {error}", exc_info=True)
-        # Optionally re-raise
+        raise # Re-raise to make the initiator flow aware of DB issues
     finally:
         if conn:
             release_db_connection(conn)
     task_log.debug(f"Split jobs ready: {jobs}")
     return jobs
-
 
 # ─────────────────────────────────── Immediate State Update Helpers ────────────────────────────────────
 # These are used by tasks to update state *during* processing or on completion/failure.
