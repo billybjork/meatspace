@@ -40,11 +40,11 @@ from db.sync_db import (
 
 # --- Async DB and S3 client imports ---
 try:
-    from backend.db.async_db import connect_db, close_db
+    from backend.db.async_db import get_db_pool, close_db_pool
     ASYNC_DB_CONFIGURED = True
 except ImportError:
     ASYNC_DB_CONFIGURED = False
-    connect_db, close_db = None, None
+    get_db_pool, close_db_pool = None, None
 
 try:
     from botocore.exceptions import ClientError
@@ -439,7 +439,7 @@ async def cleanup_reviewed_clips_flow(
         logger.error("S3 Client/Config not available.")
         return
 
-    if not ASYNC_DB_CONFIGURED or connect_db is None:
+    if not ASYNC_DB_CONFIGURED or get_db_pool is None:
         logger.error("Async DB not configured.")
         return
 
@@ -453,7 +453,7 @@ async def cleanup_reviewed_clips_flow(
     error_count = 0
 
     try:
-        pool = await connect_db()
+        pool = await close_db_pool()
         if not pool:
             logger.error("Failed to get asyncpg pool.")
             return
