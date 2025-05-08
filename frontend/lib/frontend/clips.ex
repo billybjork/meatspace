@@ -26,7 +26,8 @@ defmodule Frontend.Clips do
     "skip"    => "selected_skip",
     "archive" => "selected_archive",
     "undo"    => "selected_undo",
-    "group"   => "selected_group_source"
+    "group"   => "selected_group_source",
+    "split"   => "selected_split"
   }
 
   # ------------------------------------------------------------------
@@ -197,53 +198,98 @@ defmodule Frontend.Clips do
   next clip to review, just like `request_merge_and_fetch_next/2`.
   """
   def request_group_and_fetch_next(%Clip{id: prev_id}, %Clip{id: curr_id}) do
-  reviewer_id = "admin"
-  now         = DateTime.utc_now()
+    reviewer_id = "admin"
+    now         = DateTime.utc_now()
 
-  Repo.transaction(fn ->
-  # ① log the *target* side (pure marker – lets you add per‑group stats later)
-  %ClipEvent{}
-  |> ClipEvent.changeset(%{
-  clip_id:     prev_id,
-  action:      "selected_group_target",
-  reviewer_id: reviewer_id
-  })
-  |> Repo.insert!()
+    Repo.transaction(fn ->
+      # ① log the *target* side (pure marker – lets you add per‑group stats later)
+      %ClipEvent{}
+      |> ClipEvent.changeset(%{
+        clip_id:     prev_id,
+        action:      "selected_group_target",
+        reviewer_id: reviewer_id
+      })
+      |> Repo.insert!()
 
-  # ② log the *source* side and keep the relation in event_data
-  %ClipEvent{}
-  |> ClipEvent.changeset(%{
-  clip_id:     curr_id,
-  action:      "selected_group_source",
-  reviewer_id: reviewer_id,
-  event_data:  %{"group_with_clip_id" => prev_id}
-  })
-  |> Repo.insert!()
+      # ② log the *source* side and keep the relation in event_data
+      %ClipEvent{}
+      |> ClipEvent.changeset(%{
+        clip_id:     curr_id,
+        action:      "selected_group_source",
+        reviewer_id: reviewer_id,
+        event_data:  %{"group_with_clip_id" => prev_id}
+      })
+      |> Repo.insert!()
 
-  # ③ mark **current** clip as reviewed so the UI can advance
-  Repo.update_all(
-  from(c in Clip, where: c.id == ^curr_id),
-  set: [reviewed_at: now]
-  )
+      # ③ mark **current** clip as reviewed so the UI can advance
+      Repo.update_all(
+        from(c in Clip, where: c.id == ^curr_id),
+        set: [reviewed_at: now]
+      )
 
-  # ④ fetch the next job exactly the same way as merge does
-  next_id =
-  Q.from(c in Clip,
-  where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
-  order_by: c.id,
-  limit: 1,
-  lock: "FOR UPDATE SKIP LOCKED",
-  select: c.id
-  )
-  |> Repo.one()
+      # ④ fetch the next job exactly the same way as merge does
+      next_id =
+        Q.from(c in Clip,
+          where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
+          order_by: c.id,
+          limit: 1,
+          lock: "FOR UPDATE SKIP LOCKED",
+          select: c.id
+        )
+        |> Repo.one()
 
-  next_clip = if next_id, do: load_clip_with_assocs(next_id)
+      next_clip = if next_id, do: load_clip_with_assocs(next_id)
 
-  {next_clip,
-  %{clip_id_source: curr_id,
-  clip_id_target: prev_id,
-  action: "group"}}
-  end)
+      {next_clip,
+       %{clip_id_source: curr_id,
+         clip_id_target: prev_id,
+         action: "group"}}
+    end)
   end
 
+  @doc """
+  Handle a split request for a clip:
+    1. log `selected_split` on the clip with `split_at_frame` in event_data
+    2. mark the clip as reviewed
+    3. fetch the next pending_review clip with FOR UPDATE SKIP LOCKED
+
+  Returns `{next_clip_or_nil, ctx}`.
+  """
+  def request_split_and_fetch_next(%Clip{id: clip_id}, frame_number) when is_integer(frame_number) do
+    reviewer_id = "admin" # TODO: pull from session/auth
+    db_action = "selected_split"
+    # frame_number is guaranteed to be an integer here
+    event_data_payload = %{"split_at_frame" => frame_number}
+
+    # Using raw SQL WITH for atomicity of event logging, clip update, and next clip fetch
+    {:ok, %{rows: rows}} =
+      Repo.query(
+        """
+        WITH ins AS (
+          INSERT INTO clip_events (action, clip_id, reviewer_id, event_data, created_at, updated_at)
+          VALUES ($1, $2, $3, $4, NOW(), NOW())
+        ), upd AS (
+          UPDATE clips
+          SET    reviewed_at = NOW(), updated_at = NOW()
+          WHERE  id = $2
+        )
+        SELECT id
+        FROM   clips
+        WHERE  ingest_state = 'pending_review'
+          AND  reviewed_at IS NULL
+        ORDER  BY id
+        LIMIT  1
+        FOR UPDATE SKIP LOCKED;
+        """,
+        [db_action, clip_id, reviewer_id, event_data_payload]
+      )
+
+    next_clip =
+      case rows do
+        [[id]] -> load_clip_with_assocs(id)
+        _      -> nil
+      end
+
+    {:ok, {next_clip, %{clip_id: clip_id, action: db_action, split_frame: frame_number}}}
+  end
 end
