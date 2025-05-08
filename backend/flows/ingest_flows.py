@@ -6,17 +6,21 @@ import time
 import psycopg2
 import psycopg2.extras
 from datetime import timedelta, timezone
+import logging
 
 # --- Project Root Setup ---
-project_root = Path(__file__).parent.parent.resolve()
-if str(project_root) not in sys.path:
-    print(f"Adding project root to sys.path: {project_root}")
-    sys.path.insert(0, str(project_root))
+# Path(__file__).parent.parent is /app (This is our project root inside the Docker container)
+project_root_inside_container = Path(__file__).resolve().parent.parent
+if str(project_root_inside_container) not in sys.path:
+    sys.path.insert(0, str(project_root_inside_container))
+    print(f"DEBUG: Added to sys.path: {str(project_root_inside_container)}")
+    print(f"DEBUG: Current sys.path: {sys.path}")
 
 # --- Prefect Imports ---
 from prefect import flow, get_run_logger, task
-from prefect.deployments import run_deployment # For triggering independent flow runs
+from prefect.deployments import run_deployment
 
+# --- Local Module Imports (relative to /app) ---
 from tasks.intake import intake_task
 from tasks.splice import splice_video_task, s3_client, S3_BUCKET_NAME
 from tasks.sprite import generate_sprite_sheet_task
@@ -25,7 +29,6 @@ from tasks.embed import generate_embeddings_task
 from tasks.merge import merge_clips_task
 from tasks.split import split_clip_task
 
-# --- DB Util Imports ---
 from db.sync_db import (
     get_all_pending_work,
     get_source_input_from_db,
@@ -38,13 +41,18 @@ from db.sync_db import (
     release_db_connection
 )
 
-# --- Async DB and S3 client imports ---
+_flow_bootstrap_logger = logging.getLogger(__name__) # For logging import errors
 try:
-    from backend.db.async_db import get_db_pool, close_db_pool
+    from db.async_db import get_db_connection as get_async_db_connection, get_db_pool, close_db_pool
     ASYNC_DB_CONFIGURED = True
-except ImportError:
+except ImportError as e:
+    _flow_bootstrap_logger.error(
+        f"CRITICAL: Failed to import async DB utilities from db.async_db: {e}. "
+        "Async cleanup flow will not function.",
+        exc_info=True
+    )
     ASYNC_DB_CONFIGURED = False
-    get_db_pool, close_db_pool = None, None
+    get_async_db_connection, get_db_pool, close_db_pool = None, None, None
 
 try:
     from botocore.exceptions import ClientError
@@ -57,11 +65,14 @@ except ImportError:
 DEFAULT_KEYFRAME_STRATEGY = os.getenv("DEFAULT_KEYFRAME_STRATEGY", "midpoint")
 DEFAULT_EMBEDDING_MODEL = os.getenv("DEFAULT_EMBEDDING_MODEL", "openai/clip-vit-base-patch32")
 DEFAULT_EMBEDDING_STRATEGY_LABEL = f"keyframe_{DEFAULT_KEYFRAME_STRATEGY}"
-TASK_SUBMIT_DELAY = float(os.getenv("TASK_SUBMIT_DELAY", 0.1))
-KEYFRAME_TIMEOUT = int(os.getenv("KEYFRAME_TIMEOUT", 600))
-EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900))
+TASK_SUBMIT_DELAY = float(os.getenv("TASK_SUBMIT_DELAY", 0.1)) # Delay between task submissions
+KEYFRAME_TIMEOUT = int(os.getenv("KEYFRAME_TIMEOUT", 600)) # Timeout for keyframe task result
+EMBEDDING_TIMEOUT = int(os.getenv("EMBEDDING_TIMEOUT", 900)) # Timeout for embedding task result
 CLIP_CLEANUP_DELAY_MINUTES = int(os.getenv("CLIP_CLEANUP_DELAY_MINUTES", 30))
 ACTION_COMMIT_GRACE_PERIOD_SECONDS = int(os.getenv("ACTION_COMMIT_GRACE_PERIOD_SECONDS", 10))
+
+# Configuration for limiting submissions per initiator cycle
+MAX_NEW_SUBMISSIONS_PER_CYCLE = int(os.getenv("MAX_NEW_SUBMISSIONS_PER_CYCLE", 15))
 
 # --- Constants ---
 ARTIFACT_TYPE_SPRITE_SHEET = "sprite_sheet"
@@ -89,13 +100,11 @@ def _commit_pending_review_actions(grace_period_seconds: int):
     committed_count = 0
     conn = None
     try:
-        # RealDictCursor → rows behave like dicts
         conn = get_db_connection(cursor_factory=psycopg2.extras.RealDictCursor)
 
-        with conn:                              # outer TX
+        with conn:                              # Outer transaction for all actions
             with conn.cursor() as cur:
 
-                # 1) newest selected_* event per clip that’s ready to commit
                 find_sql = """
                 WITH latest AS (
                   SELECT  ce.clip_id,
@@ -134,14 +143,12 @@ def _commit_pending_review_actions(grace_period_seconds: int):
 
                 logger.info(f"Committing {len(actions)} clip actions…")
 
-                # 2) process each clip in turn
                 for row in actions:
                     clip_id    = row["clip_id"]
                     action     = row["action"]
-                    event_data = row.get("event_data") or {}
+                    event_data = row.get("event_data") or {} # Ensure event_data is a dict
                     target_state = None
 
-                    # ---------- mapping UI action → ingest_state --------------
                     if   action == "selected_approve":
                         target_state = "review_approved"
                     elif action == "selected_skip":
@@ -151,92 +158,85 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                     elif action == "selected_merge_source":
                         target_state = "marked_for_merge_into_previous"
                     elif action == "selected_group_source":
-                        target_state = "review_approved"
+                        target_state = "review_approved" # Grouped clips are also approved
                     elif action == "selected_merge_target":
                         target_state = "pending_merge_target"
                     else:
-                        logger.warning(f"[Clip {clip_id}] Unknown action '{action}'.")
+                        logger.warning(f"[Clip {clip_id}] Unknown action '{action}' encountered during commit. Skipping.")
                         continue
 
-                    # ----------- one inner TX per clip ------------------------
+                    # Inner transaction per clip to ensure atomicity for each update
                     try:
-                        with conn.cursor() as tx:
+                        # Re-use outer transaction's cursor for this part
+                        # or create a new savepoint if more complex logic needed.
+                        # For simplicity, we continue in the same transaction context.
 
-                            # 2.a  write grouped_with_clip_id if grouping
-                            if action == "selected_group_source":
-                                group_target_id = None
-
-                                # prefer payload captured when event logged
-                                if "group_with_clip_id" in event_data:
+                        if action == "selected_group_source":
+                            group_target_id = None
+                            if "group_with_clip_id" in event_data:
+                                try:
                                     group_target_id = int(event_data["group_with_clip_id"])
+                                except (ValueError, TypeError):
+                                    logger.warning(f"[Clip {clip_id}] Invalid group_with_clip_id '{event_data.get('group_with_clip_id')}' in event_data.")
+                                    group_target_id = None # Ensure it's None if conversion fails
 
-                                # fallback for very old events (no payload)
-                                if not group_target_id:
-                                    tx.execute(
-                                        """
-                                        SELECT event_data ->> 'group_with_clip_id'
-                                        FROM   clip_events
-                                        WHERE  clip_id = %s
-                                          AND  action  = 'selected_group_source'
-                                        ORDER  BY created_at DESC
-                                        LIMIT  1;
-                                        """,
-                                        (clip_id,),
-                                    )
-                                    res = tx.fetchone()
-                                    if res and res[0]:
+                            if not group_target_id: # Fallback for very old events
+                                cur.execute( # Use 'cur' from the outer scope
+                                    """
+                                    SELECT event_data ->> 'group_with_clip_id'
+                                    FROM   clip_events
+                                    WHERE  clip_id = %s AND action  = 'selected_group_source'
+                                    ORDER  BY created_at DESC LIMIT  1;
+                                    """, (clip_id,)
+                                )
+                                res = cur.fetchone()
+                                if res and res[0]:
+                                    try:
                                         group_target_id = int(res[0])
+                                    except (ValueError, TypeError):
+                                        logger.warning(f"[Clip {clip_id}] Invalid group_with_clip_id '{res[0]}' from DB fallback.")
+                                        group_target_id = None
 
-                                if group_target_id:
-                                    tx.execute(
-                                        """
-                                        UPDATE clips
-                                        SET    grouped_with_clip_id = %s
-                                        WHERE  id = %s;
-                                        """,
-                                        (group_target_id, clip_id),
-                                    )
-                                else:
-                                    logger.warning(
-                                        f"[Clip {clip_id}] Group requested but "
-                                        "no target id found – leaving grouped_with_clip_id NULL."
-                                    )
 
-                            # 2.b  set new ingest_state + action_committed_at
-                            tx.execute(
-                                """
-                                UPDATE clips
-                                SET    ingest_state        = %s,
-                                       action_committed_at = NOW(),
-                                       updated_at          = NOW()
-                                WHERE  id = %s
-                                  AND  ingest_state = 'pending_review';
-                                """,
-                                (target_state, clip_id),
-                            )
-
-                            if tx.rowcount == 1:
-                                committed_count += 1
-                                logger.info(
-                                    f"[Clip {clip_id}] '{action}' → '{target_state}' committed."
+                            if group_target_id:
+                                cur.execute( # Use 'cur' from the outer scope
+                                    "UPDATE clips SET grouped_with_clip_id = %s WHERE id = %s;",
+                                    (group_target_id, clip_id)
                                 )
                             else:
                                 logger.warning(
-                                    f"[Clip {clip_id}] ingest_state changed concurrently; "
-                                    "commit skipped."
+                                    f"[Clip {clip_id}] Group requested but no valid target id found. "
+                                    "Leaving grouped_with_clip_id NULL."
                                 )
 
-                    except Exception as e:
-                        logger.error(f"[Clip {clip_id}] commit failed: {e}", exc_info=True)
-                        # keep looping
+                        cur.execute( # Use 'cur' from the outer scope
+                            """
+                            UPDATE clips
+                            SET    ingest_state = %s, action_committed_at = NOW(), updated_at = NOW()
+                            WHERE  id = %s AND ingest_state = 'pending_review';
+                            """, (target_state, clip_id)
+                        )
 
-    except (Exception, psycopg2.Error) as db_err:
-        logger.error(f"Commit‑worker DB error: {db_err}", exc_info=True)
+                        if cur.rowcount == 1:
+                            committed_count += 1
+                            logger.info(f"[Clip {clip_id}] Action '{action}' → state '{target_state}' committed.")
+                        else:
+                            logger.warning(
+                                f"[Clip {clip_id}] State may have changed concurrently or item not found; "
+                                f"commit for action '{action}' skipped (rowcount: {cur.rowcount})."
+                            )
+                    except Exception as e_inner:
+                        logger.error(f"[Clip {clip_id}] Inner commit transaction failed for action '{action}': {e_inner}", exc_info=True)
+                        # Depending on desired atomicity, might re-raise to rollback outer TX
+                        # For now, we log and continue with other clips.
+
+    except (Exception, psycopg2.Error) as db_err: # Catch psycopg2 specific errors too
+        logger.error(f"Commit-worker encountered a database error: {db_err}", exc_info=True)
     finally:
         if conn:
             release_db_connection(conn)
 
-    logger.info(f"Finished commit step. Committed {committed_count} clip(s).")
+    logger.info(f"Finished commit step. Committed {committed_count} clip action(s).")
     return committed_count
 
 
@@ -250,67 +250,93 @@ def process_clip_post_review(
     keyframe_strategy: str = DEFAULT_KEYFRAME_STRATEGY,
     model_name: str = DEFAULT_EMBEDDING_MODEL
     ):
-    """ (No changes needed in this flow logic itself) """
-    logger = get_run_logger(); logger.info(f"FLOW: Starting post-review processing for approved clip_id: {clip_id}")
-    keyframe_task_succeeded_or_skipped = False; keyframe_job = None; embedding_job = None
+    """Processes an approved clip: keyframing and embedding."""
+    logger = get_run_logger()
+    logger.info(f"FLOW: Starting post-review processing for approved clip_id: {clip_id}")
+    keyframe_task_succeeded_or_skipped = False
+
     try:
         # --- 1. Keyframing ---
         logger.info(f"Submitting keyframe task for clip_id: {clip_id} with strategy: {keyframe_strategy}")
         keyframe_job = extract_keyframes_task.submit(clip_id=clip_id, strategy=keyframe_strategy, overwrite=False)
         logger.info(f"Waiting for keyframe task result for clip {clip_id} (timeout: {KEYFRAME_TIMEOUT}s)")
-        keyframe_result = keyframe_job.result(timeout=KEYFRAME_TIMEOUT)
+        keyframe_result = keyframe_job.result(timeout=KEYFRAME_TIMEOUT) # Wait for result
+
         keyframe_status = None
         if isinstance(keyframe_result, dict): keyframe_status = keyframe_result.get("status")
-        elif keyframe_result is None: keyframe_status = "skipped_or_success"
+        elif keyframe_result is None: keyframe_status = "skipped_or_success" # Treat None as acceptable skip/success
         else: keyframe_status = "failed_unexpected_result"
+
         keyframe_failure_statuses = ["failed", "failed_db_phase1", "failed_processing", "failed_state_update", "failed_db_update", "failed_unexpected", "failed_unexpected_result"]
         keyframe_acceptable_skip_statuses = ["skipped_exists", "skipped_state", "skipped_logic", "skipped_or_success"]
-        if keyframe_status == "success": logger.info(f"Keyframing task OK for clip_id: {clip_id}."); keyframe_task_succeeded_or_skipped = True
-        elif keyframe_status in keyframe_acceptable_skip_statuses: logger.info(f"Keyframing task for clip {clip_id} status '{keyframe_status}'. Assuming acceptable."); keyframe_task_succeeded_or_skipped = True
-        elif keyframe_status in keyframe_failure_statuses: raise RuntimeError(f"Keyframing task failed for clip {clip_id}. Status: {keyframe_status}")
-        else: raise RuntimeError(f"Keyframing task failed for clip {clip_id} with unknown status: {keyframe_status}")
+
+        if keyframe_status == "success":
+            logger.info(f"Keyframing task OK for clip_id: {clip_id}.")
+            keyframe_task_succeeded_or_skipped = True
+        elif keyframe_status in keyframe_acceptable_skip_statuses:
+            logger.info(f"Keyframing task for clip {clip_id} status '{keyframe_status}'. Assuming acceptable skip.")
+            keyframe_task_succeeded_or_skipped = True
+        elif keyframe_status in keyframe_failure_statuses:
+            raise RuntimeError(f"Keyframing task failed for clip {clip_id}. Status: {keyframe_status}")
+        else: # Unknown status
+            raise RuntimeError(f"Keyframing task for clip {clip_id} returned an unknown status: {keyframe_status}")
 
         # --- 2. Embedding ---
         if keyframe_task_succeeded_or_skipped:
-            if keyframe_strategy == "multi": embedding_strategy_label = f"keyframe_{keyframe_strategy}_avg"
-            else: embedding_strategy_label = f"keyframe_{keyframe_strategy}"
-            logger.info(f"Submitting embedding task for clip_id: {clip_id} model: {model_name}, strategy: {embedding_strategy_label}")
+            embedding_strategy_label = f"keyframe_{keyframe_strategy}_avg" if keyframe_strategy == "multi" else f"keyframe_{keyframe_strategy}"
+            logger.info(f"Submitting embedding task for clip_id: {clip_id}, model: {model_name}, strategy: {embedding_strategy_label}")
             embedding_job = generate_embeddings_task.submit(clip_id=clip_id, model_name=model_name, generation_strategy=embedding_strategy_label, overwrite=False)
             logger.info(f"Waiting for embedding task result for clip {clip_id} (timeout: {EMBEDDING_TIMEOUT}s)")
-            embed_result = embedding_job.result(timeout=EMBEDDING_TIMEOUT)
+            embed_result = embedding_job.result(timeout=EMBEDDING_TIMEOUT) # Wait for result
+
             embed_status = None
             if isinstance(embed_result, dict): embed_status = embed_result.get("status")
-            elif embed_result is None: embed_status = "skipped_or_success"
+            elif embed_result is None: embed_status = "skipped_or_success" # Treat None as acceptable skip/success
             else: embed_status = "failed_unexpected_result"
+
             embed_failure_statuses = ["failed", "failed_db_phase1", "failed_processing", "failed_state_update", "failed_db_update", "failed_unexpected", "failed_unexpected_result"]
             embed_acceptable_skip_statuses = ["skipped_exists", "skipped_state", "skipped_or_success"]
-            if embed_status == "success": logger.info(f"Embedding task OK for clip_id: {clip_id}.")
-            elif embed_status in embed_acceptable_skip_statuses: logger.info(f"Embedding task for clip {clip_id} status '{embed_status}'. Assuming acceptable.")
-            elif embed_status in embed_failure_statuses: raise RuntimeError(f"Embedding task failed for clip {clip_id}. Status: {embed_status}")
-            else: raise RuntimeError(f"Embedding task failed for clip {clip_id} with unknown status: {embed_status}")
-        else: logger.warning(f"Skipping embedding for clip {clip_id} due to keyframing outcome.")
-    except Exception as e: stage = "embedding" if keyframe_task_succeeded_or_skipped else "keyframing"; logger.error(f"Error during post-review processing flow (stage: {stage}) for clip_id {clip_id}: {e}", exc_info=True); raise e
+
+            if embed_status == "success":
+                logger.info(f"Embedding task OK for clip_id: {clip_id}.")
+            elif embed_status in embed_acceptable_skip_statuses:
+                logger.info(f"Embedding task for clip {clip_id} status '{embed_status}'. Assuming acceptable skip.")
+            elif embed_status in embed_failure_statuses:
+                raise RuntimeError(f"Embedding task failed for clip {clip_id}. Status: {embed_status}")
+            else: # Unknown status
+                raise RuntimeError(f"Embedding task for clip {clip_id} returned an unknown status: {embed_status}")
+        else:
+            logger.warning(f"Skipping embedding for clip {clip_id} due to prior keyframing outcome.")
+
+    except Exception as e:
+        stage = "embedding" if keyframe_task_succeeded_or_skipped else "keyframing"
+        logger.error(f"Error during post-review processing flow (stage: {stage}) for clip_id {clip_id}: {e}", exc_info=True)
+        raise # Re-raise to mark the flow run as failed
     logger.info(f"FLOW: Finished post-review processing flow for clip_id: {clip_id}")
 
 
 @flow(name="Scheduled Ingest Initiator", log_prints=True)
 def scheduled_ingest_initiator(limit_per_stage: int = 50):
     """
-    Scheduled flow to FIRST commit pending review actions, THEN find new work
-    based on FINALIZED states, and trigger the appropriate next tasks/flows.
+    Scheduled flow to:
+    1. Commit pending review actions.
+    2. Find new work based on finalized states.
+    3. Trigger appropriate next tasks/flows, respecting MAX_NEW_SUBMISSIONS_PER_CYCLE.
     """
     logger = get_run_logger()
-    logger.info(f"FLOW: Running Scheduled Ingest Initiator cycle (Limit: {limit_per_stage}/stage)...")
+    logger.info(f"FLOW: Running Scheduled Ingest Initiator cycle (Global Submission Limit: {MAX_NEW_SUBMISSIONS_PER_CYCLE}, Stage Limit: {limit_per_stage})...")
 
-    try: initialize_db_pool() # For sync state updates and commit logic
+    try:
+        initialize_db_pool() # Ensure sync DB pool is ready for commit logic and state updates
     except Exception as pool_init_err:
-         logger.critical(f"Failed init sync DB pool for initiator: {pool_init_err}", exc_info=True)
-         raise RuntimeError("Cannot proceed without DB pool.") from pool_init_err
+         logger.critical(f"Failed to initialize sync DB pool for initiator: {pool_init_err}", exc_info=True)
+         raise RuntimeError("Cannot proceed with Scheduled Ingest Initiator without DB pool.") from pool_init_err
 
     error_count = 0
+    newly_submitted_in_this_cycle = 0 # Counter for MAX_NEW_SUBMISSIONS_PER_CYCLE
     from collections import defaultdict
-    processed_counts = defaultdict(int)
-    submitted_counts = defaultdict(int)
+    processed_counts = defaultdict(int) # How many items found per stage
+    submitted_counts = defaultdict(int) # How many tasks/runs actually submitted per stage
 
     # --- First, commit pending review actions ---
     try:
@@ -323,17 +349,20 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
 
     # --- Fetch Work (based on potentially updated states) ---
     all_work = []
-    try:
-        logger.info(f"Fetching work items based on committed states...")
-        # Calls the simplified get_all_pending_work from db_utils
-        all_work = get_all_pending_work(limit_per_stage=limit_per_stage)
-        logger.info(f"Found {len(all_work)} total work items across stages.")
-    except Exception as db_query_err:
-        logger.error(f"[All Stages] Failed work query: {db_query_err}", exc_info=True)
-        error_count += 1
+    if newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE: # Only fetch if we can submit more
+        try:
+            logger.info("Fetching work items based on committed states...")
+            all_work = get_all_pending_work(limit_per_stage=limit_per_stage)
+            logger.info(f"Found {len(all_work)} total work items across stages for potential processing.")
+        except Exception as db_query_err:
+            logger.error(f"[All Stages] Failed to query for work: {db_query_err}", exc_info=True)
+            error_count += 1
+    else:
+        logger.info("MAX_NEW_SUBMISSIONS_PER_CYCLE reached before fetching work. Skipping work fetch.")
+
 
     work_by_stage = defaultdict(list)
-    for item in all_work:
+    for item in all_work: # all_work might be empty if MAX_NEW_SUBMISSIONS_PER_CYCLE was hit
         work_by_stage[item['stage']].append(item['id'])
         processed_counts[item['stage'].capitalize()] += 1
 
@@ -341,83 +370,171 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
 
     # Stage 1: Intake
     stage_name = "Intake"; intake_ids = work_by_stage.get('intake', [])
-    if intake_ids:
+    if intake_ids and newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE:
         logger.info(f"[{stage_name}] Found {len(intake_ids)} sources. Submitting tasks...")
         for sid in intake_ids:
+            if newly_submitted_in_this_cycle >= MAX_NEW_SUBMISSIONS_PER_CYCLE:
+                logger.info(f"[{stage_name}] MAX_NEW_SUBMISSIONS_PER_CYCLE reached. Deferring remaining {stage_name} work.")
+                break
             try:
                 if update_source_video_state_sync(sid, 'downloading'):
                     source_input = get_source_input_from_db(sid)
-                    if source_input: intake_task.submit(source_video_id=sid, input_source=source_input); submitted_counts[stage_name] += 1; time.sleep(TASK_SUBMIT_DELAY)
-                else: logger.warning(f"[{stage_name}] Failed state update for {sid} to 'downloading'. Skipping."); error_count += 1
-            except Exception as e: logger.error(f"[{stage_name}] Submit failed for ID {sid}: {e}", exc_info=True); error_count += 1
+                    if source_input:
+                        intake_task.submit(source_video_id=sid, input_source=source_input)
+                        submitted_counts[stage_name] += 1
+                        newly_submitted_in_this_cycle += 1
+                        time.sleep(TASK_SUBMIT_DELAY)
+                    else:
+                        logger.warning(f"[{stage_name}] No source_input found for ID {sid} after update. Skipping.")
+                else:
+                    logger.warning(f"[{stage_name}] Failed state update for source ID {sid} to 'downloading'. Skipping task.")
+                    error_count += 1 # Count as an error if state update fails
+            except Exception as e:
+                logger.error(f"[{stage_name}] Submit failed for source ID {sid}: {e}", exc_info=True)
+                error_count += 1
 
     # Stage 2: Splice
     stage_name = "Splice"; splice_ids = work_by_stage.get('splice', [])
-    if splice_ids:
+    if splice_ids and newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE:
         logger.info(f"[{stage_name}] Found {len(splice_ids)} sources. Submitting tasks...")
         for sid in splice_ids:
+            if newly_submitted_in_this_cycle >= MAX_NEW_SUBMISSIONS_PER_CYCLE:
+                logger.info(f"[{stage_name}] MAX_NEW_SUBMISSIONS_PER_CYCLE reached. Deferring remaining {stage_name} work.")
+                break
             try:
-                if update_source_video_state_sync(sid, 'splicing'): splice_video_task.submit(source_video_id=sid); submitted_counts[stage_name] += 1; time.sleep(TASK_SUBMIT_DELAY)
-                else: logger.warning(f"[{stage_name}] Failed state update for {sid} to 'splicing'. Skipping."); error_count += 1
-            except Exception as e: logger.error(f"[{stage_name}] Submit failed for ID {sid}: {e}", exc_info=True); error_count += 1
+                if update_source_video_state_sync(sid, 'splicing'):
+                    splice_video_task.submit(source_video_id=sid)
+                    submitted_counts[stage_name] += 1
+                    newly_submitted_in_this_cycle += 1
+                    time.sleep(TASK_SUBMIT_DELAY)
+                else:
+                    logger.warning(f"[{stage_name}] Failed state update for source ID {sid} to 'splicing'. Skipping task.")
+                    error_count += 1
+            except Exception as e:
+                logger.error(f"[{stage_name}] Submit failed for source ID {sid}: {e}", exc_info=True)
+                error_count += 1
 
     # Stage 3: SpriteGen
     stage_name = "SpriteGen"; sprite_ids = work_by_stage.get('sprite', [])
-    if sprite_ids:
+    if sprite_ids and newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE:
         logger.info(f"[{stage_name}] Found {len(sprite_ids)} clips. Submitting tasks...")
         for cid in sprite_ids:
+            if newly_submitted_in_this_cycle >= MAX_NEW_SUBMISSIONS_PER_CYCLE:
+                logger.info(f"[{stage_name}] MAX_NEW_SUBMISSIONS_PER_CYCLE reached. Deferring remaining {stage_name} work.")
+                break
             try:
-                if update_clip_state_sync(cid, 'generating_sprite'): generate_sprite_sheet_task.submit(clip_id=cid); submitted_counts[stage_name] += 1; time.sleep(TASK_SUBMIT_DELAY)
-                else: logger.warning(f"[{stage_name}] Failed state update for {cid} to 'generating_sprite'. Skipping."); error_count += 1
-            except Exception as e: logger.error(f"[{stage_name}] Submit failed for ID {cid}: {e}", exc_info=True); error_count += 1
+                if update_clip_state_sync(cid, 'generating_sprite'):
+                    generate_sprite_sheet_task.submit(clip_id=cid)
+                    submitted_counts[stage_name] += 1
+                    newly_submitted_in_this_cycle += 1
+                    time.sleep(TASK_SUBMIT_DELAY)
+                else:
+                    logger.warning(f"[{stage_name}] Failed state update for clip ID {cid} to 'generating_sprite'. Skipping task.")
+                    error_count += 1
+            except Exception as e:
+                logger.error(f"[{stage_name}] Submit failed for clip ID {cid}: {e}", exc_info=True)
+                error_count += 1
 
-    # Stage 4: Post-Review Start
+    # Stage 4: Post-Review Start (Triggers a separate flow run)
     stage_name = "Post-Review Start"; post_review_ids = work_by_stage.get('post_review', [])
-    if post_review_ids:
-        deployment_name = "process-clip-post-review/process-clip-post-review-default"
+    if post_review_ids and newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE:
+        deployment_name = "process-clip-post-review/process-clip-post-review-default" # Ensure this matches your deployment
         logger.info(f"[{stage_name}] Found {len(post_review_ids)} approved clips. Triggering '{deployment_name}' runs...")
         for cid in post_review_ids:
+            if newly_submitted_in_this_cycle >= MAX_NEW_SUBMISSIONS_PER_CYCLE:
+                logger.info(f"[{stage_name}] MAX_NEW_SUBMISSIONS_PER_CYCLE reached. Deferring remaining {stage_name} work.")
+                break
             try:
-                if update_clip_state_sync(cid, 'processing_post_review'): run_deployment(name=deployment_name, parameters={"clip_id": cid, "keyframe_strategy": DEFAULT_KEYFRAME_STRATEGY, "model_name": DEFAULT_EMBEDDING_MODEL}, timeout=0); submitted_counts[stage_name] += 1; time.sleep(TASK_SUBMIT_DELAY)
-                else: logger.warning(f"[{stage_name}] Failed state update for {cid} to 'processing_post_review'. Skipping trigger."); error_count += 1
-            except Exception as e: logger.error(f"[{stage_name}] Failed trigger for '{deployment_name}', clip_id {cid}: {e}", exc_info=True); error_count += 1
+                if update_clip_state_sync(cid, 'processing_post_review'):
+                    run_deployment(
+                        name=deployment_name,
+                        parameters={"clip_id": cid, "keyframe_strategy": DEFAULT_KEYFRAME_STRATEGY, "model_name": DEFAULT_EMBEDDING_MODEL},
+                        timeout=0 # Submit and move on, don't wait for completion
+                    )
+                    submitted_counts[stage_name] += 1
+                    newly_submitted_in_this_cycle += 1
+                    time.sleep(TASK_SUBMIT_DELAY)
+                else:
+                    logger.warning(f"[{stage_name}] Failed state update for clip ID {cid} to 'processing_post_review'. Skipping trigger.")
+                    error_count += 1
+            except Exception as e:
+                logger.error(f"[{stage_name}] Failed to trigger deployment '{deployment_name}' for clip ID {cid}: {e}", exc_info=True)
+                error_count += 1
 
     # Stage 5.1: Merge
     stage_name = "Merge"
-    try:
-        merge_pairs = get_pending_merge_pairs()
-        processed_counts[stage_name] = len(merge_pairs)
-        if merge_pairs:
-             logger.info(f"[{stage_name}] Found {len(merge_pairs)} pairs for merging. Submitting tasks...")
-             submitted_merges = set()
-             for target_id, source_id in merge_pairs:
-                  if target_id not in submitted_merges and source_id not in submitted_merges:
-                      try: merge_clips_task.submit(clip_id_target=target_id, clip_id_source=source_id); submitted_merges.add(target_id); submitted_merges.add(source_id); submitted_counts[stage_name] += 1; time.sleep(TASK_SUBMIT_DELAY)
-                      except Exception as e: logger.error(f"[{stage_name}] Submit failed for merge ({target_id}, {source_id}): {e}", exc_info=True); error_count += 1
-                  else: logger.warning(f"[{stage_name}] Skipping merge involving {target_id}/{source_id} (already submitted).")
-    except Exception as e: logger.error(f"[{stage_name}] Failed during merge check: {e}", exc_info=True); error_count += 1
+    if newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE:
+        try:
+            merge_pairs = get_pending_merge_pairs()
+            processed_counts[stage_name] = len(merge_pairs) # Count found items before submission limit
+            if merge_pairs:
+                 logger.info(f"[{stage_name}] Found {len(merge_pairs)} pairs for merging. Submitting tasks...")
+                 submitted_merges_in_loop = set() # Track submitted items within this loop to avoid double submission
+                 for target_id, source_id in merge_pairs:
+                      if newly_submitted_in_this_cycle >= MAX_NEW_SUBMISSIONS_PER_CYCLE:
+                          logger.info(f"[{stage_name}] MAX_NEW_SUBMISSIONS_PER_CYCLE reached. Deferring remaining {stage_name} work.")
+                          break
+                      if target_id not in submitted_merges_in_loop and source_id not in submitted_merges_in_loop:
+                          try:
+                              merge_clips_task.submit(clip_id_target=target_id, clip_id_source=source_id)
+                              submitted_merges_in_loop.add(target_id); submitted_merges_in_loop.add(source_id)
+                              submitted_counts[stage_name] += 1 # Count as one submission for the pair
+                              newly_submitted_in_this_cycle += 1
+                              time.sleep(TASK_SUBMIT_DELAY)
+                          except Exception as e:
+                              logger.error(f"[{stage_name}] Submit failed for merge pair (T:{target_id}, S:{source_id}): {e}", exc_info=True)
+                              error_count += 1
+                      else:
+                          logger.warning(f"[{stage_name}] Skipping merge involving {target_id}/{source_id} as one part might be in current submission batch.")
+        except Exception as e:
+            logger.error(f"[{stage_name}] Failed during merge check/submission: {e}", exc_info=True)
+            error_count += 1
+    else:
+        logger.info(f"[{stage_name}] Skipping merge processing as MAX_NEW_SUBMISSIONS_PER_CYCLE already reached.")
+
 
     # Stage 5.2: Split
     stage_name = "Split"
-    try:
-        clips_to_split_data = get_pending_split_jobs()
-        processed_counts[stage_name] = len(clips_to_split_data)
-        if clips_to_split_data:
-            logger.info(f"[{stage_name}] Found {len(clips_to_split_data)} clips pending split. Submitting tasks...")
-            submitted_splits = set()
-            for cid, split_frame in clips_to_split_data:
-                if cid not in submitted_splits:
-                    try: split_clip_task.submit(clip_id=cid); submitted_splits.add(cid); submitted_counts[stage_name] += 1; time.sleep(TASK_SUBMIT_DELAY)
-                    except Exception as e: logger.error(f"[{stage_name}] Submit failed for split ID {cid}: {e}", exc_info=True); error_count += 1
-                else: logger.warning(f"[{stage_name}] Skipping duplicate split task for clip {cid}.")
-    except Exception as e: logger.error(f"[{stage_name}] Failed during split check: {e}", exc_info=True); error_count += 1
+    if newly_submitted_in_this_cycle < MAX_NEW_SUBMISSIONS_PER_CYCLE:
+        try:
+            clips_to_split_data = get_pending_split_jobs()
+            processed_counts[stage_name] = len(clips_to_split_data) # Count found items
+            if clips_to_split_data:
+                logger.info(f"[{stage_name}] Found {len(clips_to_split_data)} clips pending split. Submitting tasks...")
+                submitted_splits_in_loop = set()
+                for cid, split_frame in clips_to_split_data:
+                    if newly_submitted_in_this_cycle >= MAX_NEW_SUBMISSIONS_PER_CYCLE:
+                        logger.info(f"[{stage_name}] MAX_NEW_SUBMISSIONS_PER_CYCLE reached. Deferring remaining {stage_name} work.")
+                        break
+                    if cid not in submitted_splits_in_loop:
+                        try:
+                            split_clip_task.submit(clip_id=cid) # Assuming split_frame is handled by task or fetched again
+                            submitted_splits_in_loop.add(cid)
+                            submitted_counts[stage_name] += 1
+                            newly_submitted_in_this_cycle += 1
+                            time.sleep(TASK_SUBMIT_DELAY)
+                        except Exception as e:
+                            logger.error(f"[{stage_name}] Submit failed for split of clip ID {cid}: {e}", exc_info=True)
+                            error_count += 1
+                    else:
+                        logger.warning(f"[{stage_name}] Skipping duplicate split task submission for clip {cid} in this cycle.")
+        except Exception as e:
+            logger.error(f"[{stage_name}] Failed during split check/submission: {e}", exc_info=True)
+            error_count += 1
+    else:
+        logger.info(f"[{stage_name}] Skipping split processing as MAX_NEW_SUBMISSIONS_PER_CYCLE already reached.")
+
 
     # --- Completion Logging ---
-    summary_log = (f"FLOW: Scheduled Ingest Initiator cycle complete. "
-                   f"Items Found: {dict(processed_counts)}. "
-                   f"Tasks/Runs Submitted: {dict(submitted_counts)}.")
-    if error_count > 0: logger.warning(f"{summary_log} Completed with {error_count} error(s).")
-    else: logger.info(summary_log)
+    summary_log = (
+        f"FLOW: Scheduled Ingest Initiator cycle complete. "
+        f"Items Found (prior to submission limit): {dict(processed_counts)}. "
+        f"Tasks/Runs Submitted This Cycle: {dict(submitted_counts)} (Total: {newly_submitted_in_this_cycle})."
+    )
+    if error_count > 0:
+        logger.warning(f"{summary_log} Completed with {error_count} error(s).")
+    else:
+        logger.info(summary_log)
 
 
 # =============================================================================
@@ -428,24 +545,23 @@ def scheduled_ingest_initiator(limit_per_stage: int = 50):
 async def cleanup_reviewed_clips_flow(
     cleanup_delay_minutes: int = CLIP_CLEANUP_DELAY_MINUTES,
 ):
-    """ (Code remains identical to previous version) """
+    """
+    Cleans up reviewed clips by deleting associated S3 artifacts (sprite sheets)
+    and updating their database state. Uses asyncpg for DB operations.
+    """
     logger = get_run_logger()
     logger.info(
         f"FLOW: Running Scheduled Clip Cleanup (Delay: {cleanup_delay_minutes} mins)..."
     )
 
-    # Validate configurations
     if not S3_CONFIGURED or not s3_client:
-        logger.error("S3 Client/Config not available.")
+        logger.error("S3 Client/Config not available. Exiting cleanup flow.")
         return
 
-    if not ASYNC_DB_CONFIGURED or get_db_pool is None:
-        logger.error("Async DB not configured.")
+    if not ASYNC_DB_CONFIGURED or not get_async_db_connection:
+        logger.error("Async DB not configured or get_async_db_connection function unavailable. Exiting cleanup flow.")
         return
 
-    # Initialize counters and connections
-    pool = None
-    conn = None
     processed_count = 0
     s3_deleted_count = 0
     db_artifact_deleted_count = 0
@@ -453,15 +569,9 @@ async def cleanup_reviewed_clips_flow(
     error_count = 0
 
     try:
-        pool = await close_db_pool()
-        if not pool:
-            logger.error("Failed to get asyncpg pool.")
-            return
+        async with get_async_db_connection() as conn:
+            logger.info("Acquired asyncpg connection via context manager for cleanup flow.")
 
-        async with pool.acquire() as conn:
-            logger.info("Acquired asyncpg connection.")
-
-            # Fetch clips ready for cleanup
             delay_interval = timedelta(minutes=cleanup_delay_minutes)
             pending_states = [
                 "approved_pending_deletion",
@@ -480,177 +590,143 @@ async def cleanup_reviewed_clips_flow(
                 query_clips, pending_states, delay_interval
             )
             processed_count = len(clips_to_cleanup)
-            logger.info(f"Found {processed_count} clips ready for cleanup.")
+            logger.info(f"Found {processed_count} clips ready for S3 artifact cleanup.")
 
             if not clips_to_cleanup:
-                logger.info("No clips require cleanup.")
-                return
+                logger.info("No clips require S3 artifact cleanup at this time.")
+                return # Exit early if no work
 
             for clip_record in clips_to_cleanup:
                 clip_id = clip_record["id"]
                 current_state = clip_record["ingest_state"]
                 log_prefix = f"[Cleanup Clip {clip_id}]"
-                logger.info(f"{log_prefix} Processing state: {current_state}")
+                logger.info(f"{log_prefix} Processing for state: {current_state}")
 
                 sprite_artifact_s3_key = None
-                s3_deletion_successful = False
+                s3_deletion_successful = False # Assume failure until success
 
                 try:
-                    # Retrieve sprite artifact key
+                    # 1. Retrieve sprite artifact S3 key
                     artifact_query = """
-                    SELECT s3_key
-                      FROM clip_artifacts
-                     WHERE clip_id = $1
-                       AND artifact_type = $2
-                     LIMIT 1;
+                    SELECT s3_key FROM clip_artifacts
+                     WHERE clip_id = $1 AND artifact_type = $2 LIMIT 1;
                     """
                     artifact_record = await conn.fetchrow(
                         artifact_query, clip_id, ARTIFACT_TYPE_SPRITE_SHEET
                     )
-                    if artifact_record:
+
+                    if artifact_record and artifact_record["s3_key"]:
                         sprite_artifact_s3_key = artifact_record["s3_key"]
                     else:
-                        logger.warning(f"{log_prefix} No sprite artifact found.")
-                        s3_deletion_successful = True
+                        logger.warning(f"{log_prefix} No sprite sheet artifact found in DB. Assuming S3 deletion step can be skipped.")
+                        s3_deletion_successful = True # No S3 key to delete, so "success" for this step
 
-                    # Delete from S3 if key exists
+                    # 2. Delete from S3 if key exists
                     if sprite_artifact_s3_key:
                         if not S3_BUCKET_NAME:
-                            logger.error(f"{log_prefix} S3_BUCKET_NAME missing.")
+                            logger.error(f"{log_prefix} S3_BUCKET_NAME is not configured. Cannot delete artifact.")
                             error_count += 1
+                            s3_deletion_successful = False # Explicitly mark as failed
                         else:
                             try:
+                                logger.info(f"{log_prefix} Deleting S3 object: s3://{S3_BUCKET_NAME}/{sprite_artifact_s3_key}")
                                 s3_client.delete_object(
                                     Bucket=S3_BUCKET_NAME,
                                     Key=sprite_artifact_s3_key,
                                 )
-                                logger.info(f"{log_prefix} Deleted S3 object.")
+                                logger.info(f"{log_prefix} Successfully deleted S3 object.")
                                 s3_deletion_successful = True
                                 s3_deleted_count += 1
-
                             except ClientError as e:
-                                error_code = (
-                                    e.response.get("Error", {}).get("Code", "Unknown")
-                                )
+                                error_code = e.response.get("Error", {}).get("Code", "Unknown")
                                 if error_code == "NoSuchKey":
-                                    logger.warning(
-                                        f"{log_prefix} S3 object not found (NoSuchKey)."
-                                    )
-                                    s3_deletion_successful = True
+                                    logger.warning(f"{log_prefix} S3 object s3://{S3_BUCKET_NAME}/{sprite_artifact_s3_key} not found (NoSuchKey). Assuming already deleted.")
+                                    s3_deletion_successful = True # Treat as success for workflow progression
                                 else:
-                                    logger.error(
-                                        f"{log_prefix} Failed S3 delete: {e} (Code: {error_code})"
-                                    )
-                                if not s3_deletion_successful:
+                                    logger.error(f"{log_prefix} Failed to delete S3 object s3://{S3_BUCKET_NAME}/{sprite_artifact_s3_key}. Code: {error_code}, Error: {e}")
+                                    s3_deletion_successful = False
                                     error_count += 1
-
-                            except Exception as e:
-                                logger.error(
-                                    f"{log_prefix} Unexpected S3 error: {e}",
-                                    exc_info=True,
-                                )
+                            except Exception as e_s3: # Catch other unexpected S3 errors
+                                logger.error(f"{log_prefix} Unexpected error during S3 deletion: {e_s3}", exc_info=True)
+                                s3_deletion_successful = False
                                 error_count += 1
 
-                    # Proceed with DB updates if S3 deletion succeeded
+                    # 3. Proceed with DB updates ONLY if S3 deletion was successful (or skipped appropriately)
                     if s3_deletion_successful:
                         final_state_map = {
                             "approved_pending_deletion": "review_approved",
                             "archived_pending_deletion": "archived",
                         }
                         final_clip_state = final_state_map.get(current_state)
+
                         if not final_clip_state:
-                            logger.error(
-                                f"{log_prefix} Unexpected state '{current_state}'."
-                            )
+                            logger.error(f"{log_prefix} Logic error: No final state mapping for current state '{current_state}'.")
                             error_count += 1
-                            continue
+                            continue # Skip to next clip
 
-                        try:
-                            async with conn.transaction():
-                                # Delete artifact record
-                                if sprite_artifact_s3_key:
-                                    delete_artifact_sql = """
-                                    DELETE FROM clip_artifacts
-                                     WHERE clip_id = $1
-                                       AND artifact_type = $2;
-                                    """
-                                    del_res = await conn.execute(
-                                        delete_artifact_sql,
-                                        clip_id,
-                                        ARTIFACT_TYPE_SPRITE_SHEET,
-                                    )
-                                    deleted = (
-                                        int(del_res.split()[-1])
-                                        if del_res.startswith("DELETE")
-                                        else 0
-                                    )
-                                    db_artifact_deleted_count += deleted
-
-                                # Update clip state
-                                update_clip_sql = """
-                                UPDATE clips
-                                   SET ingest_state = $1,
-                                       updated_at = NOW(),
-                                       action_committed_at = NULL,
-                                       last_error = NULL
-                                 WHERE id = $2
-                                   AND ingest_state = $3;
+                        # Start a DB transaction for artifact deletion and clip state update
+                        async with conn.transaction():
+                            logger.debug(f"{log_prefix} Starting DB transaction for final updates.")
+                            # Delete artifact record from DB if it existed
+                            if sprite_artifact_s3_key: # Only delete if we had a key
+                                delete_artifact_sql = """
+                                DELETE FROM clip_artifacts WHERE clip_id = $1 AND artifact_type = $2;
                                 """
-                                upd_res = await conn.execute(
-                                    update_clip_sql,
-                                    final_clip_state,
-                                    clip_id,
-                                    current_state,
+                                del_res_str = await conn.execute(
+                                    delete_artifact_sql, clip_id, ARTIFACT_TYPE_SPRITE_SHEET
                                 )
-                                if upd_res == "UPDATE 1":
-                                    logger.info(
-                                        f"{log_prefix} Updated state to '{final_clip_state}'."
-                                    )
-                                    db_clip_updated_count += 1
+                                # Parse "DELETE N" string
+                                deleted_artifact_rows = int(del_res_str.split()[-1]) if del_res_str and del_res_str.startswith("DELETE") else 0
+                                if deleted_artifact_rows > 0:
+                                    logger.info(f"{log_prefix} Deleted {deleted_artifact_rows} artifact record(s) from DB.")
+                                    db_artifact_deleted_count += deleted_artifact_rows
                                 else:
-                                    raise RuntimeError(
-                                        f"Clip update affected {upd_res} rows"
-                                    )
+                                    logger.warning(f"{log_prefix} No clip_artifact record found/deleted for S3 key {sprite_artifact_s3_key}. This might be okay if S3 key was stale.")
 
-                        except Exception as tx_err:
-                            logger.error(
-                                f"{log_prefix} DB transaction failed: {tx_err}",
-                                exc_info=True,
+
+                            # Update clip state and clear action_committed_at
+                            update_clip_sql = """
+                            UPDATE clips
+                               SET ingest_state = $1,
+                                   updated_at = NOW(),
+                                   action_committed_at = NULL, -- Clear this as action is now complete
+                                   last_error = NULL           -- Clear any previous errors
+                             WHERE id = $2 AND ingest_state = $3; -- Ensure current state matches
+                            """
+                            upd_res_str = await conn.execute(
+                                update_clip_sql, final_clip_state, clip_id, current_state
                             )
-                            error_count += 1
+                            # Parse "UPDATE N" string
+                            updated_clip_rows = int(upd_res_str.split()[-1]) if upd_res_str and upd_res_str.startswith("UPDATE") else 0
+
+                            if updated_clip_rows == 1:
+                                logger.info(f"{log_prefix} Successfully updated clip state to '{final_clip_state}'.")
+                                db_clip_updated_count += 1
+                            else:
+                                # This could happen if the state was changed by another process after fetching clips_to_cleanup
+                                logger.warning(
+                                    f"{log_prefix} Clip state update to '{final_clip_state}' affected {updated_clip_rows} rows "
+                                    f"(expected 1). State might have changed concurrently from '{current_state}'. Transaction will rollback."
+                                )
+                                # Raise an error to ensure transaction rollback for this clip
+                                raise RuntimeError(f"Concurrent state change detected for clip {clip_id}")
+                        logger.debug(f"{log_prefix} DB transaction committed.")
                     else:
-                        logger.warning(
-                            f"{log_prefix} Skipping DB updates due to S3 failure."
-                        )
+                        logger.warning(f"{log_prefix} Skipping DB updates for clip {clip_id} due to S3 deletion failure or configuration issue.")
 
-                except Exception as inner_err:
-                    logger.error(
-                        f"{log_prefix} Error processing clip: {inner_err}",
-                        exc_info=True,
-                    )
+                except Exception as inner_err: # Catch errors within the loop for a single clip
+                    logger.error(f"{log_prefix} Error processing clip for cleanup: {inner_err}", exc_info=True)
                     error_count += 1
+                    # Continue to the next clip
 
-    except Exception as outer_err:
-        logger.error(
-            f"FATAL Error during cleanup flow: {outer_err}", exc_info=True
-        )
+    except Exception as outer_err: # Catch errors related to DB connection or the overall flow
+        logger.error(f"FATAL Error during scheduled clip cleanup flow: {outer_err}", exc_info=True)
         error_count += 1
+    # No explicit pool or connection management needed here, context manager handles it.
 
-    finally:
-        if pool and conn:
-            await pool.release(conn)
-            logger.info("Released asyncpg connection.")
-        elif pool:
-            logger.warning(
-                "Asyncpg pool initialized but connection acquisition failed."
-            )
-
-    # Summary
     logger.info(
-        f"FLOW: Cleanup complete. "
-        f"Found: {processed_count}, "
-        f"S3Deleted: {s3_deleted_count}, "
-        f"DBArtifactsDeleted: {db_artifact_deleted_count}, "
-        f"DBClipsUpdated: {db_clip_updated_count}, "
+        f"FLOW: Scheduled Clip Cleanup complete. "
+        f"Clips Found: {processed_count}, S3 Objects Deleted: {s3_deleted_count}, "
+        f"DB Artifacts Deleted: {db_artifact_deleted_count}, DB Clips Updated: {db_clip_updated_count}, "
         f"Errors: {error_count}"
     )
