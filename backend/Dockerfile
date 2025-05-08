@@ -44,7 +44,7 @@
             curl && \
         rm -rf /var/lib/apt/lists/*
     
-    # Preload libgomp for compatibility
+    # Preload libgomp for compatibility (assuming M-series MacBook)
     ENV LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libgomp.so.1 \
         OMP_NUM_THREADS=1 \
         PYTHONUNBUFFERED=1

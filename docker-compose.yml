@@ -90,6 +90,7 @@ services:
       prefect-server:
         condition: service_healthy
     environment:
+      PREFECT_WORKER_CONCURRENCY_LIMIT: "3" # Avoid OOM issues; tweak as needed
       PREFECT_API_URL:      ${PREFECT_API_URL}
       DATABASE_URL:     "postgresql://${APP_DB_USER}:${APP_DB_PASSWORD}@app-postgres:5432/${APP_DB_NAME}"
       S3_BUCKET_NAME:       ${S3_BUCKET_NAME}
