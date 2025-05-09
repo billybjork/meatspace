@@ -13,6 +13,7 @@
 //
 // Hold the letter → button highlights → <ENTER> commits.
 // While split-mode is armed, <ENTER> also commits the split.
+// Press Ctrl/Cmd+Z at any time to undo the last action.
 
 import { SplitManager } from "./sprite-player";
 
@@ -26,6 +27,18 @@ export const ReviewHotkeys = {
 
     /* —————————————————————————— listeners ———————————————————————————— */
     this._onKeyDown = e => {
+      // Ctrl/Cmd+Z → undo (unless typing in input/textarea/contentEditable)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        const tag = (e.target.tagName || "").toLowerCase();
+        const typing = ["input", "textarea"].includes(tag) || e.target.isContentEditable;
+        if (!typing) {
+          this.pushEvent("undo", {});
+          this._reset();
+          e.preventDefault();  // prevent browser undo
+        }
+        return;
+      }
+
       const k = e.key.toLowerCase();
 
       /* 1.  First press of A/S/D/F/G – arm + highlight */
@@ -69,7 +82,7 @@ export const ReviewHotkeys = {
 
   /* -------------------------------------------------------------- */
   _reset() {
-    if (this.btn) if (this.btn) this.btn.classList.remove("is-armed");
+    if (this.btn) this.btn.classList.remove("is-armed");
     this.armed = this.btn = null;
   }
 };

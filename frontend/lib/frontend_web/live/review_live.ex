@@ -149,6 +149,7 @@ defmodule FrontendWeb.ReviewLive do
            history:    rest,
            page_state: :reviewing)
       |> refill_future()
+      |> clear_flash()
 
     {:noreply, persist_async(socket, prev.id, "undo")}
   end
