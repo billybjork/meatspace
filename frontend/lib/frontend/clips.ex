@@ -292,13 +292,16 @@ defmodule Frontend.Clips do
       })
       |> Repo.insert!()
 
-      # ② mark reviewed
+      # ② mark reviewed and attach split frame to processing_metadata
       Repo.update_all(
         from(c in Clip, where: c.id == ^clip_id),
-        set: [reviewed_at: now]
+        set: [
+          reviewed_at:         now,
+          processing_metadata: %{"split_at_frame" => frame_num}
+        ]
       )
 
-      # ③ fetch next job
+      # ③ fetch next clip
       next_id =
         Q.from(c in Clip,
           where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
