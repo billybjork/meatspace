@@ -7,16 +7,18 @@
     margin-top: var(--space-4);
 }
 
-/* Sprite-player controls container */
+/* Sprite-player controls container (using CSS Grid) */
 .sprite-controls {
-    display: flex;
+    display: grid;
     align-items: center;
     width: 100%;
     padding: var(--space-2) 0;
-    gap: var(--space-2);
+    /* three columns: play button, scrub bar, frame counter */
+    grid-template-columns: auto 1fr 8ch;
+    column-gap: var(--space-2);
     max-width: 100%;
 }
-  
+
 /* Control buttons (play/pause) and undo consistency */
 .sprite-controls button,
 .actions .btn-ghost {
@@ -26,12 +28,12 @@
     color: var(--fg);
     transition: background 0.15s;
 }
-  
-  .sprite-controls button:hover,
-  .actions .btn-ghost:hover {
+
+.sprite-controls button:hover,
+.actions .btn-ghost:hover {
     background: var(--panel);
     opacity: 1;
-  }
+}
 
 /* Make ghost-button respect disabled state like .btn[disabled] */
 .actions .btn-ghost[disabled],
@@ -39,22 +41,23 @@
     opacity: 0.4;
     cursor: not-allowed;
 }
-  
-/* Scrub bar expands to fill space */
+
+/* Scrub bar fills the middle grid column */
 .sprite-controls input[type="range"] {
-    flex: 1 1 auto;
-    margin: 0 var(--space-2);
+    width: 100%;
+    margin: 0;
     min-width: 0;
 }
-  
-/* Fixed-width frame counter to avoid jitter and keep inside */
+
+/* Fixed-width frame counter in the third grid column */
 .sprite-controls span {
-    flex: 0 0 8ch;
+    display: inline-block;    /* so width applies */
+    width: 8ch;               /* fixed width for “Frame: XX” */
     text-align: right;
-    font-family: monospace;
+    font-family: monospace;   /* makes each digit exactly 1ch wide */
     white-space: nowrap;
 }
-  
+
 /* Action buttons armed state */
 .btn.approve.is-armed  { background: var(--approve); color: #fff; }
 .btn.skip.is-armed     { background: var(--skip);    color: #000; }
@@ -62,9 +65,9 @@
 .btn.merge.is-armed    { background: var(--merge);   color: #fff; }
 .btn.group.is-armed    { background: var(--group);   color: #000; }
 .btn.split.is-armed    { background: var(--split);   color: #000; }
-  
+
 /* Split-mode outline indicator */
 .split-armed {
     outline: 3px dashed var(--split);
     outline-offset: 2px;
-}  
+}
