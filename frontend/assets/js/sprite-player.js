@@ -125,6 +125,12 @@ export const SpritePlayerController = {
       });
     }
 
+    // Click on the sprite area toggles play/pause
+    this._onViewerClick = () => {
+      this.player.togglePlayback();
+    };
+    this.el.addEventListener("click", this._onViewerClick);
+
     /* Global keyboard shortcuts while viewer is mounted
      * --------------------------------------------------
      *  ⬅️ / ➡️   – if split-mode is *not* armed yet, first enter
@@ -134,6 +140,13 @@ export const SpritePlayerController = {
      *  Esc      – exit split-mode and resume playback.
      * -------------------------------------------------- */
     this._onKey = evt => {
+      // Space → play/pause toggle
+      if (evt.code === "Space") {
+        evt.preventDefault();
+        this.player.togglePlayback();
+        return;
+      }
+
       if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
         evt.preventDefault();                    // stop page scroll
 
@@ -164,6 +177,7 @@ export const SpritePlayerController = {
 
   destroyed() {
     if (this.player) this.player.cleanup();
+    if (this._onViewerClick) this.el.removeEventListener("click", this._onViewerClick);
     if (this._onKey) window.removeEventListener("keydown", this._onKey);
   }
 };
