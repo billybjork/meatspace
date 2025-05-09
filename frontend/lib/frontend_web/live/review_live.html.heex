@@ -1,7 +1,7 @@
 <%= if @page_state == :empty do %>
   <%# --- EMPTY STATE --- %>
   <div>
-    <div class="review-buttons">
+    <div>
       <button
         phx-click="undo"
         disabled={@history == []}
@@ -9,7 +9,6 @@
         title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
         ⬅️
       </button>
-      <!-- Add other buttons here if they should appear in empty state, or keep it minimal -->
     </div>
 
     <h2>
@@ -22,95 +21,20 @@
   </div>
 <% else %>
   <%# --- REVIEWING STATE --- %>
-  <%= if @future != [] && List.first(@future) do %>
+  <%= if @future != [] do %>
     <link
       rel="preload"
       as="image"
       href={@future |> List.first() |> sprite_url()} />
   <% end %>
 
-  <div class="review-live-container-wrapper"> <!-- Wrapper for layout if needed -->
+  <div>
     <div>
-      <.sprite_player clip={@current} />
-
-      <div class="review-buttons">
-        <button
-          phx-click="undo"
-          disabled={@history == [] or @split_mode_active?}
-          aria-label="Go back to previous clip"
-          title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
-          ⬅️
-        </button>
-
-        <button
-          phx-click="select"
-          phx-value-action="approve"
-          disabled={@split_mode_active?}>
-          ✅ Approve
-        </button>
-
-        <button
-          phx-click="select"
-          phx-value-action="skip"
-          disabled={@split_mode_active?}>
-          ➡️ Skip
-        </button>
-
-        <button
-          phx-click="select"
-          phx-value-action="archive"
-          disabled={@split_mode_active?}>
-          🗑️ Archive
-        </button>
-
-        <button
-          phx-click="select"
-          phx-value-action="merge"
-          disabled={@history == [] or @split_mode_active?}
-          title={if @history == [], do: "No previous clip to merge with",
-                                     else: "Merge with previous clip"}>
-          🔗 Merge (with previous)
-        </button>
-
-        <button
-          phx-click="select"
-          phx-value-action="group"
-          disabled={@history == [] or @split_mode_active?}
-          title={if @history == [], do: "No previous clip to group with",
-                                     else: "Group with previous clip"}>
-          🖇️ Group (with previous)
-        </button>
-
-        <button
-          phx-click={if @split_mode_active?, do: "split_confirm", else: "split_initiate"}
-          disabled={@split_mode_active? && is_nil(@selected_split_frame)}
-          class="split-button">
-          <%= if @split_mode_active? do %>
-            <%= if @selected_split_frame do %>
-              ✂️ Confirm Split at F: <%= @selected_split_frame %>
-            <% else %>
-              ✂️ Select Frame (↔️ or Scrub)
-            <% end %>
-          <% else %>
-            ✂️ Split Clip
-          <% end %>
-        </button>
-        <%= if @split_mode_active? do %>
-          <button phx-click="split_cancel" class="split-cancel-button" title="Cancel Split (Esc)">❌ Cancel</button>
-        <% end %>
-      </div>
-
+      <.sprite_player
+        clip={@current} />
+      <.review_buttons
+        clip={@current}
+        history={@history} />
     </div>
-
-    <%= if @split_mode_active? do %>
-      <p class="split-mode-indicator">
-        Split Mode Active: Use ⬅️➡️ arrow keys or scrub bar to select frame. Press Esc to cancel.
-        <%= if @selected_split_frame do %>
-          Selected Frame: <strong><%= @selected_split_frame %></strong>
-        <% else %>
-          <em>No frame selected yet.</em>
-        <% end %>
-      </p>
-    <% end %>
   </div>
 <% end %>
