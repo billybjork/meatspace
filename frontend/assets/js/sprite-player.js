@@ -1,4 +1,76 @@
+/**
+ * Phoenix LiveView hook that turns a sprite-sheet PNG into a lightweight,
+ * scrubbable “video” player.  Includes keyboard-driven split-mode for
+ * manually selecting a cut-frame.
+ *
+ * All logic is self-contained so the LiveView only needs to:
+ *   * emit  <div phx-hook="SpritePlayer" …>
+ *   * listen for `"select"` events
+ */
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Split-mode state machine – global per page                              */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+export const SplitManager = {
+  splitMode     : false,   // are we armed?
+  activePlayer  : null,    // SpritePlayer instance currently controlled
+  btnEl         : null,    // the button that toggled us
+  /**
+   * Enter split mode: pause playback, highlight UI.
+   */
+  enter(player, btn) {
+    this.splitMode    = true;
+    this.activePlayer = player;
+    this.btnEl        = btn;
+
+    player.pause("split-enter");
+    btn.classList.add("split-armed");
+    player.viewerEl.classList.add("split-armed");
+  },
+
+  /**
+   * Exit without committing.
+   */
+  exit() {
+    if (!this.splitMode) return;
+    this.btnEl.classList.remove("split-armed");
+    this.activePlayer.viewerEl.classList.remove("split-armed");
+    this.activePlayer.play("split-exit");
+
+    this.splitMode    = false;
+    this.activePlayer = null;
+    this.btnEl        = null;
+  },
+
+  /**
+   * Commit the chosen frame – pushes a `"select"` event and resets state.
+   */
+  commit(pushFn) {
+    if (!this.splitMode || !this.activePlayer) return;
+    pushFn("select", {
+      action: "split",
+      frame : this.activePlayer.currentFrame
+    });
+    this.exit();
+  },
+
+  /**
+   * Nudge frame cursor left / right while armed.
+   */
+  nudge(delta) {
+    if (!this.splitMode || !this.activePlayer) return;
+    const next = this.activePlayer.currentFrame + delta;
+    this.activePlayer.updateFrame(next, true);
+  }
+};
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Phoenix Hook – one instance per sprite-sheet viewer                     */
+/* ────────────────────────────────────────────────────────────────────────── */
+
 export const SpritePlayerController = {
+  /* --------------------------------------------------------------------- */
   mounted() {
     const clipId     = this.el.dataset.clipId;
     const playerData = this.el.dataset.player;
@@ -19,15 +91,19 @@ export const SpritePlayerController = {
       return;
     }
 
+    /* Collect control elements */
     const container  = this.el.parentElement;
     const scrub      = container.querySelector(`#scrub-${clipId}`);
     const playPause  = container.querySelector(`#playpause-${clipId}`);
     const frameLabel = container.querySelector(`#frame-display-${clipId}`);
+    const splitBtn   = document.getElementById(`split-${clipId}`);
+
     if (!scrub || !playPause || !frameLabel) {
       console.warn("[SpritePlayer] missing controls for clip", clipId);
       return;
     }
 
+    /* Instantiate player */
     this.player = new SpritePlayer(
       clipId,
       this.el,
@@ -35,13 +111,36 @@ export const SpritePlayerController = {
       playPause,
       frameLabel,
       meta,
-      null
+      null // split-callback no longer used, kept for BC
     );
 
-    // preload & then auto-play
+    /* Split-button behaviour */
+    if (splitBtn) {
+      splitBtn.addEventListener("click", () => {
+        if (!SplitManager.splitMode) {
+          SplitManager.enter(this.player, splitBtn);
+        } else {
+          SplitManager.commit((evt, payload) => this.pushEvent(evt, payload));
+        }
+      });
+    }
+
+    /* Global keyboard shortcuts while viewer is mounted */
+    this._onKey = evt => {
+      switch (evt.key) {
+        case "Escape":     SplitManager.exit();               break;
+        case "ArrowLeft":  SplitManager.nudge(-1);            break;
+        case "ArrowRight": SplitManager.nudge(+1);            break;
+        default: /* noop */
+      }
+    };
+    window.addEventListener("keydown", this._onKey);
+
+    /* Kick off playback once sprite is loaded */
     this.player.preloadAndPlay();
   },
 
+  /* LiveView DOM patch – re-mount in place */
   updated() {
     if (this.player) this.player.cleanup();
     this.mounted();
@@ -49,150 +148,136 @@ export const SpritePlayerController = {
 
   destroyed() {
     if (this.player) this.player.cleanup();
+    if (this._onKey) window.removeEventListener("keydown", this._onKey);
   }
 };
 
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Minimal sprite-sheet “player”                                           */
+/* ────────────────────────────────────────────────────────────────────────── */
+
 class SpritePlayer {
   constructor(clipId, viewerEl, scrubEl, playPauseBtn, frameLblEl, meta, splitCb) {
-    this.clipId          = clipId;
-    this.viewerEl        = viewerEl;
-    this.scrubEl         = scrubEl;
-    this.playPauseBtn    = playPauseBtn;
-    this.frameLblEl      = frameLblEl;
-    this.meta            = meta;
-    this.splitCb         = splitCb;
+    /* element refs */
+    this.clipId       = clipId;
+    this.viewerEl     = viewerEl;
+    this.scrubEl      = scrubEl;
+    this.playPauseBtn = playPauseBtn;
+    this.frameLblEl   = frameLblEl;
 
+    /* metadata */
+    this.meta    = meta;
+    this.splitCb = splitCb; // kept for backward-compat but unused
+
+    /* runtime state */
     this.currentFrame     = 0;
     this.isPlaying        = false;
     this.playbackInterval = null;
     this.isScrubbing      = false;
 
-    // create our Image object for preloading
-    this.spriteImage = new Image();
-    this.spriteImage.src = meta.spriteUrl;
+    /* preload sprite PNG */
+    this.spriteImage      = new Image();
+    this.spriteImage.src  = meta.spriteUrl;
 
     this._setupUI();
     this._attachEventListeners();
   }
 
-  /** Preload the sprite image, then start playback once loaded. */
+  /* --------------------------------------------------------------------- */
+  /*  Initialise DOM attributes                                            */
+  /* --------------------------------------------------------------------- */
+  _setupUI() {
+    const m = this.meta;
+
+    /* viewer background – single, gigantic sheet of tiles */
+    this.viewerEl.style.backgroundImage    = `url('${m.spriteUrl}')`;
+    this.viewerEl.style.backgroundSize     = `${m.cols * m.tile_width}px ${m.rows * m.tile_height_calculated}px`;
+    this.viewerEl.style.width              = `${m.tile_width}px`;
+    this.viewerEl.style.height             = `${m.tile_height_calculated}px`;
+    this.viewerEl.style.backgroundRepeat   = "no-repeat";
+    this.viewerEl.style.backgroundPosition = "0 0";
+
+    /* controls default state */
+    this.scrubEl.max      = Math.max(0, m.clip_total_frames - 1);
+    this.scrubEl.value    = 0;
+    this.scrubEl.disabled = false;
+
+    this.playPauseBtn.disabled    = false;
+    this.playPauseBtn.textContent = "⏯️";
+
+    this.frameLblEl.textContent = "Frame: 0";
+  }
+
+  /* --------------------------------------------------------------------- */
+  /*  Event listeners                                                      */
+  /* --------------------------------------------------------------------- */
+  _attachEventListeners() {
+    /* play / pause */
+    this._onPlayPause = e => {
+      e.stopPropagation();
+      this.togglePlayback();
+    };
+    this.playPauseBtn.addEventListener("click", this._onPlayPause);
+
+    /* scrub bar */
+    this._onScrubStart = () => {
+      this.isScrubbing = true;
+      if (this.isPlaying) this.pause("scrubStart");
+    };
+    this._onScrubEnd   = () => { this.isScrubbing = false; };
+    this._onScrubInput = e => {
+      const f = parseInt(e.target.value, 10);
+      this.updateFrame(f, true);
+    };
+    this.scrubEl.addEventListener("mousedown", this._onScrubStart);
+    this.scrubEl.addEventListener("mouseup",   this._onScrubEnd);
+    this.scrubEl.addEventListener("input",     this._onScrubInput);
+  }
+
+  /* --------------------------------------------------------------------- */
+  /*  Public API                                                           */
+  /* --------------------------------------------------------------------- */
+
+  /** Preload sprite then commence autoplay. */
   preloadAndPlay() {
     if (this.spriteImage.complete) {
       this.play("mounted");
     } else {
       this.spriteImage.onload = () => this.play("preload");
-      // optionally, handle onerror here too
     }
   }
 
-  _setupUI() {
-    const m = this.meta;
-    // set background only once URL is known
-    this.viewerEl.style.backgroundImage = `url('${m.spriteUrl}')`;
-    this.viewerEl.style.backgroundSize =
-      `${m.cols * m.tile_width}px ${m.rows * m.tile_height_calculated}px`;
-    this.viewerEl.style.width  = `${m.tile_width}px`;
-    this.viewerEl.style.height = `${m.tile_height_calculated}px`;
-    this.viewerEl.style.backgroundRepeat = 'no-repeat';
-    this.viewerEl.style.backgroundPosition = '0 0';
-
-    // scrub bar
-    this.scrubEl.max      = Math.max(0, m.clip_total_frames - 1);
-    this.scrubEl.value    = 0;
-    this.scrubEl.disabled = false;
-
-    // play/pause button
-    this.playPauseBtn.disabled    = false;
-    this.playPauseBtn.textContent = '⏯️';
-
-    // initial label
-    this.frameLblEl.textContent = `Frame: 0`;
-  }
-
-  _attachEventListeners() {
-    this._onPlayPause = e => {
-      e.stopPropagation();
-      this.togglePlayback();
-    };
-    this.playPauseBtn.addEventListener('click', this._onPlayPause);
-
-    this._onScrubStart = () => {
-      this.isScrubbing = true;
-      if (this.isPlaying) this.pause("scrubStart");
-    };
-    this._onScrubEnd = () => {
-      this.isScrubbing = false;
-    };
-    this._onScrubInput = e => {
-      const f = parseInt(e.target.value, 10);
-      this.updateFrame(f, true);
-    };
-    this.scrubEl.addEventListener('mousedown', this._onScrubStart);
-    this.scrubEl.addEventListener('mouseup',   this._onScrubEnd);
-    this.scrubEl.addEventListener('input',     this._onScrubInput);
-  }
-
-  /** Map clip‐frame → background offsets, ensuring we never overshoot. */
-  _calculateBGPosition(frameNum) {
-    const m            = this.meta;
-    const maxClipFrame = Math.max(0, m.clip_total_frames - 1);
-
-    // Cap to only the frames you actually generated in the sprite sheet
-    const usable = Math.min(m.clip_total_frames, m.total_sprite_frames);
-
-    // Proportion through the clip (0..1)
-    const prop = maxClipFrame > 0 ? frameNum / maxClipFrame : 0;
-    const target = prop * (usable - 1);
-
-    // Math.floor guarantees you stay within valid tile indices
-    const spriteIndex = Math.floor(target);
-
-    const col = spriteIndex % m.cols;
-    const row = Math.floor(spriteIndex / m.cols);
-
-    return {
-      bgX: -(col * m.tile_width),
-      bgY: -(row * m.tile_height_calculated)
-    };
-  }
-
+  /** Jump to frame N (clamped). */
   updateFrame(frameNum, force = false) {
     const f = Math.max(0, Math.min(frameNum, this.meta.clip_total_frames - 1));
     if (f === this.currentFrame && !force) return;
+
     this.currentFrame = f;
 
-    const { bgX, bgY } = this._calculateBGPosition(f);
+    const { bgX, bgY } = this._bgPosForFrame(f);
     this.viewerEl.style.backgroundPosition = `${bgX}px ${bgY}px`;
 
     if (this.frameLblEl) this.frameLblEl.textContent = `Frame: ${f}`;
     if (this.scrubEl && !this.isScrubbing) this.scrubEl.value = f;
-
-    if (typeof this.splitCb === 'function') {
-      this.splitCb(this.clipId, f, this.meta);
-    }
   }
 
-  play(source = "unknown") {
+  play(src = "unknown") {
     if (this.isPlaying || this.meta.clip_fps <= 0) return;
     this.isPlaying = true;
-    this.playPauseBtn.textContent = '⏸️';
+    this.playPauseBtn.textContent = "⏸️";
 
-    // clear any old interval
-    if (this.playbackInterval) clearInterval(this.playbackInterval);
-
-    const intervalMs = 1000 / this.meta.clip_fps;
+    /* advance at source FPS */
+    const interval = 1000 / this.meta.clip_fps;
     this.playbackInterval = setInterval(() => {
-      const next = this.currentFrame + 1 >= this.meta.clip_total_frames
-        ? 0
-        : this.currentFrame + 1;
-      this.updateFrame(next, true);
-    }, intervalMs);
+      const nxt = this.currentFrame + 1 >= this.meta.clip_total_frames ? 0 : this.currentFrame + 1;
+      this.updateFrame(nxt, true);
+    }, interval);
   }
 
-  pause(source = "unknown") {
+  pause(src = "unknown") {
     if (!this.isPlaying) return;
     this.isPlaying = false;
-    this.playPauseBtn.textContent = '⏯️';
+    this.playPauseBtn.textContent = "⏯️";
     clearInterval(this.playbackInterval);
     this.playbackInterval = null;
   }
@@ -201,13 +286,45 @@ class SpritePlayer {
     this.isPlaying ? this.pause("toggle") : this.play("toggle");
   }
 
+  /** Clean up DOM listeners for LV patch / teardown. */
   cleanup() {
     this.pause("cleanup");
-    this.playPauseBtn.removeEventListener('click', this._onPlayPause);
-    this.scrubEl.removeEventListener('mousedown', this._onScrubStart);
-    this.scrubEl.removeEventListener('mouseup',   this._onScrubEnd);
-    this.scrubEl.removeEventListener('input',     this._onScrubInput);
-    // drop references for GC
+    this.playPauseBtn.removeEventListener("click", this._onPlayPause);
+    this.scrubEl.removeEventListener("mousedown", this._onScrubStart);
+    this.scrubEl.removeEventListener("mouseup",   this._onScrubEnd);
+    this.scrubEl.removeEventListener("input",     this._onScrubInput);
+
+    /* help GC */
     this.viewerEl = this.scrubEl = this.playPauseBtn = this.frameLblEl = this.meta = null;
   }
-}  
+
+  /* --------------------------------------------------------------------- */
+  /*  Internals                                                            */
+  /* --------------------------------------------------------------------- */
+
+  /** Calculate CSS background offset for a given frame. */
+  _bgPosForFrame(frameNum) {
+    const m            = this.meta;
+    const spriteFrames = Math.min(m.clip_total_frames, m.total_sprite_frames);
+
+    const prop   = (spriteFrames > 1) ? frameNum / (m.clip_total_frames - 1) : 0;
+    const index  = Math.floor(prop * (spriteFrames - 1));
+
+    const col    = index % m.cols;
+    const row    = Math.floor(index / m.cols);
+
+    return {
+      bgX: -(col * m.tile_width),
+      bgY: -(row * m.tile_height_calculated)
+    };
+  }
+}
+
+/* optional visual hint */
+document.addEventListener("DOMContentLoaded", () => {
+  const style = document.createElement("style");
+  style.textContent = `
+    .split-armed { outline: 3px dashed red !important; }
+  `;
+  document.head.appendChild(style);
+});

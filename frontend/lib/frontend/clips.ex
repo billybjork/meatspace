@@ -2,36 +2,51 @@ defmodule Frontend.Clips do
   @moduledoc """
   The **Clips** context — fetch, review and annotate clips.
 
-  * `next_pending_review_clips/2` — bulk, duplicate-free fetch that the
-    LiveView uses to keep its in-memory queue full.
-  * `select_clip_and_fetch_next/2` — writes the `clip_events` row, flips
-    the `reviewed_at` flag **and** returns the id of the next clip,
-    guarded by `FOR UPDATE SKIP LOCKED` so no two reviewers collide.
-  * `request_merge_and_fetch_next/2` — logs a merge of two clips, marks
-    both as reviewed with metadata, then returns the next clip.
+  ## Responsibilities
 
-  All three steps happen inside a single DB transaction or round-trip.
+  * **Queue helpers** – return batches of `pending_review` clips that the
+    LiveView keeps in memory (`next_pending_review_clips/2`).
+  * **Event sourcing** – write `clip_events` rows for every UI action and
+    flip `reviewed_at` so the clip leaves the queue.
+  * **Composite actions** – *merge*, *group*, *split* all perform more
+    than one DB change but still return the “next job” in a single round
+    trip.
+
+  All public helpers either:
+
+  * return `{:ok, {next_clip_or_nil, context}}` (single-row helpers) **or**
+  * return `{next_clip_or_nil, context}` inside a DB transaction
+    (composite helpers).
+
+  `context` makes downstream telemetry / job-queueing simpler.
   """
 
-  # bring in Ecto.Query and alias it as Q for our raw-DSL queries
+  # -------------------------------------------------------------------------
+  # Imports / aliases
+  # -------------------------------------------------------------------------
+
   import Ecto.Query, warn: false
   alias Ecto.Query, as: Q
 
   alias Frontend.Repo
   alias Frontend.Clips.{Clip, ClipEvent}
 
-  # map UI action names to the DB event names we record
+  # -------------------------------------------------------------------------
+  # Constants
+  # -------------------------------------------------------------------------
+
   @action_map %{
     "approve" => "selected_approve",
     "skip"    => "selected_skip",
     "archive" => "selected_archive",
     "undo"    => "selected_undo",
-    "group"   => "selected_group_source"
+    "group"   => "selected_group_source",
+    "split"   => "selected_split"
   }
 
-  # ------------------------------------------------------------------
-  # internal helpers
-  # ------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Internal helpers
+  # -------------------------------------------------------------------------
 
   @spec load_clip_with_assocs(integer) :: Clip.t()
   defp load_clip_with_assocs(id) do
@@ -44,15 +59,16 @@ defmodule Frontend.Clips do
     |> Repo.one!()
   end
 
-  # ------------------------------------------------------------------
-  # public API
-  # ------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Public API – fetch helpers
+  # -------------------------------------------------------------------------
 
   @doc """
-  Fetch `limit` clips still awaiting review, omitting any ids in
-  `exclude_ids` (used to avoid duplicates already held in memory).
+  Return up to `limit` clips still awaiting review, excluding any IDs in
+  `exclude_ids` (used to avoid duplicates already cached in memory).
 
-  Ordered by `id` to remain stable even if background jobs touch timestamps.
+  Clips are ordered by *id* to remain stable even if background workers
+  update timestamps.
   """
   def next_pending_review_clips(limit, exclude_ids \\ []) when is_integer(limit) do
     Clip
@@ -64,19 +80,23 @@ defmodule Frontend.Clips do
     |> Repo.all()
   end
 
-  @doc """
-  Legacy single-row wrapper.
-  """
+  @doc "Legacy single-row wrapper kept for tests / scripts."
   def next_pending_review_clip do
     next_pending_review_clips(1) |> List.first()
   end
 
+  # -------------------------------------------------------------------------
+  # Public API – single-row action (approve / skip / archive / undo)
+  # -------------------------------------------------------------------------
+
   @doc """
-  Log `ui_action` for `clip`, mark it reviewed (or clear on undo), and
-  return the next clip to review. Uses raw SQL WITH … FOR UPDATE SKIP LOCKED.
+  Log `ui_action` for `clip`, mark it reviewed (or *un-review* on undo),
+  and return the next clip to review (or `nil`) in one SQL round-trip.
+
+  Uses raw SQL `WITH … FOR UPDATE SKIP LOCKED` to avoid queue collisions.
   """
   def select_clip_and_fetch_next(%Clip{id: clip_id}, ui_action) do
-    reviewer_id = "admin"                  # TODO: pull from session/auth
+    reviewer_id = "admin"                          # TODO: pull from auth
     db_action   = Map.get(@action_map, ui_action, ui_action)
 
     {:ok, %{rows: rows}} =
@@ -113,9 +133,7 @@ defmodule Frontend.Clips do
     {:ok, {next_clip, %{clip_id: clip_id, action: db_action}}}
   end
 
-  @doc """
-  Convenience helper for one-off writes outside the batched path above.
-  """
+  @doc "Convenience helper for ad-hoc writes outside the batched path."
   def log_clip_action!(clip_id, action, reviewer_id) do
     %ClipEvent{}
     |> ClipEvent.changeset(%{
@@ -126,21 +144,26 @@ defmodule Frontend.Clips do
     |> Repo.insert!()
   end
 
-  @doc """
-  Handle a merge of two clips:
-    1. log `selected_merge_target` on the previous clip
-       and `selected_merge_source` on the current clip
-    2. mark both as reviewed and attach processing_metadata
-    3. fetch the next pending_review clip with FOR UPDATE SKIP LOCKED
+  # -------------------------------------------------------------------------
+  # Public API – composite helpers (merge / group / split)
+  # -------------------------------------------------------------------------
 
-  Returns `{next_clip_or_nil, ctx}` in the same shape as select_clip_and_fetch_next.
+  @doc """
+  Handle a **merge** request between *prev ⇠ current* clips.
+
+    1. Log both sides of the merge
+    2. Mark both clips reviewed & store processing metadata
+    3. Fetch the next `pending_review` clip
+
+  Returns `{next_clip_or_nil, context}`.
   """
-  def request_merge_and_fetch_next(%Clip{id: prev_id}, %Clip{id: curr_id}) do
+  def request_merge_and_fetch_next(%Clip{id: prev_id},
+                                   %Clip{id: curr_id}) do
     reviewer_id = "admin"
     now         = DateTime.utc_now()
 
     Repo.transaction(fn ->
-      # ① log both sides of the merge request
+      # ① log both sides
       %ClipEvent{}
       |> ClipEvent.changeset(%{
         clip_id:     prev_id,
@@ -157,7 +180,7 @@ defmodule Frontend.Clips do
       })
       |> Repo.insert!()
 
-      # ② mark both as reviewed & record merge metadata
+      # ② mark reviewed & attach metadata
       Repo.update_all(
         from(c in Clip, where: c.id == ^prev_id),
         set: [
@@ -174,15 +197,14 @@ defmodule Frontend.Clips do
         ]
       )
 
-      # ③ fetch the next pending_review clip via Ecto query
+      # ③ fetch next job
       next_id =
         Q.from(c in Clip,
           where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
           order_by: c.id,
           limit: 1,
           lock: "FOR UPDATE SKIP LOCKED",
-          select: c.id
-        )
+          select: c.id)
         |> Repo.one()
 
       next_clip = if next_id, do: load_clip_with_assocs(next_id)
@@ -193,57 +215,103 @@ defmodule Frontend.Clips do
   end
 
   @doc """
-  Log a *group* request between two clips (prev ⇢ curr) and return the
-  next clip to review, just like `request_merge_and_fetch_next/2`.
+  Handle a **group** request between *prev ⇠ current* clips.
+
+    1. Log target & source events
+    2. Mark *current* clip reviewed
+    3. Fetch the next job
   """
-  def request_group_and_fetch_next(%Clip{id: prev_id}, %Clip{id: curr_id}) do
-  reviewer_id = "admin"
-  now         = DateTime.utc_now()
+  def request_group_and_fetch_next(%Clip{id: prev_id},
+                                   %Clip{id: curr_id}) do
+    reviewer_id = "admin"
+    now         = DateTime.utc_now()
 
-  Repo.transaction(fn ->
-  # ① log the *target* side (pure marker – lets you add per‑group stats later)
-  %ClipEvent{}
-  |> ClipEvent.changeset(%{
-  clip_id:     prev_id,
-  action:      "selected_group_target",
-  reviewer_id: reviewer_id
-  })
-  |> Repo.insert!()
+    Repo.transaction(fn ->
+      # ① target side
+      %ClipEvent{}
+      |> ClipEvent.changeset(%{
+        clip_id:     prev_id,
+        action:      "selected_group_target",
+        reviewer_id: reviewer_id
+      })
+      |> Repo.insert!()
 
-  # ② log the *source* side and keep the relation in event_data
-  %ClipEvent{}
-  |> ClipEvent.changeset(%{
-  clip_id:     curr_id,
-  action:      "selected_group_source",
-  reviewer_id: reviewer_id,
-  event_data:  %{"group_with_clip_id" => prev_id}
-  })
-  |> Repo.insert!()
+      # ② source side
+      %ClipEvent{}
+      |> ClipEvent.changeset(%{
+        clip_id:     curr_id,
+        action:      "selected_group_source",
+        reviewer_id: reviewer_id,
+        event_data:  %{"group_with_clip_id" => prev_id}
+      })
+      |> Repo.insert!()
 
-  # ③ mark **current** clip as reviewed so the UI can advance
-  Repo.update_all(
-  from(c in Clip, where: c.id == ^curr_id),
-  set: [reviewed_at: now]
-  )
+      # ③ mark current reviewed
+      Repo.update_all(
+        from(c in Clip, where: c.id == ^curr_id),
+        set: [reviewed_at: now]
+      )
 
-  # ④ fetch the next job exactly the same way as merge does
-  next_id =
-  Q.from(c in Clip,
-  where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
-  order_by: c.id,
-  limit: 1,
-  lock: "FOR UPDATE SKIP LOCKED",
-  select: c.id
-  )
-  |> Repo.one()
+      # ④ fetch next job
+      next_id =
+        Q.from(c in Clip,
+          where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
+          order_by: c.id,
+          limit: 1,
+          lock: "FOR UPDATE SKIP LOCKED",
+          select: c.id)
+        |> Repo.one()
 
-  next_clip = if next_id, do: load_clip_with_assocs(next_id)
+      next_clip = if next_id, do: load_clip_with_assocs(next_id)
 
-  {next_clip,
-  %{clip_id_source: curr_id,
-  clip_id_target: prev_id,
-  action: "group"}}
-  end)
+      {next_clip,
+       %{clip_id_source: curr_id, clip_id_target: prev_id, action: "group"}}
+    end)
   end
 
+  @doc """
+  Handle a **split** request on `clip` at `frame_num`.
+
+    1. Log `selected_split` with `split_at_frame`
+    2. Mark the clip reviewed
+    3. Fetch the next job
+  """
+  def request_split_and_fetch_next(%Clip{id: clip_id}, frame_num)
+      when is_integer(frame_num) do
+    reviewer_id = "admin"
+    now         = DateTime.utc_now()
+
+    Repo.transaction(fn ->
+      # ① record event
+      %ClipEvent{}
+      |> ClipEvent.changeset(%{
+        clip_id:     clip_id,
+        action:      "selected_split",
+        reviewer_id: reviewer_id,
+        event_data:  %{"split_at_frame" => frame_num}
+      })
+      |> Repo.insert!()
+
+      # ② mark reviewed
+      Repo.update_all(
+        from(c in Clip, where: c.id == ^clip_id),
+        set: [reviewed_at: now]
+      )
+
+      # ③ fetch next job
+      next_id =
+        Q.from(c in Clip,
+          where: c.ingest_state == "pending_review" and is_nil(c.reviewed_at),
+          order_by: c.id,
+          limit: 1,
+          lock: "FOR UPDATE SKIP LOCKED",
+          select: c.id)
+        |> Repo.one()
+
+      next_clip = if next_id, do: load_clip_with_assocs(next_id)
+
+      {next_clip,
+       %{clip_id: clip_id, action: "split", frame: frame_num}}
+    end)
+  end
 end

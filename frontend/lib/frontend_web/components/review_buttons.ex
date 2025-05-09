@@ -50,7 +50,14 @@ defmodule FrontendWeb.ReviewButtons do
         disabled={@history == []}
         title={if @history == [], do: "No previous clip to group with",
                                    else: "Group with previous clip"}>
-        🖇️ Group (with previous)
+        🖇️ Group (with previous)
+      </button>
+
+      <!-- Split button (no phx-hook needed) -->
+      <button
+        id={"split-#{@clip.id}"}
+        data-clip-id={@clip.id}>
+        ✂️ Split
       </button>
     </div>
     """

@@ -1,57 +1,88 @@
 defmodule FrontendWeb.ReviewLive do
   @moduledoc """
-  Optimistic-UI review queue.
+  Optimistic-UI review queue for pending clips.
 
   * **current**  – clip on screen
   * **future**   – pre-fetched queue (max 5)
-  * **history**  – last 5 clips, supports Undo (via back button)
+  * **history**  – last 5 viewed clips (undo support)
   """
 
   use FrontendWeb, :live_view
 
-  # Import the sprite-player helpers from your sprite_player.ex
+  # Components / helpers
   import FrontendWeb.SpritePlayer, only: [sprite_player: 1, sprite_url: 1]
-  # Import your buttons component
   import FrontendWeb.ReviewButtons, only: [review_buttons: 1]
 
   alias Frontend.Clips
   alias Frontend.Clips.Clip
 
-  @prefetch          6   # 1 current + 5 future
-  @refill_threshold  3
-  @history_limit     5
+  @prefetch         6   # 1 current + 5 future
+  @refill_threshold 3
+  @history_limit    5
 
   # -------------------------------------------------------------------------
-  # Mount: Initialize queue on socket assigns
+  # Mount – build initial queue
   # -------------------------------------------------------------------------
+
   @impl true
   def mount(_params, _session, socket) do
     clips = Clips.next_pending_review_clips(@prefetch)
 
     case clips do
       [] ->
-        {:ok, assign(socket,
-                page_state: :empty,
-                current:    nil,
-                future:     [],
-                history:    [])}
+        {:ok,
+         assign(socket,
+           page_state: :empty,
+           current:    nil,
+           future:     [],
+           history:    [])}
 
       [cur | fut] ->
-        {:ok, socket
-          |> assign(
-            current:    cur,
-            future:     fut,
-            history:    [],
-            page_state: :reviewing)}
+        {:ok,
+         socket
+         |> assign(
+           current:    cur,
+           future:     fut,
+           history:    [],
+           page_state: :reviewing)}
     end
   end
 
   # -------------------------------------------------------------------------
-  # Events: Handle user actions
+  # Event handlers
   # -------------------------------------------------------------------------
 
+  # ─────────────────────────────────────────────────────────────────────────
+  # SPLIT (must precede generic "select" clause)
+  # ─────────────────────────────────────────────────────────────────────────
   @impl true
-  # merge action
+  def handle_event("select", %{"action" => "split", "frame" => frame_val},
+                   %{assigns: %{current: clip}} = socket) do
+    frame =
+      case frame_val do
+        # LiveView may deserialize numbers as integers already
+        v when is_integer(v) ->
+          v
+
+        # Fallback for string payloads
+        v when is_binary(v) ->
+          {int, _} = Integer.parse(v)
+          int
+      end
+
+    socket =
+      socket
+      |> push_history(clip)
+      |> advance_queue()
+      |> refill_future()
+
+    {:noreply, persist_split_async(socket, clip, frame)}
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # MERGE & GROUP (require history)
+  # ─────────────────────────────────────────────────────────────────────────
+  @impl true
   def handle_event("select", %{"action" => "merge"},
                    %{assigns: %{current: curr, history: [prev | _]}} = socket) do
     socket =
@@ -64,9 +95,8 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   @impl true
-  # group action
   def handle_event("select", %{"action" => "group"},
-                  %{assigns: %{current: curr, history: [prev | _]}} = socket) do
+                   %{assigns: %{current: curr, history: [prev | _]}} = socket) do
     socket =
       socket
       |> push_history(curr)
@@ -76,10 +106,19 @@ defmodule FrontendWeb.ReviewLive do
     {:noreply, persist_async(socket, {:group, prev, curr})}
   end
 
+  # Ignore merge / group if no previous clip (defence-in-depth)
   @impl true
-  # any other select action (e.g. "flag", etc.)
-  def handle_event("select", %{"action" => action}, %{assigns: %{current: clip}} = socket)
-      when action not in ["merge", "group"] do
+  def handle_event("select", %{"action" => action}, %{assigns: %{history: []}} = socket)
+      when action in ["merge", "group"] do
+    {:noreply, socket}
+  end
+
+  # ─────────────────────────────────────────────────────────────────────────
+  # Generic SELECT (approve, skip, archive, …)
+  # ─────────────────────────────────────────────────────────────────────────
+  @impl true
+  def handle_event("select", %{"action" => action},
+                   %{assigns: %{current: clip}} = socket) do
     socket =
       socket
       |> push_history(clip)
@@ -89,36 +128,37 @@ defmodule FrontendWeb.ReviewLive do
     {:noreply, persist_async(socket, clip.id, action)}
   end
 
-  # ignore merge and group actions if history is empty (extra protection beyond disabled buttons)
+  # ─────────────────────────────────────────────────────────────────────────
+  # Undo
+  # ─────────────────────────────────────────────────────────────────────────
   @impl true
-  def handle_event("select", %{"action" => action}, %{assigns: %{history: []}} = socket)
-      when action in ["merge", "group"] do
-    {:noreply, socket}
-  end
+  def handle_event("undo", _params, %{assigns: %{history: []}} = socket),
+    do: {:noreply, socket}
 
   @impl true
-  def handle_event("undo", _params, %{assigns: %{history: []}} = socket) do
-    {:noreply, socket}
-  end
-
-  @impl true
-  def handle_event("undo", _params, %{assigns: %{history: [prev | rest], current: cur, future: fut}} = socket) do
+  def handle_event("undo", _params,
+                   %{assigns: %{history: [prev | rest], current: cur, future: fut}} = socket) do
     socket =
       socket
       |> assign(
            current:    prev,
            future:     [cur | fut],
            history:    rest,
-           page_state: :reviewing
-         )
+           page_state: :reviewing)
       |> refill_future()
 
     {:noreply, persist_async(socket, prev.id, "undo")}
   end
 
   # -------------------------------------------------------------------------
-  # Background persistence
+  # Async persistence helpers
   # -------------------------------------------------------------------------
+
+  defp persist_split_async(socket, clip, frame) do
+    Phoenix.LiveView.start_async(socket, {:split, clip.id}, fn ->
+      Clips.request_split_and_fetch_next(clip, frame)
+    end)
+  end
 
   defp persist_async(socket, {:merge, prev, curr}) do
     Phoenix.LiveView.start_async(socket, {:merge_pair, {prev.id, curr.id}}, fn ->
@@ -139,7 +179,7 @@ defmodule FrontendWeb.ReviewLive do
   end
 
   # -------------------------------------------------------------------------
-  # Queue refill
+  # Queue helpers
   # -------------------------------------------------------------------------
 
   defp refill_future(%{assigns: %{current: nil}} = socket), do: socket
@@ -159,10 +199,6 @@ defmodule FrontendWeb.ReviewLive do
       socket
     end
   end
-
-  # -------------------------------------------------------------------------
-  # Helpers: push_history and advance_queue
-  # -------------------------------------------------------------------------
 
   defp push_history(socket, clip) do
     update(socket, :history, fn history ->
@@ -184,6 +220,7 @@ defmodule FrontendWeb.ReviewLive do
 
   @impl true
   def handle_async({:persist, _}, {:ok, _}, socket),   do: {:noreply, socket}
+
   @impl true
   def handle_async({:persist, clip_id}, {:exit, reason}, socket) do
     require Logger
@@ -193,6 +230,7 @@ defmodule FrontendWeb.ReviewLive do
 
   @impl true
   def handle_async({:merge_pair, _}, {:ok, _}, socket),   do: {:noreply, socket}
+
   @impl true
   def handle_async({:merge_pair, {prev_id, curr_id}}, {:exit, reason}, socket) do
     require Logger
@@ -202,10 +240,21 @@ defmodule FrontendWeb.ReviewLive do
 
   @impl true
   def handle_async({:group_pair, _}, {:ok, _}, socket),   do: {:noreply, socket}
+
   @impl true
   def handle_async({:group_pair, {prev_id, curr_id}}, {:exit, reason}, socket) do
     require Logger
     Logger.error("Group #{prev_id}→#{curr_id} crashed: #{inspect(reason)}")
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_async({:split, _}, {:ok, _}, socket),   do: {:noreply, socket}
+
+  @impl true
+  def handle_async({:split, clip_id}, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("Split for clip #{clip_id} crashed: #{inspect(reason)}")
     {:noreply, socket}
   end
 end
