@@ -8,6 +8,7 @@ defmodule FrontendWeb.ReviewLive do
   """
 
   use FrontendWeb, :live_view
+  import Phoenix.LiveView, only: [put_flash: 3, clear_flash: 1]
 
   # Components / helpers
   import FrontendWeb.SpritePlayer, only: [sprite_player: 1, sprite_url: 1]
@@ -27,6 +28,10 @@ defmodule FrontendWeb.ReviewLive do
   def mount(_params, _session, socket) do
     clips = Clips.next_pending_review_clips(@prefetch)
 
+    socket =
+      socket
+      |> assign(flash_action: nil)
+
     case clips do
       [] ->
         {:ok,
@@ -40,10 +45,10 @@ defmodule FrontendWeb.ReviewLive do
         {:ok,
          socket
          |> assign(
-           current:    cur,
-           future:     fut,
-           history:    [],
-           page_state: :reviewing)}
+           current:      cur,
+           future:       fut,
+           history:      [],
+           page_state:   :reviewing)}
     end
   end
 
@@ -59,11 +64,7 @@ defmodule FrontendWeb.ReviewLive do
                    %{assigns: %{current: clip}} = socket) do
     frame =
       case frame_val do
-        # LiveView may deserialize numbers as integers already
-        v when is_integer(v) ->
-          v
-
-        # Fallback for string payloads
+        v when is_integer(v) -> v
         v when is_binary(v) ->
           {int, _} = Integer.parse(v)
           int
@@ -71,10 +72,11 @@ defmodule FrontendWeb.ReviewLive do
 
     socket =
       socket
+      |> assign(flash_action: "split")
       |> push_history(clip)
       |> advance_queue()
       |> refill_future()
-      |> put_flash(:info, "Split clip #{clip.id}")
+      |> put_flash(:info, "#{flash_verb("split")} clip #{clip.id}")
 
     {:noreply, persist_split_async(socket, clip, frame)}
   end
@@ -87,10 +89,11 @@ defmodule FrontendWeb.ReviewLive do
                    %{assigns: %{current: curr, history: [prev | _]}} = socket) do
     socket =
       socket
+      |> assign(flash_action: "merge")
       |> push_history(curr)
       |> advance_queue()
       |> refill_future()
-      |> put_flash(:info, "Merged #{prev.id} ↔ #{curr.id}")
+      |> put_flash(:info, "#{flash_verb("merge")} #{prev.id} ↔ #{curr.id}")
 
     {:noreply, persist_async(socket, {:merge, prev, curr})}
   end
@@ -100,10 +103,11 @@ defmodule FrontendWeb.ReviewLive do
                    %{assigns: %{current: curr, history: [prev | _]}} = socket) do
     socket =
       socket
+      |> assign(flash_action: "group")
       |> push_history(curr)
       |> advance_queue()
       |> refill_future()
-      |> put_flash(:info, "Grouped #{prev.id} ↔ #{curr.id}")
+      |> put_flash(:info, "#{flash_verb("group")} #{prev.id} ↔ #{curr.id}")
 
     {:noreply, persist_async(socket, {:group, prev, curr})}
   end
@@ -123,10 +127,11 @@ defmodule FrontendWeb.ReviewLive do
                    %{assigns: %{current: clip}} = socket) do
     socket =
       socket
+      |> assign(flash_action: action)
       |> push_history(clip)
       |> advance_queue()
       |> refill_future()
-      |> put_flash(:info, "#{String.capitalize(action)} clip #{clip.id}")
+      |> put_flash(:info, "#{flash_verb(action)} clip #{clip.id}")
 
     {:noreply, persist_async(socket, clip.id, action)}
   end
@@ -143,6 +148,7 @@ defmodule FrontendWeb.ReviewLive do
                    %{assigns: %{history: [prev | rest], current: cur, future: fut}} = socket) do
     socket =
       socket
+      |> assign(flash_action: nil)
       |> assign(
            current:    prev,
            future:     [cur | fut],
@@ -261,4 +267,15 @@ defmodule FrontendWeb.ReviewLive do
     Logger.error("Split for clip #{clip_id} crashed: #{inspect(reason)}")
     {:noreply, socket}
   end
+
+  # -------------------------------------------------------------------------
+  # Flash verb helper
+  # -------------------------------------------------------------------------
+  defp flash_verb("approve"), do: "Approved"
+  defp flash_verb("skip"),    do: "Skipped"
+  defp flash_verb("archive"), do: "Archived"
+  defp flash_verb("merge"),   do: "Merged"
+  defp flash_verb("group"),   do: "Grouped"
+  defp flash_verb("split"),   do: "Split"
+  defp flash_verb(other),     do: String.capitalize(other)
 end

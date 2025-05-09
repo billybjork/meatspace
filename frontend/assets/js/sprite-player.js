@@ -335,12 +335,3 @@ class SpritePlayer {
     };
   }
 }
-
-/* visual hint */
-document.addEventListener("DOMContentLoaded", () => {
-  const style = document.createElement("style");
-  style.textContent = `
-    .split-armed { outline: 3px dashed red !important; }
-  `;
-  document.head.appendChild(style);
-});

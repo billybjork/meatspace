@@ -66,6 +66,13 @@
     background-color: #ed8936;
 }
 
+/* visual hint for split-mode */
+.split-armed {
+    outline: 3px dashed red !important;
+    /* Optional offset so the outline doesn’t sit right on the edge */
+    outline-offset: 2px;
+}
+
 /* ────────────────────────────────────────────────────────────────────────── */
 /* Center the sprite-sheet “video” player                                   */
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -126,12 +133,26 @@
   
   /* Style our in-page flash message                           */
   .flash-info {
-    background-color: #68d391;      /* a soft green */
     color: #22543d;                 /* dark-forest text */
     border-radius: 0.25rem;
     padding: 0.5rem 1rem;
     margin: 1rem auto;
-    max-width: 10rem;               /* match your container width */
+    max-width: 15rem;               /* match your container width */
     text-align: center;
     font-weight: 600;
-  }  
+  }
+
+.flash-info--approve { background-color: #48bb78; /* same as approve */ }
+.flash-info--skip    { background-color: #a0aec0; /* same as skip    */ }
+.flash-info--archive { background-color: #f56565; /* same as archive */ }
+.flash-info--merge   { background-color: #9f7aea; /* same as merge   */ }
+.flash-info--group   { background-color: #ed8936; /* same as group   */ }
+.flash-info--split   { background-color: #ecc94b; /* same as split   */ }
+
+/* ensure your text is still readable: */
+.flash-info--approve,
+.flash-info--merge,
+.flash-info--group { color: white; }
+.flash-info--skip,
+.flash-info--archive,
+.flash-info--split { color: black; }

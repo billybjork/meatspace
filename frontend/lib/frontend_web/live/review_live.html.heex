@@ -98,7 +98,12 @@
         </div>
         <!-- Flash action confirmation -->
         <%= if msg = @flash["info"] do %>
-          <p class="flash-info"><%= msg %></p>
+          <p class={[
+              "flash-info",
+              @flash_action && "flash-info--#{@flash_action}"
+            ]}>
+            <%= msg %>
+          </p>
         <% end %>
       </div>
     </div>
