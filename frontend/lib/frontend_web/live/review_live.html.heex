@@ -1,87 +1,106 @@
-<%= if @page_state == :empty do %>
-  <%# --- EMPTY STATE --- %>
-  <div>
+<div id="review-container" phx-hook="ReviewHotkeys">
+  <%= if @page_state == :empty do %>
+    <%# --- EMPTY STATE --- %>
     <div>
-      <button
-        phx-click="undo"
-        disabled={@history == []}
-        aria-label="Go back to previous clip"
-        title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
-        ⬅️
-      </button>
-    </div>
-
-    <h2>
-      All clips reviewed!
-    </h2>
-
-    <p>
-      Check back later for more.
-    </p>
-  </div>
-<% else %>
-  <%# --- REVIEWING STATE --- %>
-  <%= if @future != [] do %>
-    <link
-      rel="preload"
-      as="image"
-      href={@future |> List.first() |> sprite_url()} />
-  <% end %>
-
-  <div>
-    <div>
-      <.sprite_player clip={@current} />
-
-      <div class="review-buttons">
+      <div>
         <button
           phx-click="undo"
+          class="review-buttons__undo"
           disabled={@history == []}
           aria-label="Go back to previous clip"
           title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
           ⬅️
         </button>
+      </div>
 
-        <button
-          phx-click="select"
-          phx-value-action="approve">
-          ✅ Approve
-        </button>
+      <h2>
+        All clips reviewed!
+      </h2>
 
-        <button
-          phx-click="select"
-          phx-value-action="skip">
-          ➡️ Skip
-        </button>
+      <p>
+        Check back later for more.
+      </p>
+    </div>
+  <% else %>
+    <%# --- REVIEWING STATE --- %>
+    <%= if @future != [] do %>
+      <link
+        rel="preload"
+        as="image"
+        href={@future |> List.first() |> sprite_url()} />
+    <% end %>
 
-        <button
-          phx-click="select"
-          phx-value-action="archive">
-          🗑️ Archive
-        </button>
+    <div>
+      <div>
+        <.sprite_player clip={@current} />
 
-        <button
-          phx-click="select"
-          phx-value-action="merge"
-          disabled={@history == []}
-          title={if @history == [], do: "No previous clip to merge with", else: "Merge with previous clip"}>
-          🔗 Merge (with previous)
-        </button>
+        <div class="review-buttons">
+          <button
+            phx-click="undo"
+            class="review-buttons__undo"
+            disabled={@history == []}
+            aria-label="Go back to previous clip"
+            title={if @history == [], do: "No previous clip", else: "Go back to previous clip"}>
+            ⬅️
+          </button>
 
-        <button
-          phx-click="select"
-          phx-value-action="group"
-          disabled={@history == []}
-          title={if @history == [], do: "No previous clip to group with", else: "Group with previous clip"}>
-          🖇️ Group (with previous)
-        </button>
+          <button
+            id="btn-approve"
+            class="review-buttons__action review-buttons__action--approve"
+            phx-click="select"
+            phx-value-action="approve">
+            ✅ Approve
+          </button>
 
-        <!-- Split button (no phx-hook needed) -->
-        <button
-          id={"split-#{@current.id}"}
-          data-clip-id={@current.id}>
-          ✂️ Split
-        </button>
+          <button
+            id="btn-skip"
+            class="review-buttons__action review-buttons__action--skip"
+            phx-click="select"
+            phx-value-action="skip">
+            ➡️ Skip
+          </button>
+
+          <button
+            id="btn-archive"
+            class="review-buttons__action review-buttons__action--archive"
+            phx-click="select"
+            phx-value-action="archive">
+            🗑️ Archive
+          </button>
+
+          <button
+            id="btn-merge"
+            class="review-buttons__action review-buttons__action--merge"
+            phx-click="select"
+            phx-value-action="merge"
+            disabled={@history == []}
+            title={if @history == [], do: "No previous clip to merge with", else: "Merge with previous clip"}>
+            🔗 Merge (with previous)
+          </button>
+
+          <button
+            id="btn-group"
+            class="review-buttons__action review-buttons__action--group"
+            phx-click="select"
+            phx-value-action="group"
+            disabled={@history == []}
+            title={if @history == [], do: "No previous clip to group with", else: "Group with previous clip"}>
+            🖇️ Group (with previous)
+          </button>
+
+          <!-- Split button (no phx-hook needed) -->
+          <button
+            id={"split-#{@current.id}"}
+            class="review-buttons__action review-buttons__action--split"
+            data-clip-id={@current.id}>
+            ✂️ Split
+          </button>
+        </div>
+        <!-- Flash action confirmation -->
+        <%= if msg = @flash["info"] do %>
+          <p class="flash-info"><%= msg %></p>
+        <% end %>
       </div>
     </div>
-  </div>
-<% end %>
+  <% end %>
+</div>

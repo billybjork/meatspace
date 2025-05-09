@@ -74,6 +74,7 @@ defmodule FrontendWeb.ReviewLive do
       |> push_history(clip)
       |> advance_queue()
       |> refill_future()
+      |> put_flash(:info, "Split clip #{clip.id}")
 
     {:noreply, persist_split_async(socket, clip, frame)}
   end
@@ -89,6 +90,7 @@ defmodule FrontendWeb.ReviewLive do
       |> push_history(curr)
       |> advance_queue()
       |> refill_future()
+      |> put_flash(:info, "Merged #{prev.id} ↔ #{curr.id}")
 
     {:noreply, persist_async(socket, {:merge, prev, curr})}
   end
@@ -101,6 +103,7 @@ defmodule FrontendWeb.ReviewLive do
       |> push_history(curr)
       |> advance_queue()
       |> refill_future()
+      |> put_flash(:info, "Grouped #{prev.id} ↔ #{curr.id}")
 
     {:noreply, persist_async(socket, {:group, prev, curr})}
   end
@@ -123,6 +126,7 @@ defmodule FrontendWeb.ReviewLive do
       |> push_history(clip)
       |> advance_queue()
       |> refill_future()
+      |> put_flash(:info, "#{String.capitalize(action)} clip #{clip.id}")
 
     {:noreply, persist_async(socket, clip.id, action)}
   end

@@ -1,3 +1,6 @@
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Review-queue buttons & undo/back                                          */
+/* ────────────────────────────────────────────────────────────────────────── */
 .review-buttons {
     display: flex;
     align-items: center;
@@ -14,7 +17,6 @@
 }
 
 .review-buttons__undo {
-    font-size: 1.5rem;
     color: #4a5568;
 }
 .review-buttons__undo:hover {
@@ -26,7 +28,9 @@
     cursor: not-allowed;
 }
 
-/* Approve / Skip / Archive / Merge share common styles... */
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Primary actions (Approve / Skip / Archive / Merge / Group)                */
+/* ────────────────────────────────────────────────────────────────────────── */
 .review-buttons__action {
     background: none;
     color: black;
@@ -36,7 +40,98 @@
 .review-buttons__action--skip:hover    { background-color: #a0aec0; }
 .review-buttons__action--archive:hover { background-color: #f56565; }
 .review-buttons__action--merge:hover   { background-color: #9f7aea; }
+.review-buttons__action--group:hover   { background-color: #ed8936; }
+
 .review-buttons__action:disabled {
     opacity: 0.4;
     cursor: not-allowed;
 }
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Keyboard-armed state (A/S/D/F/G)                                          */
+/* ────────────────────────────────────────────────────────────────────────── */
+.review-buttons__action.review-buttons__action--approve.is-armed {
+    background-color: #48bb78;
+}
+.review-buttons__action.review-buttons__action--skip.is-armed {
+    background-color: #a0aec0;
+}
+.review-buttons__action.review-buttons__action--archive.is-armed {
+    background-color: #f56565;
+}
+.review-buttons__action.review-buttons__action--merge.is-armed {
+    background-color: #9f7aea;
+}
+.review-buttons__action.review-buttons__action--group.is-armed {
+    background-color: #ed8936;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Center the sprite-sheet “video” player                                   */
+/* ────────────────────────────────────────────────────────────────────────── */
+.clip-display-container {
+    margin: 1rem auto;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Sprite-player controls (play/pause, scrub, frame counter)                */
+/* ────────────────────────────────────────────────────────────────────────── */
+.sprite-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1rem;
+    width: 100%;
+}
+
+/* Play/Pause button sits at left, never moves */
+.sprite-controls button {
+    flex: 0 0 auto;
+}
+
+/* Scrub bar fills the center, but will not shrink below its initial size */
+.sprite-controls input[type="range"] {
+    flex: 1 1 auto;
+    margin: 0 0.75rem;
+    min-width: 0;
+}
+
+/* Frame counter is given a fixed character width so its changing text
+   doesn’t force the scrub bar to resize */
+.sprite-controls span {
+    flex: 0 0 auto;
+    width: 5ch;
+    text-align: right;
+    font-family: monospace;
+    white-space: nowrap;
+}
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/* Extra buttons (Play/Pause & Split)                                       */
+/* ────────────────────────────────────────────────────────────────────────── */
+.review-buttons__action--play:hover {
+    background-color: #63b3ed;
+}
+
+.review-buttons__action--split:hover {
+    background-color: #ecc94b;
+}
+
+/* ────────────────────────────────────────────────────────── */
+/* Hide the default fixed flash (we’ll use our own below)  */
+/* ────────────────────────────────────────────────────────── */
+#flash-group {
+    display: none !important;
+  }
+  
+  /* Style our in-page flash message                           */
+  .flash-info {
+    background-color: #68d391;      /* a soft green */
+    color: #22543d;                 /* dark-forest text */
+    border-radius: 0.25rem;
+    padding: 0.5rem 1rem;
+    margin: 1rem auto;
+    max-width: 10rem;               /* match your container width */
+    text-align: center;
+    font-weight: 600;
+  }  

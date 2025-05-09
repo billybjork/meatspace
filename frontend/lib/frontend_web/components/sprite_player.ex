@@ -61,6 +61,7 @@ def sprite_player(assigns) do
     <div class="sprite-controls">
       <button
         id={"playpause-#{@clip.id}"}
+        class="review-buttons__action review-buttons__action--play"
         data-action="toggle"
       >
         ⏯️
