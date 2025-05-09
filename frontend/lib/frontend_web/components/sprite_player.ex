@@ -64,7 +64,7 @@ def sprite_player(assigns) do
         class="review-buttons__action review-buttons__action--play"
         data-action="toggle"
       >
-        ⏯️
+        ▶️
       </button>
 
       <input

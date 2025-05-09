@@ -1,0 +1,108 @@
+/* ------------- Design tokens ------------------------------------------ */
+:root {
+    /* neutrals */
+    --bg:        #f7fafc;
+    --fg:        #2d3748;
+    --panel:     #edf2f7;
+  
+    /* actions */
+    --approve: #48bb78;
+    --skip:    #a0aec0;
+    --archive: #f56565;
+    --merge:   #9f7aea;
+    --group:   #ed8936;
+    --split:   #ecc94b;
+}
+  
+/* ------------- Dark mode ---------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+:root {
+      --bg:    #1a202c;
+      --fg:    #e2e8f0;
+      --panel: #2d3748;
+  
+      /* tweak action contrast */
+      --skip:   #4a5568;
+      --archive:#c53030;
+    }
+}
+  
+/* ------------- Global ------------------------------------------------- */
+html {
+    background: var(--bg);
+    color: var(--fg);
+}
+  
+.stack-center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    text-align: center;
+}
+  
+.gap-4 {
+    gap: var(--space-3);
+}
+  
+/* ------------- Buttons ------------------------------------------------ */
+.btn {
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--space-1);
+    font-weight: 600;
+    background: none;
+    color: var(--fg);
+    transition: background 0.15s;
+}
+  
+.btn[disabled] {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+  
+/* Ghost buttons (undo, controls) */
+.btn-ghost {
+    color: inherit;
+    opacity: 0.7;
+}
+
+.btn-ghost:hover {
+    background: var(--panel);
+    opacity: 1;
+}
+  
+/* Action variants */
+.btn.approve:hover { background: var(--approve); color: #fff; }
+.btn.skip:hover    { background: var(--skip);    color: #000; }
+.btn.archive:hover { background: var(--archive); color: #fff; }
+.btn.merge:hover   { background: var(--merge);   color: #fff; }
+.btn.group:hover   { background: var(--group);   color: #000; }
+.btn.split:hover   { background: var(--split);   color: #000; }
+  
+/* ------------- Flash messages ----------------------------------------- */
+.flash {
+    margin-top: var(--space-3);
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--space-1);
+    font-weight: 600;
+}
+
+.flash--approve { background: var(--approve); color: #fff; }
+.flash--skip    { background: var(--skip);    color: #000; }
+.flash--archive { background: var(--archive); color: #fff; }
+.flash--merge   { background: var(--merge);   color: #fff; }
+.flash--group   { background: var(--group);   color: #000; }
+.flash--split   { background: var(--split);   color: #000; }
+  
+/* ------------- Clip & actions wrapper --------------------------------- */
+.clip {
+    margin: var(--space-3) auto;
+    padding: var(--space-3) 0;
+}
+
+.actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: var(--space-2);
+    padding: 0 var(--space-3);
+}  

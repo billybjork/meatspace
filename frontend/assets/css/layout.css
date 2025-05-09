@@ -1,9 +1,7 @@
 /* --------------------------------------------------
    Base reset & typography
 -------------------------------------------------- */
-*,
-*::before,
-*::after {
+*, *::before, *::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
@@ -13,37 +11,25 @@ html {
   font-size: 16px;
   line-height: 1.5;
   font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  background-color: #f7fafc;
-  color: #2d3748;
 }
 
 /* --------------------------------------------------
-   Page‑level container
+   Page-level container
 -------------------------------------------------- */
 .container {
   width: 100%;
   max-width: 1024px;
-  margin-left: auto;
-  margin-right: auto;
-  padding-left: 1rem;
-  padding-right: 1rem;
+  margin: 0 auto;
+  padding: 0 1rem;
 }
 
 /* --------------------------------------------------
-   Flex & grid utilities (optional)
+   Flex & grid utilities
 -------------------------------------------------- */
-.flex {
-  display: flex;
-}
-.items-center {
-  align-items: center;
-}
-.justify-center {
-  justify-content: center;
-}
-.grid {
-  display: grid;
-}
+.flex { display: flex; }
+.items-center { align-items: center; }
+.justify-center { justify-content: center; }
+.grid { display: grid; }
 
 /* --------------------------------------------------
    Common spacing vars
@@ -59,4 +45,4 @@ html {
 .mt-2 { margin-top: var(--space-2); }
 .mt-3 { margin-top: var(--space-3); }
 .mt-4 { margin-top: var(--space-4); }
-.mx-auto { margin-left: auto; margin-right: auto; }
+.mx-auto { margin: 0 auto; }
