@@ -125,15 +125,31 @@ export const SpritePlayerController = {
       });
     }
 
-    /* Global keyboard shortcuts while viewer is mounted */
+    /* Global keyboard shortcuts while viewer is mounted
+     * --------------------------------------------------
+     *  ⬅ / ➡   – if split-mode is *not* armed yet, first enter
+     *             split-mode (same effect as clicking ✂️) and then
+     *             nudge one frame.  If already armed, just nudge.
+     *
+     *  Esc      – exit split-mode and resume playback.
+     * -------------------------------------------------- */
     this._onKey = evt => {
-      switch (evt.key) {
-        case "Escape":     SplitManager.exit();               break;
-        case "ArrowLeft":  SplitManager.nudge(-1);            break;
-        case "ArrowRight": SplitManager.nudge(+1);            break;
-        default: /* noop */
+      if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
+        evt.preventDefault();                    // stop page scroll
+
+        if (!SplitManager.splitMode) {
+          /* auto-arm split mode on first arrow press */
+          SplitManager.enter(this.player, splitBtn);
+        }
+        SplitManager.nudge(evt.key === "ArrowLeft" ? -1 : +1);
+        return;
+      }
+
+      if (evt.key === "Escape") {
+        SplitManager.exit();
       }
     };
+    
     window.addEventListener("keydown", this._onKey);
 
     /* Kick off playback once sprite is loaded */
