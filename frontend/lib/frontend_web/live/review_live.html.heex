@@ -1,19 +1,21 @@
 <main id="review" phx-hook="ReviewHotkeys">
   <!-- Empty-queue -------------------------------------------------------- -->
   <%= if @page_state == :empty do %>
-    <section class="stack-center">
-      <button
-        type="button"
-        phx-click="undo"
-        class="btn-ghost"
-        disabled={@history == []}
-        aria-label="Undo last action"
-        title={if @history == [], do: "Nothing to undo", else: "Undo last action"}>
-        ⬅️
-      </button>
-
+    <section class="stack-center gap-4">
       <h2>All clips reviewed!</h2>
       <p class="muted">Check back later for more.</p>
+
+      <nav role="group" aria-label="Review actions" class="actions">
+        <button
+          type="button"
+          phx-click="undo"
+          class="btn-ghost"
+          disabled={@history == []}
+          aria-label="Undo last action"
+          title={if @history == [], do: "Nothing to undo", else: "Undo last action"}>
+          ⬅️
+        </button>
+      </nav>
     </section>
 
   <!-- Reviewing ---------------------------------------------------------- -->
@@ -38,18 +40,18 @@
         <button id="btn-approve" class="btn approve" phx-click="select" phx-value-action="approve">
           ✅ Approve
         </button>
-        <button id="btn-skip"    class="btn skip"    phx-click="select" phx-value-action="skip">
+        <button id="btn-skip" class="btn skip" phx-click="select" phx-value-action="skip">
           ➡️ Skip
         </button>
         <button id="btn-archive" class="btn archive" phx-click="select" phx-value-action="archive">
           🗑️ Archive
         </button>
-        <button id="btn-merge"   class="btn merge"   phx-click="select" phx-value-action="merge"
+        <button id="btn-merge" class="btn merge" phx-click="select" phx-value-action="merge"
                 disabled={@history == []}
                 title={if @history == [], do: "No previous clip to merge with", else: "Merge with previous clip"}>
           🔗 Merge
         </button>
-        <button id="btn-group"   class="btn group"   phx-click="select" phx-value-action="group"
+        <button id="btn-group" class="btn group" phx-click="select" phx-value-action="group"
                 disabled={@history == []}
                 title={if @history == [], do: "No previous clip to group with", else: "Group with previous clip"}>
           🖇️ Group

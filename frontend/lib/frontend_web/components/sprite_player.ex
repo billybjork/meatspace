@@ -91,26 +91,28 @@ end
   defp build_sprite_player_meta(clip, art) do
     base = art.metadata || %{}
 
-    cols    = base["cols"]               || 5
-    rows    = base["rows"]               || 5
-    tile_w  = base["tile_width"]         || 160
-    tile_h  = base["tile_height_calculated"] || round(tile_w * 9 / 16)
-    fps     = base["clip_fps"]           || clip.source_video.fps || 24
+    cols = base["cols"] || 5
+    tile_w = base["tile_width"] || 160
+    tile_h = base["tile_height_calculated"] || round(tile_w * 9 / 16)
+    fps = base["clip_fps"] || clip.source_video.fps || 24
 
     frames =
-      base["clip_total_frames"] ||
-        if clip.start_time_seconds && clip.end_time_seconds && fps > 0 do
-          Float.ceil((clip.end_time_seconds - clip.start_time_seconds) * fps)
-        else
-          cols * rows
-        end
+      base["total_sprite_frames"] ||
+      if clip.start_time_seconds && clip.end_time_seconds && fps > 0 do
+        Float.ceil((clip.end_time_seconds - clip.start_time_seconds) * fps)
+      else
+        cols * (base["rows"] || 1)   # or some sane default
+      end
+
+    # Recompute rows so you don’t ever address an out-of-bounds tile
+    rows = base["rows"] || div(frames + cols - 1, cols)
 
     %{
       "cols"                   => cols,
       "rows"                   => rows,
       "tile_width"             => tile_w,
       "tile_height_calculated" => tile_h,
-      "total_sprite_frames"    => cols * rows,
+      "total_sprite_frames"    => frames,
       "clip_fps"               => fps,
       "clip_total_frames"      => frames,
       "spriteUrl"              => cdn_url(art.s3_key),

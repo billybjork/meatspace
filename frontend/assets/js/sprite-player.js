@@ -343,7 +343,7 @@ class SpritePlayer {
   /** Calculate CSS background offset for a given frame. */
   _bgPosForFrame(frameNum) {
     const m            = this.meta;
-    const spriteFrames = Math.min(m.clip_total_frames, m.total_sprite_frames);
+    const spriteFrames = m.total_sprite_frames;
 
     const prop   = (spriteFrames > 1) ? frameNum / (m.clip_total_frames - 1) : 0;
     const index  = Math.floor(prop * (spriteFrames - 1));
