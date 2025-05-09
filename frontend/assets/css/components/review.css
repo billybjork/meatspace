@@ -13,14 +13,33 @@
     align-items: center;
     width: 100%;
     padding: var(--space-2) 0;
-    /* three columns: play button, scrub bar, frame counter */
-    grid-template-columns: auto 1fr 8ch;
+    /* three columns: fixed-width button, scrub bar, frame counter */
+    grid-template-columns: 3rem 1fr 8ch;
     column-gap: var(--space-2);
     max-width: 100%;
+    /* lock height so icon toggles don’t shift the navigation below */
+    min-height: 3rem;
 }
 
-/* Control buttons (play/pause) and undo consistency */
-.sprite-controls button,
+/* Control buttons (play/pause) */
+/* — fixed size so ⏸️ vs ▶️ stays in one spot — */
+.sprite-controls button {
+    width: 3rem;             
+    height: 3rem;            
+    display: flex;           
+    align-items: center;     
+    justify-content: center; 
+    background: none !important;
+    color: var(--fg);
+    transition: background 0.15s;
+}
+
+.sprite-controls button:hover {
+    background: var(--panel);
+    opacity: 1;
+}
+
+/* Make ghost-button respect disabled state like .btn[disabled] */
 .actions .btn-ghost {
     padding: var(--space-2) var(--space-3);
     font-weight: 600;
@@ -29,13 +48,11 @@
     transition: background 0.15s;
 }
 
-.sprite-controls button:hover,
 .actions .btn-ghost:hover {
     background: var(--panel);
     opacity: 1;
 }
 
-/* Make ghost-button respect disabled state like .btn[disabled] */
 .actions .btn-ghost[disabled],
 .sprite-controls button[disabled] {
     opacity: 0.4;
@@ -54,7 +71,7 @@
     display: inline-block;    /* so width applies */
     width: 8ch;               /* fixed width for “Frame: XX” */
     text-align: right;
-    font-family: monospace;   /* makes each digit exactly 1ch wide */
+    font-family: monospace;   /* digits are always 1ch wide */
     white-space: nowrap;
 }
 

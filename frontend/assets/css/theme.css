@@ -58,18 +58,7 @@ html {
     opacity: 0.4;
     cursor: not-allowed;
 }
-  
-/* Ghost buttons (undo, controls) */
-.btn-ghost {
-    color: inherit;
-    opacity: 0.7;
-}
 
-.btn-ghost:hover {
-    background: var(--panel);
-    opacity: 1;
-}
-  
 /* Action variants */
 .btn.approve:hover { background: var(--approve); color: #fff; }
 .btn.skip:hover    { background: var(--skip);    color: #000; }
