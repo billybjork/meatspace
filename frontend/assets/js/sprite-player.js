@@ -127,7 +127,7 @@ export const SpritePlayerController = {
 
     /* Global keyboard shortcuts while viewer is mounted
      * --------------------------------------------------
-     *  ⬅ / ➡   – if split-mode is *not* armed yet, first enter
+     *  ⬅️ / ➡️   – if split-mode is *not* armed yet, first enter
      *             split-mode (same effect as clicking ✂️) and then
      *             nudge one frame.  If already armed, just nudge.
      *
@@ -336,7 +336,7 @@ class SpritePlayer {
   }
 }
 
-/* optional visual hint */
+/* visual hint */
 document.addEventListener("DOMContentLoaded", () => {
   const style = document.createElement("style");
   style.textContent = `

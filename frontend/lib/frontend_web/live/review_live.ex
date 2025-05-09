@@ -11,7 +11,6 @@ defmodule FrontendWeb.ReviewLive do
 
   # Components / helpers
   import FrontendWeb.SpritePlayer, only: [sprite_player: 1, sprite_url: 1]
-  import FrontendWeb.ReviewButtons, only: [review_buttons: 1]
 
   alias Frontend.Clips
   alias Frontend.Clips.Clip
