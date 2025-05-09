@@ -16,6 +16,7 @@ export const SplitManager = {
   splitMode     : false,   // are we armed?
   activePlayer  : null,    // SpritePlayer instance currently controlled
   btnEl         : null,    // the button that toggled us
+
   /**
    * Enter split mode: pause playback, highlight UI.
    */
@@ -200,7 +201,8 @@ class SpritePlayer {
     this.splitCb = splitCb; // kept for backward-compat but unused
 
     /* runtime state */
-    this.currentFrame     = 0;
+    // Start at frame 1 to avoid the padding pixel in frame 0
+    this.currentFrame     = 1;
     this.isPlaying        = false;
     this.playbackInterval = null;
     this.isScrubbing      = false;
@@ -228,14 +230,16 @@ class SpritePlayer {
     this.viewerEl.style.backgroundPosition = "0 0";
 
     /* controls default state */
-    this.scrubEl.max      = Math.max(0, m.clip_total_frames - 1);
-    this.scrubEl.value    = 0;
+    // Prevent displaying frame 0
+    this.scrubEl.min      = 1;
+    this.scrubEl.max      = Math.max(1, m.clip_total_frames - 1);
+    this.scrubEl.value    = this.currentFrame;
     this.scrubEl.disabled = false;
 
     this.playPauseBtn.disabled    = false;
-    this.playPauseBtn.textContent = "⏯️";
+    this.playPauseBtn.textContent = "▶";
 
-    this.frameLblEl.textContent = "Frame: 0";
+    this.frameLblEl.textContent = `Frame: ${this.currentFrame}`;
   }
 
   /* --------------------------------------------------------------------- */
@@ -279,7 +283,9 @@ class SpritePlayer {
 
   /** Jump to frame N (clamped). */
   updateFrame(frameNum, force = false) {
-    const f = Math.max(0, Math.min(frameNum, this.meta.clip_total_frames - 1));
+    // clamp to [1 … last] so frame 0 is never displayed
+    const last = this.meta.clip_total_frames - 1;
+    const f    = Math.max(1, Math.min(frameNum, last));
     if (f === this.currentFrame && !force) return;
 
     this.currentFrame = f;
@@ -294,12 +300,14 @@ class SpritePlayer {
   play(src = "unknown") {
     if (this.isPlaying || this.meta.clip_fps <= 0) return;
     this.isPlaying = true;
-    this.playPauseBtn.textContent = "⏸️";
+    this.playPauseBtn.textContent = "⏸";
 
     /* advance at source FPS */
     const interval = 1000 / this.meta.clip_fps;
+    const last     = this.meta.clip_total_frames - 1;
     this.playbackInterval = setInterval(() => {
-      const nxt = this.currentFrame + 1 >= this.meta.clip_total_frames ? 0 : this.currentFrame + 1;
+      // wrap from “last” straight back to 1 (skips 0)
+      const nxt = (this.currentFrame + 1 > last) ? 1 : this.currentFrame + 1;
       this.updateFrame(nxt, true);
     }, interval);
   }
@@ -307,7 +315,7 @@ class SpritePlayer {
   pause(src = "unknown") {
     if (!this.isPlaying) return;
     this.isPlaying = false;
-    this.playPauseBtn.textContent = "⏯️";
+    this.playPauseBtn.textContent = "▶";
     clearInterval(this.playbackInterval);
     this.playbackInterval = null;
   }
