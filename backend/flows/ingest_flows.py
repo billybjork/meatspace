@@ -160,11 +160,12 @@ def _commit_pending_review_actions(grace_period_seconds: int):
                         target_state = "archived_pending_deletion"
                     elif action == "selected_merge_source":
                         target_state = "marked_for_merge_into_previous"
-                    elif action == "selected_group_source":
-                        target_state = "review_approved" # Grouped clips are also approved
-                        # Logic for 'grouped_with_clip_id' is handled below before the main update
                     elif action == "selected_merge_target":
                         target_state = "pending_merge_target"
+                    elif action == "selected_group_source":
+                        target_state = "review_approved"
+                    elif action == "selected_group_target":
+                        target_state = "review_approved"
                     elif action == "selected_split":
                         target_state = "pending_split"
                         split_at_frame_val = event_data.get("split_at_frame")
