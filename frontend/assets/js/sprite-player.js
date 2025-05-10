@@ -5,18 +5,6 @@
  * • SplitManager            – global split-mode state machine
  * • ThumbHoverPlayer        – lightweight hover-autoplay for sibling thumbs
  *
- * Register all three hooks with LiveSocket:
- *
- *     import { SpritePlayerController,
- *              SplitManager,
- *              ThumbHoverPlayer } from "./sprite-player"
- *
- *     let Hooks = {
- *       ReviewHotkeys,
- *       SpritePlayer: SpritePlayerController,
- *       ThumbHoverPlayer
- *     }
- *
  * No server round-trips: everything runs in the browser.
  */
 

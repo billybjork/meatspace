@@ -8,16 +8,13 @@ defmodule FrontendWeb.ReviewLive do
   * **future**   – pre-fetched queue  (max 5 after the current one)
   * **history**  – last 5 reviewed clips (undo support)
 
-  ## New “ID-mode” additions
+  ## “ID-mode”
 
   * **`id_mode?`**      – boolean; toggled by ⌘+Space (sent by JS)
   * **`sibling_page`**  – current page in the sibling-grid pagination
   * **`siblings`**      – list of *other* clips from the same `source_video`
                           (lazy-loaded one page at a time)
 
-  No persistence-layer changes were required – we simply call the existing
-  `Clips.request_{merge,group}_and_fetch_next/3` with the *explicit* target
-  clip (looked-up by ID).
   """
 
   use FrontendWeb, :live_view

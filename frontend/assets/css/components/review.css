@@ -1,7 +1,3 @@
-/*───────────────────────────────────────────────────────────────────────────
-  Review page (pending clips)
-  ─────────────────────────────────────────────────────────────────────────*/
-
 /* Hide default LV flash -------------------------------------------------- */
 #flash-group {
     display: none !important;
@@ -96,7 +92,7 @@
 }
 
 /*───────────────────────────────────────────────────────────────────────────
-  NEW — merge/group-by-ID mode
+  Merge/Group-by-ID mode
   ─────────────────────────────────────────────────────────────────────────*/
 
 /* Hide in two cases only:
@@ -148,9 +144,6 @@
     color: var(--muted);
 }
 
-/* the <div class="thumb-viewer"> now owns size; no img rules needed */
-
-/* pseudo-autoplay handled in JS – we just fade in on hover */
 .thumb-viewer:hover {
     opacity: 0.8;
 }
