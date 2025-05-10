@@ -91,30 +91,40 @@ end
   defp build_sprite_player_meta(clip, art) do
     base = art.metadata || %{}
 
-    cols = base["cols"] || 5
-    tile_w = base["tile_width"] || 160
-    tile_h = base["tile_height_calculated"] || round(tile_w * 9 / 16)
-    fps = base["clip_fps"] || clip.source_video.fps || 24
+    cols    = base["cols"]               || 5
+    tile_w  = base["tile_width"]         || 160
+    tile_h  = base["tile_height_calculated"] || round(tile_w * 9 / 16)
 
-    frames =
-      base["total_sprite_frames"] ||
-      if clip.start_time_seconds && clip.end_time_seconds && fps > 0 do
-        Float.ceil((clip.end_time_seconds - clip.start_time_seconds) * fps)
-      else
-        cols * (base["rows"] || 1)   # or some sane default
-      end
+    fps =
+      base["clip_fps"] ||
+        base["clip_fps_source"] ||
+        clip.source_video.fps   ||
+        24
 
-    # Recompute rows so you don’t ever address an out-of-bounds tile
-    rows = base["rows"] || div(frames + cols - 1, cols)
+    #  1.  real tile count (already stored by sprite.py)
+    total_sprite_frames =
+      base["total_sprite_frames"] || cols * (base["rows"] || 1)
+
+    # 2.  logical frame count of the *source* clip
+    clip_total_frames =
+      base["clip_total_frames_source"] ||         # sprite.py puts nb_frames here
+        if clip.start_time_seconds && clip.end_time_seconds && fps > 0 do
+          Float.ceil((clip.end_time_seconds - clip.start_time_seconds) * fps)
+        else
+          total_sprite_frames               # fall back – never smaller than tiles
+        end
+
+    # recompute rows only if they weren't stored
+    rows = base["rows"] || div(total_sprite_frames + cols - 1, cols)
 
     %{
       "cols"                   => cols,
       "rows"                   => rows,
       "tile_width"             => tile_w,
       "tile_height_calculated" => tile_h,
-      "total_sprite_frames"    => frames,
+      "total_sprite_frames"    => total_sprite_frames,
       "clip_fps"               => fps,
-      "clip_total_frames"      => frames,
+      "clip_total_frames"      => clip_total_frames,
       "spriteUrl"              => cdn_url(art.s3_key),
       "isValid"                => true
     }
