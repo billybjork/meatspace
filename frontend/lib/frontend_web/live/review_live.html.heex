@@ -1,5 +1,5 @@
 <main id="review" phx-hook="ReviewHotkeys">
-  <!-- Empty-queue -------------------------------------------------------- -->
+  <!-- Empty-queue ------------------------------------------------------- -->
   <%= if @page_state == :empty do %>
     <section class="stack-center gap-4">
       <h2>All clips reviewed!</h2>
@@ -18,7 +18,7 @@
       </nav>
     </section>
 
-  <!-- Reviewing ---------------------------------------------------------- -->
+  <!-- Reviewing --------------------------------------------------------- -->
   <% else %>
     <%= if @future != [] do %>
       <link rel="preload" as="image" href={@future |> List.first() |> sprite_url()} />
@@ -27,7 +27,13 @@
     <article class="stack-center gap-4">
       <.sprite_player clip={@current} />
 
-      <nav role="group" aria-label="Review actions" class="actions">
+      <!-- Action buttons ------------------------------------------------ -->
+      <nav role="group"
+           aria-label="Review actions"
+           class="actions"
+           data-id-mode={@id_mode?}
+           id="review-actions">
+        <!-- Undo -->
         <button
           phx-click="undo"
           class="btn-ghost"
@@ -37,6 +43,7 @@
           ⬅️
         </button>
 
+        <!-- Approve / Skip / Archive -->
         <button id="btn-approve" class="btn approve" phx-click="select" phx-value-action="approve">
           ✅ Approve
         </button>
@@ -46,6 +53,8 @@
         <button id="btn-archive" class="btn archive" phx-click="select" phx-value-action="archive">
           🗑️ Archive
         </button>
+
+        <!-- Merge / Group (default ↔ previous) -->
         <button id="btn-merge" class="btn merge" phx-click="select" phx-value-action="merge"
                 disabled={@history == []}
                 title={if @history == [], do: "No previous clip to merge with", else: "Merge with previous clip"}>
@@ -57,16 +66,59 @@
           🖇️ Group
         </button>
 
+        <!-- Split (handled by JS hook) -->
         <button id={"split-#{@current.id}"} class="btn split" data-clip-id={@current.id}>
           ✂️ Split
         </button>
+
+        <!-- Target-ID input (only visible in ID-mode and while a letter key is armed) -->
+        <input id="target-id"
+               type="number"
+               inputmode="numeric"
+               phx-debounce="blur"
+               class="target-id-input hidden"
+               placeholder="clip-id" />
       </nav>
 
+      <!-- Flash message -->
       <p :if={msg = @flash["info"]}
          class={["flash", "flash--#{@flash_action}"]}
          aria-live="polite">
         <%= msg %>
       </p>
+
+      <!-- Sibling thumbnails (ID-mode only) ----------------------------- -->
+      <section :if={@id_mode?} id="siblings" class="thumbnail-grid">
+        <%= for sib <- @siblings do %>
+          <%= if Enum.any?(sib.clip_artifacts, &(&1.artifact_type == "sprite_sheet")) do %>
+            <figure class="thumbnail" id={"thumb-#{sib.id}"}>
+              <div  id={"thumb-viewer-#{sib.id}"}
+                    class="thumb-viewer"
+                    phx-hook="ThumbHoverPlayer"
+                    data-player={FrontendWeb.SpritePlayer.thumb_meta_json(sib)}>
+              </div>
+              <figcaption><%= sib.id %></figcaption>
+            </figure>
+          <% end %>
+        <% end %>
+
+        <!-- Pagination controls -->
+        <div class="pagination">
+          <button :if={@sibling_page > 1}
+                  class="btn-ghost"
+                  phx-click="change-page"
+                  phx-value-page={@sibling_page - 1}>
+            ◀︎ Prev
+          </button>
+          <span>page <%= @sibling_page %></span>
+          <button :if={Enum.count(@siblings) == @sibling_page_size}
+                  class="btn-ghost"
+                  phx-click="change-page"
+                  phx-value-page={@sibling_page + 1}>
+            Next ▶︎
+          </button>
+        </div>
+      </section>
     </article>
   <% end %>
 </main>

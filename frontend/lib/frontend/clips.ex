@@ -1,22 +1,27 @@
 defmodule Frontend.Clips do
   @moduledoc """
-  The **Clips** context — fetch, review and annotate clips.
+  The **Clips** context — everything about fetching, reviewing and annotating
+  clips.
 
-  ## Responsibilities
+  ### Responsibilities
 
   * **Queue helpers** – return batches of `pending_review` clips that the
     LiveView keeps in memory (`next_pending_review_clips/2`).
-  * **Event sourcing** – write `clip_events` rows for every UI action and
-    flip `reviewed_at` so the clip leaves the queue.
-  * **Composite actions** – *merge*, *group*, *split* all perform more
-    than one DB change but still return the “next job” in a single round
-    trip.
+
+  * **Event sourcing** – write `clip_events` rows for every UI action and flip
+    `reviewed_at` so the clip leaves the queue.
+
+  * **Composite actions** – *merge*, *group*, *split* all perform more than one
+    DB mutation but still return the “next job” in a single round-trip.
+
+  * **Sibling browsing** – `for_source_video/4` returns pages of other clips
+    from the same source video (used by the new merge/group-by-ID mode).
 
   All public helpers either:
 
-  * return `{:ok, {next_clip_or_nil, context}}` (single-row helpers) **or**
-  * return `{next_clip_or_nil, context}` inside a DB transaction
-    (composite helpers).
+    * return `{:ok, {next_clip_or_nil, context}}` (single-row helpers) **or**
+    * return `{next_clip_or_nil, context}` inside a DB transaction
+      (composite helpers).
 
   `context` makes downstream telemetry / job-queueing simpler.
   """
@@ -32,7 +37,7 @@ defmodule Frontend.Clips do
   alias Frontend.Clips.{Clip, ClipEvent}
 
   # -------------------------------------------------------------------------
-  # Constants
+  # Constants (UI → DB action map)
   # -------------------------------------------------------------------------
 
   @action_map %{
@@ -60,15 +65,56 @@ defmodule Frontend.Clips do
   end
 
   # -------------------------------------------------------------------------
+  # Public helpers added for the new UI
+  # -------------------------------------------------------------------------
+
+  @doc """
+  Return **one** clip (with `:source_video` and `:clip_artifacts` preloaded)
+  or raise if it doesn’t exist.
+
+  Used by *ReviewLive* when the reviewer types an explicit ID in merge/group-
+  by-ID mode.
+  """
+  @spec get_clip!(integer) :: Clip.t()
+  def get_clip!(id) when is_integer(id), do: load_clip_with_assocs(id)
+
+  @doc """
+  Paged list of **other** clips that belong to the same `source_video`.
+
+      iex> for_source_video(42, 777, 2, 24)
+      # second page (offset 24) of clips whose `source_video_id` is 42,
+      # excluding clip 777 itself, 24 rows max – preloaded for thumbnail grid.
+
+  * `sv_id`       – the `source_video.id` that all clips must share
+  * `exclude_id`  – the *current* clip (will be omitted from the result)
+  * `page`        – 1-based page index
+  * `per`         – page size (defaults to 24 thumbnails)
+
+  Results are ordered by `id ASC` to make pagination deterministic even when
+  background workers update timestamps.
+  """
+  @spec for_source_video(pos_integer, pos_integer, pos_integer, pos_integer) :: [Clip.t()]
+  def for_source_video(sv_id, exclude_id, page \\ 1, per \\ 24)
+      when is_integer(sv_id) and is_integer(exclude_id) and page >= 1 and per > 0 do
+    Clip
+    |> where([c], c.source_video_id == ^sv_id and c.id != ^exclude_id)
+    |> order_by([c], asc: c.id)
+    |> limit(^per)
+    |> offset(^(per * (page - 1)))
+    |> preload([:clip_artifacts])
+    |> Repo.all()
+  end
+
+  # -------------------------------------------------------------------------
   # Public API – fetch helpers
   # -------------------------------------------------------------------------
 
   @doc """
   Return up to `limit` clips still awaiting review, excluding any IDs in
-  `exclude_ids` (used to avoid duplicates already cached in memory).
+  `exclude_ids`.
 
-  Clips are ordered by *id* to remain stable even if background workers
-  update timestamps.
+  Clips are ordered by *id* to remain stable even if background workers update
+  timestamps.
   """
   def next_pending_review_clips(limit, exclude_ids \\ []) when is_integer(limit) do
     Clip
@@ -151,9 +197,9 @@ defmodule Frontend.Clips do
   @doc """
   Handle a **merge** request between *prev ⇠ current* clips.
 
-    1. Log both sides of the merge
-    2. Mark both clips reviewed & store processing metadata
-    3. Fetch the next `pending_review` clip
+  1. Log both sides of the merge
+  2. Mark both clips reviewed & store processing metadata
+  3. Fetch the next `pending_review` clip
 
   Returns `{next_clip_or_nil, context}`.
   """
@@ -217,9 +263,9 @@ defmodule Frontend.Clips do
   @doc """
   Handle a **group** request between *prev ⇠ current* clips.
 
-    1. Log target & source events
-    2. Mark *current* clip reviewed
-    3. Fetch the next job
+  1. Log target & source events
+  2. Mark *current* clip reviewed
+  3. Fetch the next job
   """
   def request_group_and_fetch_next(%Clip{id: prev_id},
                                    %Clip{id: curr_id}) do
@@ -272,9 +318,9 @@ defmodule Frontend.Clips do
   @doc """
   Handle a **split** request on `clip` at `frame_num`.
 
-    1. Log `selected_split` with `split_at_frame`
-    2. Mark the clip reviewed
-    3. Fetch the next job
+  1. Log `selected_split` with `split_at_frame`
+  2. Mark the clip reviewed
+  3. Fetch the next job
   """
   def request_split_and_fetch_next(%Clip{id: clip_id}, frame_num)
       when is_integer(frame_num) do

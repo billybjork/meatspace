@@ -1,34 +1,40 @@
-/* Hide default LV flash */
+/*───────────────────────────────────────────────────────────────────────────
+  Review page (pending clips)
+  ─────────────────────────────────────────────────────────────────────────*/
+
+/* Hide default LV flash -------------------------------------------------- */
 #flash-group {
     display: none !important;
 }
 
+/* Sprite player ---------------------------------------------------------- */
 .sprite-viewer {
     margin-top: var(--space-4);
 }
 
-/* Sprite-player controls container (using CSS Grid) */
+/* Sprite-player controls container (CSS Grid) ---------------------------- */
 .sprite-controls {
     display: grid;
     align-items: center;
     width: 100%;
     padding: var(--space-2) 0;
-    /* three columns: fixed-width button, scrub bar, frame counter */
+
+    /* three columns: fixed button · scrub bar · frame counter */
     grid-template-columns: 3rem 1fr 8ch;
     column-gap: var(--space-2);
     max-width: 100%;
-    /* lock height so icon toggles don’t shift the navigation below */
+
+    /* lock height so icon toggles don’t shift navigation below */
     min-height: 3rem;
 }
 
-/* Control buttons (play/pause) */
-/* — fixed size so ⏸️ vs ▶️ stays in one spot — */
+/* Control buttons (play/pause) – fixed size so ⏸️ vs ▶️ stays aligned ---- */
 .sprite-controls button {
-    width: 3rem;             
-    height: 3rem;            
-    display: flex;           
-    align-items: center;     
-    justify-content: center; 
+    width: 3rem;
+    height: 3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     background: none !important;
     color: var(--fg);
     transition: background 0.15s;
@@ -39,7 +45,7 @@
     opacity: 1;
 }
 
-/* Make ghost-button respect disabled state like .btn[disabled] */
+/* Make ghost-button respect disabled state like .btn[disabled] ----------- */
 .actions .btn-ghost {
     padding: var(--space-2) var(--space-3);
     font-weight: 600;
@@ -59,23 +65,23 @@
     cursor: not-allowed;
 }
 
-/* Scrub bar fills the middle grid column */
+/* Scrub bar fills the middle grid column -------------------------------- */
 .sprite-controls input[type="range"] {
     width: 100%;
     margin: 0;
     min-width: 0;
 }
 
-/* Fixed-width frame counter in the third grid column */
+/* Fixed-width frame counter in the third grid column -------------------- */
 .sprite-controls span {
-    display: inline-block;    /* so width applies */
-    width: 8ch;               /* fixed width for “Frame: XX” */
+    display: inline-block;          /* so width applies */
+    width: 8ch;                     /* fixed width for “Frame: XX” */
     text-align: right;
-    font-family: monospace;   /* digits are always 1ch wide */
+    font-family: monospace;         /* digits are always 1ch wide */
     white-space: nowrap;
 }
 
-/* Action buttons armed state */
+/* Action buttons armed state -------------------------------------------- */
 .btn.approve.is-armed  { background: var(--approve); color: #fff; }
 .btn.skip.is-armed     { background: var(--skip);    color: #000; }
 .btn.archive.is-armed  { background: var(--archive); color: #fff; }
@@ -83,8 +89,82 @@
 .btn.group.is-armed    { background: var(--group);   color: #000; }
 .btn.split.is-armed    { background: var(--split);   color: #000; }
 
-/* Split-mode outline indicator */
+/* Split-mode outline indicator ------------------------------------------ */
 .split-armed {
     outline: 3px dashed var(--split);
     outline-offset: 2px;
+}
+
+/*───────────────────────────────────────────────────────────────────────────
+  NEW — merge/group-by-ID mode
+  ─────────────────────────────────────────────────────────────────────────*/
+
+/* Hide in two cases only:
+   ① ID-mode is off   ② JS hasn’t removed the .hidden helper class */
+   .actions[data-id-mode="false"] .target-id-input,
+   .target-id-input.hidden {
+       display: none;
+   }
+   
+   /* When visible it appears inline with buttons */
+   .target-id-input {
+       display: inline-block;
+       width: 8ch;
+}
+   
+/* Base styling for the numeric box when it *is* shown ------------------- */
+.target-id-input {
+    /* appears inline with buttons */
+    width: 8ch;
+    padding: var(--space-2) var(--space-2);
+    margin-left: var(--space-3);
+    font: inherit;
+    color: var(--fg);
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    text-align: right;
+}
+
+/* focus ring matches Tailwind default ----------------------------------- */
+.target-id-input:focus {
+    outline: 2px solid var(--focus);
+    outline-offset: 2px;
+}
+
+/* Thumbnail grid of sibling clips --------------------------------------- */
+.thumbnail-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: var(--space-3);
+    margin-top: var(--space-4);
+    width: 100%;
+}
+
+.thumbnail-grid .thumbnail {
+    text-align: center;
+    font-size: 0.75rem;
+    line-height: 1;
+    color: var(--muted);
+}
+
+/* the <div class="thumb-viewer"> now owns size; no img rules needed */
+
+/* pseudo-autoplay handled in JS – we just fade in on hover */
+.thumb-viewer:hover {
+    opacity: 0.8;
+}
+
+/* Pagination controls under the grid ------------------------------------ */
+.pagination {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: var(--space-3);
+    margin: var(--space-4) 0 0;   /* always sits *below* the grid */
+    grid-column: 1 / -1;          /* span full width when inside grid */
+}
+
+.pagination .btn-ghost {
+    padding: var(--space-1) var(--space-3);
 }

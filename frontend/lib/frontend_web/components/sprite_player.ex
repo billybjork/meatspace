@@ -84,6 +84,27 @@ def sprite_player(assigns) do
   """
 end
 
+@doc """
+Lightweight meta map for thumbnails (same fields the big player needs but
+only what hover-autoplay uses). Returns JSON.
+"""
+def thumb_meta_json(%Clip{} = clip) do
+  with art when not is_nil(art) <-
+         Enum.find(clip.clip_artifacts, &(&1.artifact_type == "sprite_sheet")) do
+    build_sprite_player_meta(clip, art)
+    |> Map.take([
+      "cols",
+      "rows",
+      "tile_width",
+      "tile_height_calculated",
+      "total_sprite_frames",
+      "clip_fps",
+      "spriteUrl"
+    ])                        # ← string keys
+    |> Jason.encode!()
+  end
+end
+
   # ------------------------------------------------------------------------
   # private helpers
   # ------------------------------------------------------------------------

@@ -1,11 +1,23 @@
 /**
- * Phoenix LiveView hook that turns a sprite-sheet PNG into a lightweight,
- * scrubbable “video” player.  Includes keyboard-driven split-mode for
- * manually selecting a cut-frame.
+ * Sprite-sheet utilities for Clip Review
+ * ──────────────────────────────────────────────────────────────────────────
+ * • SpritePlayerController  – full scrubbable viewer in the main panel
+ * • SplitManager            – global split-mode state machine
+ * • ThumbHoverPlayer        – lightweight hover-autoplay for sibling thumbs
  *
- * All logic is self-contained so the LiveView only needs to:
- *   * emit  <div phx-hook="SpritePlayer" …>
- *   * listen for `"select"` events
+ * Register all three hooks with LiveSocket:
+ *
+ *     import { SpritePlayerController,
+ *              SplitManager,
+ *              ThumbHoverPlayer } from "./sprite-player"
+ *
+ *     let Hooks = {
+ *       ReviewHotkeys,
+ *       SpritePlayer: SpritePlayerController,
+ *       ThumbHoverPlayer
+ *     }
+ *
+ * No server round-trips: everything runs in the browser.
  */
 
 /* ────────────────────────────────────────────────────────────────────────── */
@@ -13,29 +25,25 @@
 /* ────────────────────────────────────────────────────────────────────────── */
 
 export const SplitManager = {
-  splitMode     : false,   // are we armed?
-  activePlayer  : null,    // SpritePlayer instance currently controlled
-  btnEl         : null,    // the button that toggled us
+  splitMode     : false,
+  activePlayer  : null,
+  btnEl         : null,
 
-  /**
-   * Enter split mode: pause playback, highlight UI.
-   */
+  /** Enter split mode: pause playback, highlight UI. */
   enter(player, btn) {
     this.splitMode    = true;
     this.activePlayer = player;
     this.btnEl        = btn;
 
     player.pause("split-enter");
-    btn.classList.add("split-armed");
+    btn?.classList.add("split-armed");
     player.viewerEl.classList.add("split-armed");
   },
 
-  /**
-   * Exit without committing.
-   */
+  /** Exit without committing. */
   exit() {
     if (!this.splitMode) return;
-    this.btnEl.classList.remove("split-armed");
+    this.btnEl?.classList.remove("split-armed");
     this.activePlayer.viewerEl.classList.remove("split-armed");
     this.activePlayer.play("split-exit");
 
@@ -44,9 +52,7 @@ export const SplitManager = {
     this.btnEl        = null;
   },
 
-  /**
-   * Commit the chosen frame – pushes a `"select"` event and resets state.
-   */
+  /** Commit the chosen frame – pushes a `"select"` event and resets state. */
   commit(pushFn) {
     if (!this.splitMode || !this.activePlayer) return;
     pushFn("select", {
@@ -56,9 +62,7 @@ export const SplitManager = {
     this.exit();
   },
 
-  /**
-   * Nudge frame cursor left / right while armed.
-   */
+  /** Nudge frame cursor left / right while armed. */
   nudge(delta) {
     if (!this.splitMode || !this.activePlayer) return;
     const next = this.activePlayer.currentFrame + delta;
@@ -67,7 +71,7 @@ export const SplitManager = {
 };
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Phoenix Hook – one instance per sprite-sheet viewer                     */
+/*  Phoenix Hook – full sprite player                                       */
 /* ────────────────────────────────────────────────────────────────────────── */
 
 export const SpritePlayerController = {
@@ -81,9 +85,8 @@ export const SpritePlayerController = {
     }
 
     let meta;
-    try {
-      meta = JSON.parse(playerData);
-    } catch (err) {
+    try { meta = JSON.parse(playerData); }
+    catch (err) {
       console.error("[SpritePlayer] invalid JSON in data-player", err);
       return;
     }
@@ -92,7 +95,7 @@ export const SpritePlayerController = {
       return;
     }
 
-    /* Collect control elements */
+    /* collect control elements */
     const container  = this.el.parentElement;
     const scrub      = container.querySelector(`#scrub-${clipId}`);
     const playPause  = container.querySelector(`#playpause-${clipId}`);
@@ -104,91 +107,141 @@ export const SpritePlayerController = {
       return;
     }
 
-    /* Instantiate player */
+    /* instantiate player */
     this.player = new SpritePlayer(
       clipId,
       this.el,
       scrub,
       playPause,
       frameLabel,
-      meta,
-      null // split-callback no longer used, kept for BC
+      meta
     );
 
-    /* Split-button behaviour */
-    if (splitBtn) {
-      splitBtn.addEventListener("click", () => {
-        if (!SplitManager.splitMode) {
-          SplitManager.enter(this.player, splitBtn);
-        } else {
-          SplitManager.commit((evt, payload) => this.pushEvent(evt, payload));
-        }
-      });
-    }
+    /* Split-button */
+    splitBtn?.addEventListener("click", () => {
+      if (!SplitManager.splitMode) {
+        SplitManager.enter(this.player, splitBtn);
+      } else {
+        SplitManager.commit((evt, payload) => this.pushEvent(evt, payload));
+      }
+    });
 
-    // Click on the sprite area toggles play/pause
-    this._onViewerClick = () => {
-      this.player.togglePlayback();
-    };
+    /* Click on sprite area toggles play/pause */
+    this._onViewerClick = () => this.player.togglePlayback();
     this.el.addEventListener("click", this._onViewerClick);
 
-    /* Global keyboard shortcuts while viewer is mounted
-     * --------------------------------------------------
-     *  ⬅️ / ➡️   – if split-mode is *not* armed yet, first enter
-     *             split-mode (same effect as clicking ✂️) and then
-     *             nudge one frame.  If already armed, just nudge.
-     *
-     *  Esc      – exit split-mode and resume playback.
-     * -------------------------------------------------- */
+    /* Global keyboard shortcuts */
     this._onKey = evt => {
-      // Space → play/pause toggle
-      if (evt.code === "Space") {
+      /* Space (plain) → play/pause toggle */
+      if (evt.code === "Space" && !evt.shiftKey && !evt.metaKey && !evt.ctrlKey) {
         evt.preventDefault();
         this.player.togglePlayback();
         return;
       }
 
+      /* Arrow keys drive split mode */
       if (evt.key === "ArrowLeft" || evt.key === "ArrowRight") {
-        evt.preventDefault();                    // stop page scroll
-
-        if (!SplitManager.splitMode) {
-          /* auto-arm split mode on first arrow press */
-          SplitManager.enter(this.player, splitBtn);
-        }
+        evt.preventDefault();
+        if (!SplitManager.splitMode) SplitManager.enter(this.player, splitBtn);
         SplitManager.nudge(evt.key === "ArrowLeft" ? -1 : +1);
         return;
       }
 
-      if (evt.key === "Escape") {
-        SplitManager.exit();
-      }
+      if (evt.key === "Escape") SplitManager.exit();
     };
-    
     window.addEventListener("keydown", this._onKey);
 
-    /* Kick off playback once sprite is loaded */
+    /* kick off playback */
     this.player.preloadAndPlay();
   },
 
-  /* LiveView DOM patch – re-mount in place */
   updated() {
     if (this.player) this.player.cleanup();
-    this.mounted();
+    this.mounted();                     // re-init on DOM patch
   },
 
   destroyed() {
-    if (this.player) this.player.cleanup();
-    if (this._onViewerClick) this.el.removeEventListener("click", this._onViewerClick);
-    if (this._onKey) window.removeEventListener("keydown", this._onKey);
+    this.player?.cleanup();
+    this.el.removeEventListener("click", this._onViewerClick);
+    window.removeEventListener("keydown", this._onKey);
   }
 };
 
 /* ────────────────────────────────────────────────────────────────────────── */
-/*  Minimal sprite-sheet “player”                                           */
+/*  Phoenix Hook – hover-autoplay thumbnail                                 */
+/* ────────────────────────────────────────────────────────────────────────── */
+
+export const ThumbHoverPlayer = {
+  mounted() {
+    const cfg = JSON.parse(this.el.dataset.player);
+
+    /* geometry – scale every thumb down to 160 px wide,
+       preserving aspect ratio */
+    const THUMB_W = 160;
+    this.cols   = cfg.cols;
+    this.rows   = cfg.rows;
+    const scale = THUMB_W / cfg.tile_width;
+    this.w      = THUMB_W;
+    this.h      = Math.round(cfg.tile_height_calculated * scale);
+
+    this.total = cfg.total_sprite_frames;
+    /* playback speed = same fps as the big player (capped at 60) */
+    this.fps   = Math.min(60, cfg.clip_fps || 24);
+
+    this.frame = 0;
+    this.timer = null;
+
+    /* style element */
+    Object.assign(this.el.style, {
+      width:             `${this.w}px`,
+      height:            `${this.h}px`,
+      backgroundImage:   `url("${cfg.spriteUrl}")`,
+      backgroundRepeat:  "no-repeat",
+      backgroundSize:    `${this.w * this.cols}px auto`,
+      backgroundPosition:"0 0",
+      cursor:            "pointer"
+    });
+
+    /* now wire up hover playback */
+    this.el.addEventListener("mouseenter", () => this.play());
+    this.el.addEventListener("mouseleave", () => this.stop());
+  },
+
+  play() {
+    if (this.timer) return;
+    const interval = 1000 / this.fps;
+    this.timer = setInterval(() => this.step(), interval);
+  },
+
+  stop() {
+    clearInterval(this.timer);
+    this.timer = null;
+    this.frame = 0;
+    this.updateBackground();
+  },
+
+  step() {
+    this.frame = (this.frame + 1) % this.total;
+    this.updateBackground();
+  },
+
+  updateBackground() {
+    const col = this.frame % this.cols;
+    const row = Math.floor(this.frame / this.cols);
+    this.el.style.backgroundPosition = `-${col * this.w}px -${row * this.h}px`;
+  },
+
+  destroyed() {
+    this.stop();
+  }
+};
+
+/* ────────────────────────────────────────────────────────────────────────── */
+/*  Minimal sprite-sheet “video” player (used by main panel)                */
 /* ────────────────────────────────────────────────────────────────────────── */
 
 class SpritePlayer {
-  constructor(clipId, viewerEl, scrubEl, playPauseBtn, frameLblEl, meta, splitCb) {
+  constructor(clipId, viewerEl, scrubEl, playPauseBtn, frameLblEl, meta) {
     /* element refs */
     this.clipId       = clipId;
     this.viewerEl     = viewerEl;
@@ -198,11 +251,9 @@ class SpritePlayer {
 
     /* metadata */
     this.meta    = meta;
-    this.splitCb = splitCb; // kept for backward-compat but unused
 
     /* runtime state */
-    // Start at frame 1 to avoid the padding pixel in frame 0
-    this.currentFrame     = 1;
+    this.currentFrame     = 1;     // avoid padding pixel in frame 0
     this.isPlaying        = false;
     this.playbackInterval = null;
     this.isScrubbing      = false;
@@ -215,22 +266,21 @@ class SpritePlayer {
     this._attachEventListeners();
   }
 
-  /* --------------------------------------------------------------------- */
-  /*  Initialise DOM attributes                                            */
-  /* --------------------------------------------------------------------- */
+  /* initialise DOM attributes ------------------------------------------ */
   _setupUI() {
     const m = this.meta;
 
-    /* viewer background – single, gigantic sheet of tiles */
-    this.viewerEl.style.backgroundImage    = `url('${m.spriteUrl}')`;
-    this.viewerEl.style.backgroundSize     = `${m.cols * m.tile_width}px ${m.rows * m.tile_height_calculated}px`;
-    this.viewerEl.style.width              = `${m.tile_width}px`;
-    this.viewerEl.style.height             = `${m.tile_height_calculated}px`;
-    this.viewerEl.style.backgroundRepeat   = "no-repeat";
-    this.viewerEl.style.backgroundPosition = "0 0";
+    /* viewer background – gigantic sheet of tiles */
+    Object.assign(this.viewerEl.style, {
+      backgroundImage:   `url('${m.spriteUrl}')`,
+      backgroundSize:    `${m.cols * m.tile_width}px ${m.rows * m.tile_height_calculated}px`,
+      width:             `${m.tile_width}px`,
+      height:            `${m.tile_height_calculated}px`,
+      backgroundRepeat:  "no-repeat",
+      backgroundPosition:"0 0"
+    });
 
     /* controls default state */
-    // Prevent displaying frame 0
     this.scrubEl.min      = 1;
     this.scrubEl.max      = Math.max(1, m.clip_total_frames - 1);
     this.scrubEl.value    = this.currentFrame;
@@ -242,9 +292,7 @@ class SpritePlayer {
     this.frameLblEl.textContent = `Frame: ${this.currentFrame}`;
   }
 
-  /* --------------------------------------------------------------------- */
-  /*  Event listeners                                                      */
-  /* --------------------------------------------------------------------- */
+  /* event listeners ----------------------------------------------------- */
   _attachEventListeners() {
     /* play / pause */
     this._onPlayPause = e => {
@@ -268,11 +316,9 @@ class SpritePlayer {
     this.scrubEl.addEventListener("input",     this._onScrubInput);
   }
 
-  /* --------------------------------------------------------------------- */
-  /*  Public API                                                           */
-  /* --------------------------------------------------------------------- */
+  /* public API ---------------------------------------------------------- */
 
-  /** Preload sprite then commence autoplay. */
+  /** preload sprite then commence autoplay. */
   preloadAndPlay() {
     if (this.spriteImage.complete) {
       this.play("mounted");
@@ -281,9 +327,8 @@ class SpritePlayer {
     }
   }
 
-  /** Jump to frame N (clamped). */
+  /** jump to frame N (clamped). */
   updateFrame(frameNum, force = false) {
-    // clamp to [1 … last] so frame 0 is never displayed
     const last = this.meta.clip_total_frames - 1;
     const f    = Math.max(1, Math.min(frameNum, last));
     if (f === this.currentFrame && !force) return;
@@ -293,26 +338,24 @@ class SpritePlayer {
     const { bgX, bgY } = this._bgPosForFrame(f);
     this.viewerEl.style.backgroundPosition = `${bgX}px ${bgY}px`;
 
-    if (this.frameLblEl) this.frameLblEl.textContent = `Frame: ${f}`;
-    if (this.scrubEl && !this.isScrubbing) this.scrubEl.value = f;
+    this.frameLblEl.textContent = `Frame: ${f}`;
+    if (!this.isScrubbing) this.scrubEl.value = f;
   }
 
-  play(src = "unknown") {
+  play() {
     if (this.isPlaying || this.meta.clip_fps <= 0) return;
     this.isPlaying = true;
     this.playPauseBtn.textContent = "⏸";
 
-    /* advance at source FPS */
     const interval = 1000 / this.meta.clip_fps;
     const last     = this.meta.clip_total_frames - 1;
     this.playbackInterval = setInterval(() => {
-      // wrap from “last” straight back to 1 (skips 0)
       const nxt = (this.currentFrame + 1 > last) ? 1 : this.currentFrame + 1;
       this.updateFrame(nxt, true);
     }, interval);
   }
 
-  pause(src = "unknown") {
+  pause() {
     if (!this.isPlaying) return;
     this.isPlaying = false;
     this.playPauseBtn.textContent = "▶";
@@ -320,27 +363,20 @@ class SpritePlayer {
     this.playbackInterval = null;
   }
 
-  togglePlayback() {
-    this.isPlaying ? this.pause("toggle") : this.play("toggle");
-  }
+  togglePlayback() { this.isPlaying ? this.pause() : this.play(); }
 
-  /** Clean up DOM listeners for LV patch / teardown. */
+  /** clean up DOM listeners for LV patch / teardown. */
   cleanup() {
-    this.pause("cleanup");
+    this.pause();
     this.playPauseBtn.removeEventListener("click", this._onPlayPause);
     this.scrubEl.removeEventListener("mousedown", this._onScrubStart);
     this.scrubEl.removeEventListener("mouseup",   this._onScrubEnd);
     this.scrubEl.removeEventListener("input",     this._onScrubInput);
-
-    /* help GC */
-    this.viewerEl = this.scrubEl = this.playPauseBtn = this.frameLblEl = this.meta = null;
   }
 
-  /* --------------------------------------------------------------------- */
-  /*  Internals                                                            */
-  /* --------------------------------------------------------------------- */
+  /* internals ----------------------------------------------------------- */
 
-  /** Calculate CSS background offset for a given frame. */
+  /** calculate CSS background offset for a given frame. */
   _bgPosForFrame(frameNum) {
     const m            = this.meta;
     const spriteFrames = m.total_sprite_frames;
