@@ -23,88 +23,94 @@
 //
 // * Press ⌘/Ctrl+Z anywhere to undo the last action.
 //
-// * Press ⌘/Shift+Space to toggle “ID-mode” (shows sibling grid and allows
+// * Press ⇧+Space to toggle “ID-mode” (shows sibling grid and allows
 //   merge/group with an arbitrary clip ID).
 // ────────────────────────────────────────────────────────────────────
+
 import { SplitManager } from "./sprite-player";
 
 export const ReviewHotkeys = {
   mounted() {
-    /* Letter → action mapping ----------------------------------------- */
-    this.keyMap  = { a: "approve", s: "skip", d: "archive",
-                     f: "merge",   g: "group" };
+    /* Letter → action mapping */
+    this.keyMap  = { a: "approve", s: "skip", d: "archive", f: "merge", g: "group" };
 
-    this.armed    = null;   // e.g. "a"
-    this.btn      = null;   // DOM node of highlighted button
+    this.armed    = null;   // currently-armed key (a/s/d/f/g)
+    this.btn      = null;   // the <button> DOM node
     this.idBox    = null;   // <input id="target-id">
-    this.idMode   = false;  // toggled by ⌘/Ctrl+Space
+    this.idMode   = false;  // true when ⇧+Space toggles ID-mode on
 
-    /* Element whose [data-id-mode] gets flipped for CSS                 */
     this.actionsEl = document.getElementById("review-actions");
 
-    /* ——————————————— listeners ——————————————— */
     this._onKeyDown = e => {
       const tag    = (e.target.tagName || "").toLowerCase();
-      const typing = ["input", "textarea"].includes(tag) || e.target.isContentEditable;
+      const typing = ["input","textarea"].includes(tag) || e.target.isContentEditable;
       const k      = e.key.toLowerCase();
 
-      /* 0.  Shift + Space → toggle ID-mode  --------------------------- */
+      // 0. ⇧+Space toggles ID-mode
       if (e.shiftKey && e.code === "Space" && !typing) {
-        e.stopImmediatePropagation();   // ← prevent SpritePlayer’s handler
-        e.preventDefault();             // ← prevent page scrolling, etc.
-        this._toggleIdMode();
+        e.stopImmediatePropagation();
         e.preventDefault();
+        this._toggleIdMode();
         return;
       }
 
-      /* Undo – ⌘/Ctrl+Z (unless typing) ------------------------------ */
-      if ((e.metaKey || e.ctrlKey) && k === "z") {
+      // Undo – ⌘/Ctrl+Z
+      if ((e.metaKey||e.ctrlKey) && k === "z") {
         if (!typing) {
           this.pushEvent("undo", {});
           this._reset();
-          e.preventDefault();           // stop browser “undo”
+          e.preventDefault();
         }
         return;
       }
 
-      /* 1.  First press of A/S/D/F/G – arm & highlight --------------- */
+      // 1. First press A/S/D/F/G arms that action
       if (this.keyMap[k] && !this.armed) {
+        // ignore auto-repeat so we don’t clear the box while typing digits
+        if (e.repeat) { e.preventDefault(); return; }
+
         this.armed = k;
         this.btn   = document.getElementById(`btn-${this.keyMap[k]}`);
         if (this.btn) this.btn.classList.add("is-armed");
 
-        /* Show numeric box if ID-mode ON and action needs target id     */
+        // show ID box if ID-mode is on and it's merge/group
         const act = this.keyMap[k];
-        if (this.idMode && (act === "merge" || act === "group")) {
+        if (this.idMode && (act==="merge"||act==="group")) {
           this._showTargetBox();
         }
         e.preventDefault();
         return;
       }
 
-      /* 2.  <ENTER> while a letter is armed – commit select ---------- */
+      // 2. Enter commits the action
       if (e.key === "Enter" && this.armed) {
         const action  = this.keyMap[this.armed];
         const payload = { action };
 
         if (this.idMode && this.idBox && this.idBox.value.trim() !== "" &&
-            (action === "merge" || action === "group")) {
-          payload["target_id"] = this.idBox.value.trim();
+            (action==="merge"||action==="group")) {
+          payload.target_id = this.idBox.value.trim();
         }
 
         this.pushEvent("select", payload);
+
+        // sync local ID-mode off after commit
+        this.idMode = false;
+        if (this.actionsEl) this.actionsEl.dataset.idMode = "false";
+
         this._reset();
         e.preventDefault();
         return;
       }
 
-      /* 3.  <ENTER> while split-mode armed – commit split ------------ */
+      // 3. Enter in split-mode commits split
       if (e.key === "Enter" && SplitManager.splitMode) {
-        SplitManager.commit((evt, data) => this.pushEvent(evt, data));
+        SplitManager.commit((evt,data)=>this.pushEvent(evt,data));
         e.preventDefault();
       }
     };
 
+    // keyup only resets the button highlight—does NOT hide the ID box
     this._onKeyUp = e => {
       if (e.key.toLowerCase() === this.armed) {
         this._reset();
@@ -120,24 +126,29 @@ export const ReviewHotkeys = {
     window.removeEventListener("keyup",   this._onKeyUp);
   },
 
-  /* ------------------------------------------------------------------ */
+  /* Toggle ID-mode (⇧+Space) */
   _toggleIdMode() {
     this.idMode = !this.idMode;
-
-    /* reflect in DOM for Tailwind/CSS `[data-id-mode]` hooks          */
     if (this.actionsEl) {
       this.actionsEl.dataset.idMode = this.idMode;
     }
-
-    /* inform LiveView – it will add/remove sibling grid               */
     this.pushEvent("toggle-id-mode", {});
 
-    /* if we just *left* ID-mode, hide the box immediately             */
+    // hide the box when leaving ID-mode
     if (!this.idMode && this.idBox) {
       this.idBox.classList.add("hidden");
     }
+
+    // if turning ON while a letter is still armed, show it
+    if (this.idMode && this.armed) {
+      const act = this.keyMap[this.armed];
+      if (act==="merge"||act==="group") {
+        this._showTargetBox();
+      }
+    }
   },
 
+  /* Show & focus the numeric input */
   _showTargetBox() {
     if (!this.idBox) {
       this.idBox = document.getElementById("target-id");
@@ -149,15 +160,10 @@ export const ReviewHotkeys = {
     }
   },
 
+  /* Reset button highlight (but leave ID box intact) */
   _reset() {
-    /* button highlight ----------------------------------------------- */
     if (this.btn) this.btn.classList.remove("is-armed");
     this.armed = this.btn = null;
-
-    /* target-id box --------------------------------------------------- */
-    if (this.idBox) {
-      this.idBox.classList.add("hidden");
-      this.idBox.value = "";
-    }
+    // note: we no longer hide or clear the ID box here
   }
 };

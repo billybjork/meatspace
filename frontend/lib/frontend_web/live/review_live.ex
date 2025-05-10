@@ -138,6 +138,7 @@ defmodule FrontendWeb.ReviewLive do
           |> push_history(curr)
           |> advance_queue()
           |> refill_future()
+          |> assign(id_mode?: false)
           |> put_flash(:info, "#{flash_verb(unquote(action))} #{tgt.id} ↔ #{curr.id}")
 
         {:noreply,

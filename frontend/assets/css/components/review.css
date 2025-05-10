@@ -97,15 +97,22 @@
 
 /* Hide in two cases only:
    ① ID-mode is off   ② JS hasn’t removed the .hidden helper class */
-   .actions[data-id-mode="false"] .target-id-input,
-   .target-id-input.hidden {
+.actions[data-id-mode="false"] .target-id-input,
+.target-id-input.hidden {
        display: none;
-   }
+}
    
-   /* When visible it appears inline with buttons */
-   .target-id-input {
+/* When visible it appears inline with buttons */
+.target-id-input {
        display: inline-block;
        width: 8ch;
+}
+
+/* remove ↑↓ spinners (WebKit / Blink) */
+.target-id-input::-webkit-outer-spin-button,
+.target-id-input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
    
 /* Base styling for the numeric box when it *is* shown ------------------- */
