@@ -216,7 +216,8 @@ export const ThumbHoverPlayer = {
 
   updateBackground() {
     const col = this.frame % this.cols;
-    const row = Math.floor(this.frame / this.rows);
+    // ← divide by number of *columns* to get the correct row index
+    const row = Math.floor(this.frame / this.cols);
     this.el.style.backgroundPosition = `-${col * this.w}px -${row * this.h}px`;
   },
 
