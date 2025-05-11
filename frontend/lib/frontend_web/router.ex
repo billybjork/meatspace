@@ -19,6 +19,7 @@ defmodule FrontendWeb.Router do
 
     get "/", PageController, :home
     live "/review", ReviewLive
+    live "/query", QueryLive
   end
 
   # Other scopes may use custom stacks.

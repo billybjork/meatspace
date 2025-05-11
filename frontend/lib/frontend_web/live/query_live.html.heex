@@ -1,0 +1,66 @@
+<section class="filters">
+  <form phx-change="filter_changed">
+  <select name="filters[model_name]">
+        <option value="">All models</option>
+        <%= for mn <- @filter_opts.model_names do %>
+        <option value={mn} selected={mn == @filters.model_name}><%= mn %></option>
+        <% end %>
+    </select>
+
+    <select name="filters[generation_strategy]">
+      <option value="">All strategies</option>
+      <%= for gs <- @filter_opts.generation_strategies do %>
+        <option value={gs} selected={gs == @filters.generation_strategy}><%= gs %></option>
+      <% end %>
+    </select>
+
+    <select name="filters[source_video_id]">
+      <option value="">All sources</option>
+      <%= for {id, title} <- @filter_opts.source_videos do %>
+        <option value={id} selected={id == @filters.source_video_id}><%= title %></option>
+      <% end %>
+    </select>
+
+    <button type="button" phx-click="randomize" title="🎲">🎲</button>
+</form>
+</section>
+
+<%= if @main_clip do %>
+  <section class="main-clip">
+    <video
+      src={clip_url(@main_clip)}
+      autoplay
+      loop
+      controls
+      class="w-full max-w-lg rounded-xl shadow"
+    />
+  </section>
+
+  <section class="similar-grid">
+    <div class="grid gap-4 grid-cols-4">
+      <%= for %{clip: clip, similarity: sim} <- @similars do %>
+        <div class="clip-card">
+          <video
+            src={clip_url(clip)}
+            controls
+            class="rounded-md shadow-sm"
+          />
+          <div class="text-sm">
+            #<%= clip.id %> — <%= Float.round((1.0 - sim) * 100, 0) %>% similar
+          </div>
+        </div>
+      <% end %>
+    </div>
+
+    <div class="actions mt-4">
+      <button phx-click="paginate" phx-value-page={@page - 1} disabled={@page == 1}>◀ Prev</button>
+      <span>Page <%= @page %></span>
+      <button phx-click="paginate" phx-value-page={@page + 1} disabled={length(@similars) < @per_page}>Next ▶</button>
+      <button phx-click="toggle_sort" class="ml-4">
+        <%= if @sort_asc?, do: "🔼", else: "🔽" %>
+      </button>
+    </div>
+  </section>
+<% else %>
+  <p>No clips found for those filters.</p>
+<% end %>
