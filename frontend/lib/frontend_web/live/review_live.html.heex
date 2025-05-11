@@ -12,7 +12,7 @@
           class="btn-ghost"
           disabled={@history == []}
           aria-label="Undo last action"
-          title={if @history == [], do: "Nothing to undo", else: "Undo last action"}>
+          title={if(@history == [], do: "Nothing to undo", else: "Undo last action")}>
           ⬅️
         </button>
       </nav>
@@ -31,7 +31,7 @@
       <nav role="group"
            aria-label="Review actions"
            class="actions"
-           data-id-mode={@id_mode?}
+           data-id-mode={to_string(@id_mode?)}
            id="review-actions">
         <!-- Undo -->
         <button
@@ -39,7 +39,7 @@
           class="btn-ghost"
           disabled={@history == []}
           aria-label="Undo"
-          title={if @history == [], do: "Nothing to undo", else: "Undo last action"}>
+          title={if(@history == [], do: "Nothing to undo", else: "Undo last action")}>
           ⬅️
         </button>
 
@@ -54,15 +54,25 @@
           🗑️ Archive
         </button>
 
-        <!-- Merge / Group (default ↔ previous) -->
-        <button id="btn-merge" class="btn merge" phx-click="select" phx-value-action="merge"
-                disabled={@history == []}
-                title={if @history == [], do: "No previous clip to merge with", else: "Merge with previous clip"}>
+        <!-- Merge / Group (default ↔ previous or by ID in ID-mode) -->
+        <button id="btn-merge"
+                class="btn merge"
+                phx-click="select"
+                phx-value-action="merge"
+                disabled={@history == [] && !@id_mode?}
+                title={if(@id_mode?,
+                        do: "Merge by specified clip ID",
+                        else: (if(@history == [], do: "No previous clip to merge with", else: "Merge with previous clip")))}>
           🔗 Merge
         </button>
-        <button id="btn-group" class="btn group" phx-click="select" phx-value-action="group"
-                disabled={@history == []}
-                title={if @history == [], do: "No previous clip to group with", else: "Group with previous clip"}>
+        <button id="btn-group"
+                class="btn group"
+                phx-click="select"
+                phx-value-action="group"
+                disabled={@history == [] && !@id_mode?}
+                title={if(@id_mode?,
+                        do: "Group by specified clip ID",
+                        else: (if(@history == [], do: "No previous clip to group with", else: "Group with previous clip")))}>
           🖇️ Group
         </button>
 
@@ -76,21 +86,24 @@
                type="number"
                inputmode="numeric"
                phx-debounce="blur"
-               class="target-id-input hidden"
+               class="target-id-input"
                placeholder="clip-id" />
       </nav>
 
       <!-- Flash message -->
       <p :if={msg = @flash["info"]}
-         class={["flash", "flash--#{@flash_action}"]}
+         class={['flash', 'flash--#{@flash_action}']}
          aria-live="polite">
         <%= msg %>
       </p>
 
       <!-- Sibling thumbnails (ID-mode only) ----------------------------- -->
-      <section :if={@id_mode?} id="siblings" class="thumbnail-grid">
+        <section
+          :if={@id_mode?}
+          id="siblings"
+          class="thumbnail-grid"
+          data-sibling-page={@sibling_page}>
         <%= for sib <- @siblings do %>
-          <%= if Enum.any?(sib.clip_artifacts, &(&1.artifact_type == "sprite_sheet")) do %>
             <figure class="thumbnail" id={"thumb-#{sib.id}"}>
               <div  id={"thumb-viewer-#{sib.id}"}
                     class="thumb-viewer"
@@ -99,7 +112,6 @@
               </div>
               <figcaption><%= sib.id %></figcaption>
             </figure>
-          <% end %>
         <% end %>
 
         <!-- Pagination controls -->

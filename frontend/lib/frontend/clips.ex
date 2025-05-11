@@ -93,15 +93,17 @@ defmodule Frontend.Clips do
   Results are ordered by `id ASC` to make pagination deterministic even when
   background workers update timestamps.
   """
-  @spec for_source_video(pos_integer, pos_integer, pos_integer, pos_integer) :: [Clip.t()]
-  def for_source_video(sv_id, exclude_id, page \\ 1, per \\ 24)
-      when is_integer(sv_id) and is_integer(exclude_id) and page >= 1 and per > 0 do
+  def for_source_video_with_sprites(source_video_id, exclude_id, page, page_size) do
     Clip
-    |> where([c], c.source_video_id == ^sv_id and c.id != ^exclude_id)
-    |> order_by([c], asc: c.id)
-    |> limit(^per)
-    |> offset(^(per * (page - 1)))
-    |> preload([:clip_artifacts])
+    |> join(:inner, [c], ca in assoc(c, :clip_artifacts),
+         on: ca.artifact_type == "sprite_sheet")
+    |> where([c, _ca],
+         c.source_video_id == ^source_video_id and c.id != ^exclude_id)
+    |> distinct([c, _ca], c.id)
+    |> order_by([c, _ca], asc: c.id)
+    |> offset(^((page - 1) * page_size))
+    |> limit(^page_size)
+    |> preload([c, ca], clip_artifacts: ca)
     |> Repo.all()
   end
 

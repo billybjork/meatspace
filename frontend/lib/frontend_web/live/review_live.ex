@@ -304,7 +304,13 @@ defmodule FrontendWeb.ReviewLive do
 
   @doc false
   defp assign_siblings(socket, %Clip{} = clip, page) do
-    sibs = Clips.for_source_video(clip.source_video_id, clip.id, page, @sibling_page_size)
+    sibs =
+      Clips.for_source_video_with_sprites(
+        clip.source_video_id,
+        clip.id,
+        page,
+        @sibling_page_size
+      )
     assign(socket, siblings: sibs, sibling_page: page)
   end
 
