@@ -15,8 +15,8 @@
     width: 100%;
     padding: var(--space-2) 0;
 
-    /* three columns: fixed button · scrub bar · frame counter */
-    grid-template-columns: 3rem 1fr 8ch;
+    /* two buttons pinned at 3rem each, scrub‐bar takes all the rest */
+    grid-template-columns: 3rem 1fr 3rem;
     column-gap: var(--space-2);
     max-width: 100%;
 
@@ -24,7 +24,7 @@
     min-height: 3rem;
 }
 
-/* Control buttons (play/pause) – fixed size so ⏸️ vs ▶️ stays aligned ---- */
+/* Control buttons (play/pause, speed) – fixed size so icons stay aligned - */
 .sprite-controls button {
     width: 3rem;
     height: 3rem;
@@ -68,13 +68,9 @@
     min-width: 0;
 }
 
-/* Fixed-width frame counter in the third grid column -------------------- */
+/* Remove the old frame counter ------------------------------------------ */
 .sprite-controls span {
-    display: inline-block;          /* so width applies */
-    width: 8ch;                     /* fixed width for “Frame: XX” */
-    text-align: right;
-    font-family: monospace;         /* digits are always 1ch wide */
-    white-space: nowrap;
+    display: none;
 }
 
 /* Action buttons armed state -------------------------------------------- */
@@ -99,25 +95,24 @@
    ① ID-mode is off   ② JS hasn’t removed the .hidden helper class */
 .actions[data-id-mode="false"] .target-id-input,
 .target-id-input.hidden {
-       display: none;
+    display: none;
 }
    
 /* When visible it appears inline with buttons */
 .target-id-input {
-       display: inline-block;
-       width: 8ch;
+    display: inline-block;
+    width: 8ch;
 }
 
 /* remove ↑↓ spinners (WebKit / Blink) */
 .target-id-input::-webkit-outer-spin-button,
 .target-id-input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
+    -webkit-appearance: none;
+    margin: 0;
 }
    
 /* Base styling for the numeric box when it *is* shown ------------------- */
 .target-id-input {
-    /* appears inline with buttons */
     width: 8ch;
     padding: var(--space-2) var(--space-2);
     margin-left: var(--space-3);

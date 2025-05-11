@@ -64,7 +64,7 @@ def sprite_player(assigns) do
         class="review-buttons__action review-buttons__action--play"
         data-action="toggle"
       >
-        ▶️
+        ▶
       </button>
 
       <input
@@ -73,6 +73,14 @@ def sprite_player(assigns) do
         min="0"
         step="1"
       />
+
+      <button
+        id={"speed-#{@clip.id}"}
+        class="review-buttons__action review-buttons__action--speed"
+        disabled
+      >
+        1×
+      </button>
 
       <span
         id={"frame-display-#{@clip.id}"}

@@ -13,15 +13,15 @@
 /* ────────────────────────────────────────────────────────────────────────── */
 
 export const SplitManager = {
-  splitMode     : false,
-  activePlayer  : null,
-  btnEl         : null,
+  splitMode: false,
+  activePlayer: null,
+  btnEl: null,
 
   /** Enter split mode: pause playback, highlight UI. */
   enter(player, btn) {
-    this.splitMode    = true;
+    this.splitMode = true;
     this.activePlayer = player;
-    this.btnEl        = btn;
+    this.btnEl = btn;
 
     player.pause("split-enter");
     btn?.classList.add("split-armed");
@@ -35,9 +35,9 @@ export const SplitManager = {
     this.activePlayer.viewerEl.classList.remove("split-armed");
     this.activePlayer.play("split-exit");
 
-    this.splitMode    = false;
+    this.splitMode = false;
     this.activePlayer = null;
-    this.btnEl        = null;
+    this.btnEl = null;
   },
 
   /** Commit the chosen frame – pushes a `"select"` event and resets state. */
@@ -45,7 +45,7 @@ export const SplitManager = {
     if (!this.splitMode || !this.activePlayer) return;
     pushFn("select", {
       action: "split",
-      frame : this.activePlayer.currentFrame
+      frame: this.activePlayer.currentFrame
     });
     this.exit();
   },
@@ -63,9 +63,8 @@ export const SplitManager = {
 /* ────────────────────────────────────────────────────────────────────────── */
 
 export const SpritePlayerController = {
-  /* --------------------------------------------------------------------- */
   mounted() {
-    const clipId     = this.el.dataset.clipId;
+    const clipId = this.el.dataset.clipId;
     const playerData = this.el.dataset.player;
     if (!playerData) {
       console.warn("[SpritePlayer] missing data-player", this.el);
@@ -73,8 +72,9 @@ export const SpritePlayerController = {
     }
 
     let meta;
-    try { meta = JSON.parse(playerData); }
-    catch (err) {
+    try {
+      meta = JSON.parse(playerData);
+    } catch (err) {
       console.error("[SpritePlayer] invalid JSON in data-player", err);
       return;
     }
@@ -84,11 +84,12 @@ export const SpritePlayerController = {
     }
 
     /* collect control elements */
-    const container  = this.el.parentElement;
-    const scrub      = container.querySelector(`#scrub-${clipId}`);
-    const playPause  = container.querySelector(`#playpause-${clipId}`);
+    const container = this.el.parentElement;
+    const scrub = container.querySelector(`#scrub-${clipId}`);
+    const playPause = container.querySelector(`#playpause-${clipId}`);
     const frameLabel = container.querySelector(`#frame-display-${clipId}`);
-    const splitBtn   = document.getElementById(`split-${clipId}`);
+    const splitBtn = document.getElementById(`split-${clipId}`);
+    const speedBtn = container.querySelector(`#speed-${clipId}`);
 
     if (!scrub || !playPause || !frameLabel) {
       console.warn("[SpritePlayer] missing controls for clip", clipId);
@@ -102,7 +103,8 @@ export const SpritePlayerController = {
       scrub,
       playPause,
       frameLabel,
-      meta
+      meta,
+      speedBtn
     );
 
     /* Split-button */
@@ -145,7 +147,7 @@ export const SpritePlayerController = {
 
   updated() {
     if (this.player) this.player.cleanup();
-    this.mounted();                     // re-init on DOM patch
+    this.mounted(); // re-init on DOM patch
   },
 
   destroyed() {
@@ -163,31 +165,30 @@ export const ThumbHoverPlayer = {
   mounted() {
     const cfg = JSON.parse(this.el.dataset.player);
 
-    /* geometry – scale every thumb down to 160 px wide,
-       preserving aspect ratio */
+    /* geometry – scale every thumb down to 160 px wide, preserving aspect ratio */
     const THUMB_W = 160;
-    this.cols   = cfg.cols;
-    this.rows   = cfg.rows;
+    this.cols = cfg.cols;
+    this.rows = cfg.rows;
     const scale = THUMB_W / cfg.tile_width;
-    this.w      = THUMB_W;
-    this.h      = Math.round(cfg.tile_height_calculated * scale);
+    this.w = THUMB_W;
+    this.h = Math.round(cfg.tile_height_calculated * scale);
 
     this.total = cfg.total_sprite_frames;
     /* playback speed = same fps as the big player (capped at 60) */
-    this.fps   = Math.min(60, cfg.clip_fps || 24);
+    this.fps = Math.min(60, cfg.clip_fps || 24);
 
     this.frame = 0;
     this.timer = null;
 
     /* style element */
     Object.assign(this.el.style, {
-      width:             `${this.w}px`,
-      height:            `${this.h}px`,
-      backgroundImage:   `url("${cfg.spriteUrl}")`,
-      backgroundRepeat:  "no-repeat",
-      backgroundSize:    `${this.w * this.cols}px auto`,
-      backgroundPosition:"0 0",
-      cursor:            "pointer"
+      width: `${this.w}px`,
+      height: `${this.h}px`,
+      backgroundImage: `url("${cfg.spriteUrl}")`,
+      backgroundRepeat: "no-repeat",
+      backgroundSize: `${this.w * this.cols}px auto`,
+      backgroundPosition: "0 0",
+      cursor: "pointer"
     });
 
     /* now wire up hover playback */
@@ -215,7 +216,7 @@ export const ThumbHoverPlayer = {
 
   updateBackground() {
     const col = this.frame % this.cols;
-    const row = Math.floor(this.frame / this.cols);
+    const row = Math.floor(this.frame / this.rows);
     this.el.style.backgroundPosition = `-${col * this.w}px -${row * this.h}px`;
   },
 
@@ -229,26 +230,31 @@ export const ThumbHoverPlayer = {
 /* ────────────────────────────────────────────────────────────────────────── */
 
 class SpritePlayer {
-  constructor(clipId, viewerEl, scrubEl, playPauseBtn, frameLblEl, meta) {
+  constructor(clipId, viewerEl, scrubEl, playPauseBtn, frameLblEl, meta, speedBtn) {
     /* element refs */
-    this.clipId       = clipId;
-    this.viewerEl     = viewerEl;
-    this.scrubEl      = scrubEl;
+    this.clipId = clipId;
+    this.viewerEl = viewerEl;
+    this.scrubEl = scrubEl;
     this.playPauseBtn = playPauseBtn;
-    this.frameLblEl   = frameLblEl;
+    this.frameLblEl = frameLblEl;
+    this.speedBtn = speedBtn;
 
     /* metadata */
-    this.meta    = meta;
+    this.meta = meta;
 
     /* runtime state */
-    this.currentFrame     = 1;     // avoid padding pixel in frame 0
-    this.isPlaying        = false;
+    this.currentFrame = 1; // avoid padding pixel in frame 0
+    this.isPlaying = false;
     this.playbackInterval = null;
-    this.isScrubbing      = false;
+    this.isScrubbing = false;
+
+    /* playback speeds */
+    this.speeds = [1, 1.5, 2];
+    this.speedIndex = 0;
 
     /* preload sprite PNG */
-    this.spriteImage      = new Image();
-    this.spriteImage.src  = meta.spriteUrl;
+    this.spriteImage = new Image();
+    this.spriteImage.src = meta.spriteUrl;
 
     this._setupUI();
     this._attachEventListeners();
@@ -260,24 +266,30 @@ class SpritePlayer {
 
     /* viewer background – gigantic sheet of tiles */
     Object.assign(this.viewerEl.style, {
-      backgroundImage:   `url('${m.spriteUrl}')`,
-      backgroundSize:    `${m.cols * m.tile_width}px ${m.rows * m.tile_height_calculated}px`,
-      width:             `${m.tile_width}px`,
-      height:            `${m.tile_height_calculated}px`,
-      backgroundRepeat:  "no-repeat",
-      backgroundPosition:"0 0"
+      backgroundImage: `url('${m.spriteUrl}')`,
+      backgroundSize: `${m.cols * m.tile_width}px ${m.rows * m.tile_height_calculated}px`,
+      width: `${m.tile_width}px`,
+      height: `${m.tile_height_calculated}px`,
+      backgroundRepeat: "no-repeat",
+      backgroundPosition: "0 0"
     });
 
     /* controls default state */
-    this.scrubEl.min      = 1;
-    this.scrubEl.max      = Math.max(1, m.clip_total_frames - 1);
-    this.scrubEl.value    = this.currentFrame;
+    this.scrubEl.min = 1;
+    this.scrubEl.max = Math.max(1, m.clip_total_frames - 1);
+    this.scrubEl.value = this.currentFrame;
     this.scrubEl.disabled = false;
 
-    this.playPauseBtn.disabled    = false;
+    this.playPauseBtn.disabled = false;
     this.playPauseBtn.textContent = "▶";
 
     this.frameLblEl.textContent = `Frame: ${this.currentFrame}`;
+
+    /* enable & label the speed button */
+    if (this.speedBtn) {
+      this.speedBtn.disabled = false;
+      this.speedBtn.textContent = `${this.speeds[this.speedIndex]}×`;
+    }
   }
 
   /* event listeners ----------------------------------------------------- */
@@ -294,14 +306,25 @@ class SpritePlayer {
       this.isScrubbing = true;
       if (this.isPlaying) this.pause("scrubStart");
     };
-    this._onScrubEnd   = () => { this.isScrubbing = false; };
+    this._onScrubEnd = () => {
+      this.isScrubbing = false;
+    };
     this._onScrubInput = e => {
       const f = parseInt(e.target.value, 10);
       this.updateFrame(f, true);
     };
     this.scrubEl.addEventListener("mousedown", this._onScrubStart);
-    this.scrubEl.addEventListener("mouseup",   this._onScrubEnd);
-    this.scrubEl.addEventListener("input",     this._onScrubInput);
+    this.scrubEl.addEventListener("mouseup", this._onScrubEnd);
+    this.scrubEl.addEventListener("input", this._onScrubInput);
+
+    /* speed toggle */
+    if (this.speedBtn) {
+      this._onSpeedClick = e => {
+        e.stopPropagation();
+        this._cycleSpeed();
+      };
+      this.speedBtn.addEventListener("click", this._onSpeedClick);
+    }
   }
 
   /* public API ---------------------------------------------------------- */
@@ -318,7 +341,7 @@ class SpritePlayer {
   /** jump to frame N (clamped). */
   updateFrame(frameNum, force = false) {
     const last = this.meta.clip_total_frames - 1;
-    const f    = Math.max(1, Math.min(frameNum, last));
+    const f = Math.max(1, Math.min(frameNum, last));
     if (f === this.currentFrame && !force) return;
 
     this.currentFrame = f;
@@ -330,13 +353,26 @@ class SpritePlayer {
     if (!this.isScrubbing) this.scrubEl.value = f;
   }
 
+  /** cycle through playback speeds */
+  _cycleSpeed() {
+    this.speedIndex = (this.speedIndex + 1) % this.speeds.length;
+    const rate = this.speeds[this.speedIndex];
+    this.speedBtn.textContent = `${rate}×`;
+
+    if (this.isPlaying) {
+      this.pause();
+      this.play();
+    }
+  }
+
   play() {
     if (this.isPlaying || this.meta.clip_fps <= 0) return;
     this.isPlaying = true;
     this.playPauseBtn.textContent = "⏸";
 
-    const interval = 1000 / this.meta.clip_fps;
-    const last     = this.meta.clip_total_frames - 1;
+    /* account for speed multiplier */
+    const interval = 1000 / (this.meta.clip_fps * this.speeds[this.speedIndex]);
+    const last = this.meta.clip_total_frames - 1;
     this.playbackInterval = setInterval(() => {
       const nxt = (this.currentFrame + 1 > last) ? 1 : this.currentFrame + 1;
       this.updateFrame(nxt, true);
@@ -351,29 +387,36 @@ class SpritePlayer {
     this.playbackInterval = null;
   }
 
-  togglePlayback() { this.isPlaying ? this.pause() : this.play(); }
+  togglePlayback() {
+    this.isPlaying ? this.pause() : this.play();
+  }
 
   /** clean up DOM listeners for LV patch / teardown. */
   cleanup() {
     this.pause();
     this.playPauseBtn.removeEventListener("click", this._onPlayPause);
     this.scrubEl.removeEventListener("mousedown", this._onScrubStart);
-    this.scrubEl.removeEventListener("mouseup",   this._onScrubEnd);
-    this.scrubEl.removeEventListener("input",     this._onScrubInput);
+    this.scrubEl.removeEventListener("mouseup", this._onScrubEnd);
+    this.scrubEl.removeEventListener("input", this._onScrubInput);
+    if (this.speedBtn) {
+      this.speedBtn.removeEventListener("click", this._onSpeedClick);
+    }
   }
 
   /* internals ----------------------------------------------------------- */
 
   /** calculate CSS background offset for a given frame. */
   _bgPosForFrame(frameNum) {
-    const m            = this.meta;
+    const m = this.meta;
     const spriteFrames = m.total_sprite_frames;
 
-    const prop   = (spriteFrames > 1) ? frameNum / (m.clip_total_frames - 1) : 0;
-    const index  = Math.floor(prop * (spriteFrames - 1));
+    const prop = (spriteFrames > 1)
+      ? frameNum / (m.clip_total_frames - 1)
+      : 0;
+    const index = Math.floor(prop * (spriteFrames - 1));
 
-    const col    = index % m.cols;
-    const row    = Math.floor(index / m.cols);
+    const col = index % m.cols;
+    const row = Math.floor(index / m.cols);
 
     return {
       bgX: -(col * m.tile_width),
@@ -381,3 +424,5 @@ class SpritePlayer {
     };
   }
 }
+
+export { SpritePlayer };
