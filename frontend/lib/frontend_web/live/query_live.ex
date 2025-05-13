@@ -4,8 +4,10 @@ defmodule FrontendWeb.QueryLive do
   alias Frontend.Clips
   alias Frontend.Clips.Clip
 
-  @per_page 24
+  # How many similar clips per page
+  @per_page 12
 
+  @impl true
   def mount(_params, _session, socket) do
     # 1) load dropdown options
     opts = Clips.embedded_filter_opts()
@@ -14,13 +16,9 @@ defmodule FrontendWeb.QueryLive do
     filters = %{model_name: nil, generation_strategy: nil, source_video_id: nil}
 
     # 3) pick an initial main_clip (first match or random)
-    main_clip =
-      case Clips.random_embedded_clip(filters) do
-        nil -> nil
-        clip -> clip
-      end
+    main_clip = Clips.random_embedded_clip(filters)
 
-    # 4) fetch its neighbors
+    # 4) fetch its neighbors (or empty list if none)
     similars =
       if main_clip do
         Clips.similar_clips(main_clip.id, filters, true, 1, @per_page)
@@ -36,13 +34,27 @@ defmodule FrontendWeb.QueryLive do
            main_clip: main_clip,
            similars: similars,
            page: 1,
-           sort_asc?: true
+           sort_asc?: true,
+           per_page: @per_page
          )
 
     {:ok, socket}
   end
 
-  # Whenever any filter changes
+  @impl true
+  def handle_event("pick_main", %{"clip_id" => id_str}, socket) do
+    id = String.to_integer(id_str)
+    main  = Clips.get_clip!(id)
+    %{filters: f, sort_asc?: sa} = socket.assigns
+    sims  = Clips.similar_clips(id, f, sa, 1, @per_page)
+
+    {:noreply, assign(socket,
+                      main_clip: main,
+                      similars:  sims,
+                      page: 1)}
+  end
+
+  @impl true
   def handle_event("filter_changed", %{"filters" => new_f}, socket) do
     filters = %{
       model_name: maybe_nil(new_f["model_name"]),
@@ -58,7 +70,7 @@ defmodule FrontendWeb.QueryLive do
      |> assign(filters: filters, main_clip: main_clip, similars: similars, page: 1, sort_asc?: true)}
   end
 
-  # Pagination
+  @impl true
   def handle_event("paginate", %{"page" => page_str}, socket) do
     page = String.to_integer(page_str)
     %{main_clip: mc, filters: f, sort_asc?: sa} = socket.assigns
@@ -66,14 +78,14 @@ defmodule FrontendWeb.QueryLive do
     {:noreply, assign(socket, similars: similars, page: page)}
   end
 
-  # Toggle sort direction
+  @impl true
   def handle_event("toggle_sort", _params, socket) do
     %{main_clip: mc, filters: f, sort_asc?: sa, page: page} = socket.assigns
     similars = Clips.similar_clips(mc.id, f, !sa, page, @per_page)
     {:noreply, assign(socket, similars: similars, sort_asc?: !sa)}
   end
 
-  # Randomize main clip
+  @impl true
   def handle_event("randomize", _params, socket) do
     %{filters: f, sort_asc?: sa} = socket.assigns
     main_clip = Clips.random_embedded_clip(f)
@@ -81,12 +93,16 @@ defmodule FrontendWeb.QueryLive do
     {:noreply, assign(socket, main_clip: main_clip, similars: similars, page: 1)}
   end
 
+  # Build a streaming-friendly URL by prefixing the CDN domain
   defp clip_url(%Clip{clip_filepath: path}) do
-    # If clip_filepath is a full URL you can just return it:
-    path
+    cdn =
+      Application.get_env(:frontend, :cloudfront_domain) ||
+        raise """
+        CloudFront domain not configured!
+        Please set CLOUDFRONT_DOMAIN in your runtime.exs.
+        """
 
-    # Otherwise, build it however your app serves video blobs, for example:
-    # Routes.static_url(@socket, "/uploads/#{path}")
+    "https://#{cdn}/#{path}"
   end
 
   defp maybe_nil(""), do: nil

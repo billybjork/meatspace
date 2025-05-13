@@ -28,6 +28,9 @@ database_url =
     For example: ecto://USER:PASS@HOST/DATABASE
     """
 
+config :frontend, :cloudfront_domain,
+  System.fetch_env!("CLOUDFRONT_DOMAIN")
+
 maybe_ipv6 = if System.get_env("ECTO_IPV6") in ~w(true 1), do: [:inet6], else: []
 
 config :frontend, Frontend.Repo,

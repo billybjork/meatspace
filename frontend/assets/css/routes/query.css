@@ -1,0 +1,55 @@
+/* --- Sizing helpers --------------------------------------------------- */
+:root {
+    --main-max-w: 720px;   /* large but never spills past 720 px */
+    --main-max-h: 60vh;    /* …nor taller than 60 % of viewport */
+    --thumb-max: 180px;    /* ≈ ¼ of main clip in either axis   */
+  }
+  
+  /* --- Main clip -------------------------------------------------------- */
+  .main-clip video {
+    width: 100%;
+    max-width: var(--main-max-w);
+    max-height: var(--main-max-h);
+    aspect-ratio: 16/9;
+    object-fit: contain;      /* letter-boxes mismatched ratios  */
+    border-radius: 0.75rem;
+    box-shadow: 0 4px 8px rgb(0 0 0 / 0.12);
+  }
+  
+  /* --- Similar grid ----------------------------------------------------- */
+  .similar-grid {
+    margin-top: var(--space-4);
+  }
+  .similar-grid .grid {
+    grid-template-columns: repeat(auto-fill, minmax(var(--thumb-max), 1fr));
+  }
+  .similar-grid video {
+    width: 100%;
+    height: auto;
+    max-height: var(--thumb-max);
+    aspect-ratio: 4/3;
+    object-fit: cover;
+    border-radius: 0.5rem;
+    box-shadow: 0 2px 4px rgb(0 0 0 / 0.1);
+    transition: transform 0.15s ease-in-out;
+  }
+  .similar-grid video:hover {
+    transform: scale(1.03);
+  }
+  
+  /* --- Controls row (filters) ------------------------------------------ */
+  .filters form {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+    align-items: center;
+  }
+  .filters select {
+    padding: var(--space-1) var(--space-2);
+  }
+  .filters .btn-icon {
+    font-size: 1.25rem;
+    line-height: 1;
+    padding: var(--space-1);
+    background: none;
+  }  

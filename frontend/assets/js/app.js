@@ -1,11 +1,9 @@
 import { Socket } from "phoenix"
 import { LiveSocket } from "phoenix_live_view"
 
-// Import your keyboard/controller hooks
 import { ReviewHotkeys } from "./review-hotkeys"
-
-// Import both sprite-player hooks from the same file
 import { SpritePlayerController, ThumbHoverPlayer } from "./sprite-player"
+import { HoverPlay } from "./hover-play";
 
 // Pull the CSRF token from the page
 let csrfToken = document
@@ -14,9 +12,10 @@ let csrfToken = document
 
 // Build the hooks object matching your `phx-hook` names in templates
 let Hooks = {
-  ReviewHotkeys,                           // hotkeys (F/G, Shift+Space, etc.)
-  SpritePlayer: SpritePlayerController,    // main sprite player hook
-  ThumbHoverPlayer                         // hover-autoplay thumbnails
+  ReviewHotkeys,
+  SpritePlayer: SpritePlayerController,
+  ThumbHoverPlayer,
+  HoverPlay
 }
 
 // Initialise LiveSocket with our hooks and CSRF

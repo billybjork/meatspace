@@ -367,51 +367,51 @@ defmodule Frontend.Clips do
   Given a main clip and the active filters, return page `page` of its neighbors,
   ordered by vector similarity (<=>), ascending or descending.
   """
-  def similar_clips(main_clip_id, %{model_name: m, generation_strategy: g}, sort_asc?, page, per_page) do
-    # 1) Fetch the main embedding, only filtering when m/g are non-nil
-    emb_base =
+  def similar_clips(main_clip_id,
+                    %{model_name: m, generation_strategy: g, source_video_id: sv_id},
+                    asc?, page, per) do
+
+    main_vec =
       Embedding
       |> where([e], e.clip_id == ^main_clip_id)
-    emb_base =
-      if m,
-        do: from([e] in emb_base, where: e.model_name == ^m),
-        else: emb_base
-    emb_base =
-      if g,
-        do: from([e] in emb_base, where: e.generation_strategy == ^g),
-        else: emb_base
-
-    main_embedding =
-      emb_base
+      |> maybe_filter(m, g)
       |> select([e], e.embedding)
       |> Repo.one!()
 
-    # 2) Build the neighbor query, again guarding m/g
-    neigh_base =
-      Embedding
-      |> where([e], e.clip_id != ^main_clip_id)
-
-    neigh_base =
-      if m,
-        do: from([e] in neigh_base, where: e.model_name == ^m),
-        else: neigh_base
-    neigh_base =
-      if g,
-        do: from([e] in neigh_base, where: e.generation_strategy == ^g),
-        else: neigh_base
-
-    direction = if sort_asc?, do: :asc, else: :desc
-
-    neigh_base
-    |> join(:inner, [e], c in Clip, on: c.id == e.clip_id and c.ingest_state == "embedded")
-    |> select([e, c], %{
-         clip: c,
-         similarity: fragment("? <=> ?", e.embedding, ^main_embedding)
-       })
-    |> order_by([e, _c], [{^direction, fragment("? <=> ?", e.embedding, ^main_embedding)}])
-    |> offset(^((page - 1) * per_page))
-    |> limit(^per_page)
-    |> preload([_e, c], clip_artifacts: [])
+    Embedding
+    |> where([e], e.clip_id != ^main_clip_id)
+    |> maybe_filter(m, g)
+    |> join(:inner, [e], c in Clip,
+         on: c.id == e.clip_id and c.ingest_state == "embedded")
+    # only keep clips from the chosen source video, if any
+    |> (fn q -> if sv_id, do: where(q, [_, c], c.source_video_id == ^sv_id), else: q end).()
+    |> order_by_similarity(main_vec, asc?)
+    |> offset(^((page - 1) * per))
+    |> limit(^per)
+    |> select([e, c],
+         %{
+           clip:         c,
+           similarity_pct:
+             fragment("round((1 - (? <=> ?)) * 100)::int", e.embedding, ^main_vec)
+         })
     |> Repo.all()
+    |> Enum.map(fn %{clip: clip} = row ->
+         %{row | clip: Repo.preload(clip, [:clip_artifacts])}
+       end)
   end
+
+  defp maybe_filter(query, nil, nil), do: query
+  defp maybe_filter(query, m, g) do
+  query
+    |> (fn q -> if m, do: where(q, [e], e.model_name == ^m), else: q end).()
+    |> (fn q -> if g, do: where(q, [e], e.generation_strategy == ^g), else: q end).()
+  end
+
+  defp order_by_similarity(query, main_embedding, true = _asc?) do
+    order_by(query, [e, _c], asc: fragment("? <=> ?", e.embedding, ^main_embedding))
+  end
+  defp order_by_similarity(query, main_embedding, false = _desc?) do
+    order_by(query, [e, _c], desc: fragment("? <=> ?", e.embedding, ^main_embedding))
+  end
+
 end

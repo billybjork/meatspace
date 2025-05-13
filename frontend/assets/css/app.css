@@ -1,3 +1,4 @@
 @import "./layout.css";
 @import "./theme.css";
-@import "./components/review.css";
+@import "./routes/review.css";
+@import "./routes/query.css";

@@ -1,10 +1,11 @@
+<!-- Filters: model, strategy, source video + randomize & sort buttons -->
 <section class="filters">
   <form phx-change="filter_changed">
-  <select name="filters[model_name]">
-        <option value="">All models</option>
-        <%= for mn <- @filter_opts.model_names do %>
+    <select name="filters[model_name]">
+      <option value="">All models</option>
+      <%= for mn <- @filter_opts.model_names do %>
         <option value={mn} selected={mn == @filters.model_name}><%= mn %></option>
-        <% end %>
+      <% end %>
     </select>
 
     <select name="filters[generation_strategy]">
@@ -21,43 +22,81 @@
       <% end %>
     </select>
 
-    <button type="button" phx-click="randomize" title="🎲">🎲</button>
-</form>
+    <!-- Randomize main clip -->
+    <button
+      type="button"
+      phx-click="randomize"
+      class="btn-icon"
+      title="Random clip">
+      🎲
+    </button>
+
+    <!-- Toggle sort direction -->
+    <button
+      type="button"
+      phx-click="toggle_sort"
+      class="btn-icon"
+      title="Toggle sort">
+      <%= if @sort_asc?, do: "🔼", else: "🔽" %>
+    </button>
+  </form>
 </section>
 
 <%= if @main_clip do %>
-  <section class="main-clip">
+  <!-- Main Clip: always autoplay & loop -->
+  <section class="main-clip flex justify-center">
     <video
-      src={clip_url(@main_clip)}
+      id={"main-clip-#{@main_clip.id}"}
       autoplay
+      muted
       loop
-      controls
-      class="w-full max-w-lg rounded-xl shadow"
+      src={clip_url(@main_clip)}
     />
   </section>
 
+  <!-- Similar Clips Grid -->
   <section class="similar-grid">
-    <div class="grid gap-4 grid-cols-4">
-      <%= for %{clip: clip, similarity: sim} <- @similars do %>
-        <div class="clip-card">
+    <div class="grid gap-4">
+      <%= for %{clip: c, similarity_pct: pct} <- @similars do %>
+        <!-- Clicking a thumb promotes it to main -->
+        <div
+          class="clip-card"
+          phx-click="pick_main"
+          phx-value-clip_id={c.id}
+          style="cursor: pointer">
+          
+          <!-- Thumb: hover-play only -->
           <video
-            src={clip_url(clip)}
-            controls
-            class="rounded-md shadow-sm"
+            id={"thumb-#{c.id}"}
+            phx-hook="HoverPlay"
+            muted
+            loop
+            src={clip_url(c)}
           />
-          <div class="text-sm">
-            #<%= clip.id %> — <%= Float.round((1.0 - sim) * 100, 0) %>% similar
+          
+          <div class="text-sm mt-1">
+            #<%= c.id %> — <%= pct %>%
           </div>
         </div>
       <% end %>
     </div>
 
+    <!-- Pagination controls -->
     <div class="actions mt-4">
-      <button phx-click="paginate" phx-value-page={@page - 1} disabled={@page == 1}>◀ Prev</button>
+      <button
+        phx-click="paginate"
+        phx-value-page={@page - 1}
+        disabled={@page == 1}>
+        ◀ Prev
+      </button>
+
       <span>Page <%= @page %></span>
-      <button phx-click="paginate" phx-value-page={@page + 1} disabled={length(@similars) < @per_page}>Next ▶</button>
-      <button phx-click="toggle_sort" class="ml-4">
-        <%= if @sort_asc?, do: "🔼", else: "🔽" %>
+
+      <button
+        phx-click="paginate"
+        phx-value-page={@page + 1}
+        disabled={length(@similars) < @per_page}>
+        Next ▶
       </button>
     </div>
   </section>
