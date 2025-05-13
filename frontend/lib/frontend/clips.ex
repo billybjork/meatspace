@@ -414,4 +414,16 @@ defmodule Frontend.Clips do
     order_by(query, [e, _c], desc: fragment("? <=> ?", e.embedding, ^main_embedding))
   end
 
+  # -------------------------------------------------------------------------
+  # Public API – other helpers
+  # -------------------------------------------------------------------------
+
+  @doc "Fast count of clips still in `pending_review`."
+  def pending_review_count do
+    Clip
+    |> where([c], c.ingest_state == "pending_review" and is_nil(c.reviewed_at))
+    |> select([c], count("*"))
+    |> Repo.one()
+  end
+
 end

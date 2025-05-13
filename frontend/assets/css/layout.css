@@ -72,3 +72,17 @@ html {
   background: var(--panel);
   border-radius: var(--space-1);
 }
+
+.badge {
+  display: inline-block;
+  min-width: 1.25rem;
+  padding: 0 0.4rem;
+  margin-left: 0.25rem;
+  font-size: 0.75rem;
+  line-height: 1.25rem;
+  color: #fff;
+  background: var(--archive);   /* red in both light & dark themes */
+  border-radius: 9999px;
+}
+
+.nav-link.relative { position: relative; }
