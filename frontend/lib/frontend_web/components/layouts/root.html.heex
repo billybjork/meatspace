@@ -11,6 +11,8 @@
     <script defer phx-track-static type="text/javascript" src={~p"/assets/app.js"}></script>
   </head>
   <body class="bg-white antialiased">
+    <!-- ▸ global toolbar -->
+    <FrontendWeb.NavComponent.nav current_path={@conn.request_path} />
     <%= @inner_content %>
   </body>
 </html>

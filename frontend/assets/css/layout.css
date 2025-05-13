@@ -46,3 +46,29 @@ html {
 .mt-3 { margin-top: var(--space-3); }
 .mt-4 { margin-top: var(--space-4); }
 .mx-auto { margin: 0 auto; }
+
+/* --------------------------------------------------
+   Global toolbar
+-------------------------------------------------- */
+.site-nav .container {
+  display: flex;              /* you already have this via Tailwind */
+  justify-content: center;    /* center children horizontally */
+  align-items: center;        /* keep the vertical centering */
+}
+
+.site-nav {
+  background: var(--panel);
+}
+
+.nav-link {
+  font-weight: 600;
+  color: var(--fg);
+  text-decoration: none;
+  padding: var(--space-2) var(--space-3);
+  transition: background 0.15s;
+}
+
+.nav-link:hover {
+  background: var(--panel);
+  border-radius: var(--space-1);
+}
