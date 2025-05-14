@@ -31,13 +31,12 @@ databases:
 ##################################################
 # 2) Prefect API & UI (private service)
 ##################################################
-services:
   - name: prefect-server
     type: pserv
     runtime: docker
     plan: starter
-    rootDir: backend                # build context directory
-    dockerfilePath: Dockerfile.prefect-server
+    dockerContext: backend          # <─ build context = ./backend
+    dockerfilePath: Dockerfile.prefect-server   # <─ file inside that context
     dockerCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     disk:
@@ -62,14 +61,14 @@ services:
     type: worker
     runtime: docker
     plan: starter
-    rootDir: backend
+    dockerContext: backend          # <─ same fix
     dockerfilePath: Dockerfile
     dockerCommand: >
       bash -c '
         until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
         prefect worker start --pool default-agent-pool
       '
-    numInstances: 1                 # autoscaling unavailable on Hobby
+    numInstances: 1
     envVars:
       - key: PREFECT_API_URL
         value: "http://prefect-server:4200/api"
