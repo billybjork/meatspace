@@ -1,6 +1,6 @@
 # ─────────────── render.yaml ───────────────
-# One file, four services, two databases.
-# Remove comments after you’re happy.
+# Four services, two Postgres DBs, one shared env-group
+# (leave comments until you’re comfortable)
 
 ##################################################
 # 0) Shared secrets
@@ -8,8 +8,7 @@
 envVarGroups:
   - name: app-secrets
     envVars:
-      # ↳ put real values in the Render UI after first sync
-      - key: S3_BUCKET_NAME
+      - key: S3_BUCKET_NAME          # filled in via dashboard after first sync
         sync: false
       - key: AWS_REGION
         value: "us-west-1"
@@ -24,10 +23,10 @@ envVarGroups:
 # 1) Databases
 ##################################################
 databases:
-  - name: app-db                    # pgvector / “vector” extension
+  - name: app-db
     plan: starter
     postgresMajorVersion: 16
-    ipAllowList: []                 # private network only
+    ipAllowList: []                 # private only
 
   - name: prefect-db
     plan: starter
@@ -35,18 +34,17 @@ databases:
     ipAllowList: []
 
 ##################################################
-# 2) Prefect API & UI
+# 2) Prefect Server (API + UI)
 ##################################################
 services:
   - name: prefect-server
-    type: pserv                     # private service
+    type: pserv
     runtime: docker
     plan: starter
-    dockerContext: ./backend
-    dockerfilePath: backend/Dockerfile.prefect-server
-    startCommand: >
+    rootDir: backend                # build context for this service
+    dockerfilePath: Dockerfile.prefect-server
+    dockerCommand: >
       prefect server start --host 0.0.0.0 --port 4200
-    healthCheckPath: /api/health
     disk:
       name: prefect-home
       mountPath: /.prefect
@@ -63,21 +61,21 @@ services:
       - fromGroup: app-secrets
 
 ##################################################
-# 3) Prefect worker
+# 3) Prefect Worker
 ##################################################
   - name: prefect-worker
     type: worker
     runtime: docker
-    plan: starter           # bump when video batches get heavy
-    dockerContext: ./backend
-    dockerfilePath: backend/Dockerfile
-    startCommand: >
+    plan: starter
+    rootDir: backend
+    dockerfilePath: Dockerfile
+    dockerCommand: >
       bash -c '
         until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
         prefect worker start --pool default-agent-pool
       '
     scaling:
-      minInstances: 0
+      minInstances: 1               # schema requires ≥ 1
       maxInstances: 2
       targetCPUPercent: 60
     envVars:
@@ -98,14 +96,11 @@ services:
     type: web
     runtime: docker
     plan: starter
-    dockerContext: ./frontend
-    dockerfilePath: frontend/Dockerfile
+    rootDir: frontend
+    dockerfilePath: Dockerfile
+    dockerCommand: >
+      /app/_build/prod/rel/frontend/bin/frontend start
     healthCheckPath: /
-    startCommand: >
-      bash -c '
-        /app/_build/prod/rel/frontend/bin/frontend eval "Frontend.Release.migrate" &&
-        exec /app/_build/prod/rel/frontend/bin/frontend start
-      '
     envVars:
       - key: DATABASE_URL
         fromDatabase:
