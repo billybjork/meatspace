@@ -36,7 +36,7 @@ services:
     type: pserv
     runtime: docker
     plan: starter
-    dockerContext: backend
+    rootDir: backend                # build context directory
     dockerfilePath: Dockerfile.prefect-server
     dockerCommand: >
       prefect server start --host 0.0.0.0 --port 4200
@@ -62,7 +62,7 @@ services:
     type: worker
     runtime: docker
     plan: starter
-    dockerContext: backend
+    rootDir: backend
     dockerfilePath: Dockerfile
     dockerCommand: >
       bash -c '
@@ -88,7 +88,7 @@ services:
     type: web
     runtime: docker
     plan: starter
-    dockerContext: frontend
+    rootDir: frontend
     dockerfilePath: Dockerfile
     healthCheckPath: /
     dockerCommand: >
