@@ -1,6 +1,6 @@
 # ─────────────── render.yaml ───────────────
 # Four Docker services, two Postgres DBs, one env-group
-# (drop-in replacement)
+# (copy/paste as-is)
 
 ##################################################
 # 0) Shared env vars (non-secret defaults only)
@@ -9,10 +9,10 @@ envVarGroups:
   - name: app-secrets
     envVars:
       - key: AWS_REGION
-        value: us-west-1
+        value: "us-west-1"
       # Add S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
       # AWS_SECRET_ACCESS_KEY, CLOUDFRONT_DOMAIN
-      # later in the Render dashboard UI.
+      # in the Render UI (they stay out of source control)
 
 ##################################################
 # 1) Databases
@@ -21,7 +21,7 @@ databases:
   - name: app-db
     plan: basic-1gb
     postgresMajorVersion: 16
-    ipAllowList: []
+    ipAllowList: []        # internal-only
 
   - name: prefect-db
     plan: basic-1gb
@@ -33,17 +33,18 @@ databases:
 ##################################################
 services:
 
-## ── Prefect Server (API + UI) ──────────────────
+# ── Prefect Server (API + UI) ───────────────────
   - name: prefect-server
     type: pserv
-    env:  docker
+    env: docker
     plan: starter
     rootDir: backend
     dockerfilePath: Dockerfile.prefect-server
 
-    # one-liner wrapped in double-quotes so $DB_URL expands
-    dockerCommand: |
-      bash -c "export PREFECT_API_DATABASE_CONNECTION_URL=\$(echo \"$DB_URL\" | sed 's/^postgres/postgresql+asyncpg/'); exec prefect server start --host 0.0.0.0 --port 4200"
+    # Build async SQL-Alchemy URL, then start Prefect
+    dockerCommand: >-
+      sh -c "export PREFECT_API_DATABASE_CONNECTION_URL='postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require' &&
+             prefect server start --host 0.0.0.0 --port 4200"
 
     disk:
       name: prefect-home
@@ -51,34 +52,52 @@ services:
       sizeGB: 5
 
     envVars:
-      - key: DB_URL
+      # pieces pulled from the Render DB object
+      - key: DB_HOST
         fromDatabase:
           name: prefect-db
-          property: connectionString
+          property: host
+      - key: DB_PORT
+        fromDatabase:
+          name: prefect-db
+          property: port
+      - key: DB_USER
+        fromDatabase:
+          name: prefect-db
+          property: user
+      - key: DB_PASSWORD
+        fromDatabase:
+          name: prefect-db
+          property: password
+      - key: DB_NAME
+        fromDatabase:
+          name: prefect-db
+          property: database
 
+      # Prefect settings
       - key: PREFECT_SERVER_API_HOST
-        value: 0.0.0.0
+        value: "0.0.0.0"
       - key: PREFECT_UI_API_URL
-        value: http://prefect-server:4200/api
+        value: "http://prefect-server:4200/api"
 
+      # Shared secrets (S3, CloudFront, etc.)
       - fromGroup: app-secrets
 
-## ── Prefect Worker (background) ───────────────
+# ── Prefect Worker (background) ────────────────
   - name: prefect-worker
     type: worker
-    env:  docker
+    env: docker
     plan: starter
     rootDir: backend
     dockerfilePath: Dockerfile
+    dockerCommand: >-
+      sh -c "until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
+             prefect worker start --pool default-agent-pool"
 
-    dockerCommand: |
-      bash -c "until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done; prefect worker start --pool default-agent-pool"
-
-    numInstances: 1
-
+    numInstances: 1        # autoscaling not on Hobby
     envVars:
       - key: PREFECT_API_URL
-        value: http://prefect-server:4200/api
+        value: "http://prefect-server:4200/api"
       - key: PREFECT_WORKER_CONCURRENCY_LIMIT
         value: "3"
       - key: DATABASE_URL
@@ -87,16 +106,16 @@ services:
           property: connectionString
       - fromGroup: app-secrets
 
-## ── Phoenix LiveView Web ───────────────────────
+# ── Phoenix LiveView Web ───────────────────────
   - name: phoenix-web
     type: web
-    env:  docker
+    env: docker
     plan: starter
     rootDir: frontend
     dockerfilePath: Dockerfile
-
-    dockerCommand: /app/_build/prod/rel/frontend/bin/frontend start
     healthCheckPath: /
+    dockerCommand: >-
+      /app/_build/prod/rel/frontend/bin/frontend start
 
     envVars:
       - key: DATABASE_URL
