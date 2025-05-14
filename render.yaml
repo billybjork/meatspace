@@ -1,48 +1,41 @@
 # ─────────────── render.yaml ───────────────
-# Four services, two Postgres DBs, one shared env-group
-# (leave comments until you’re comfortable)
+# Four services, two Postgres DBs, one env-group
+# (delete comments after you’re happy)
 
 ##################################################
-# 0) Shared secrets
+# 0) Environment-group (non-secret values only)
 ##################################################
 envVarGroups:
   - name: app-secrets
     envVars:
-      - key: S3_BUCKET_NAME          # filled in via dashboard after first sync
-        sync: false
       - key: AWS_REGION
         value: "us-west-1"
-      - key: AWS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SECRET_ACCESS_KEY
-        sync: false
-      - key: CLOUDFRONT_DOMAIN
-        sync: false
+      # Add real secrets later in the dashboard UI
 
 ##################################################
-# 1) Databases
+# 1) Databases  ➜  use new “basic-*” plans
 ##################################################
 databases:
   - name: app-db
-    plan: starter
+    plan: basic-1gb           # replaces deprecated “starter”
     postgresMajorVersion: 16
-    ipAllowList: []                 # private only
+    ipAllowList: []           # private network only
 
   - name: prefect-db
-    plan: starter
+    plan: basic-1gb
     postgresMajorVersion: 16
     ipAllowList: []
 
 ##################################################
-# 2) Prefect Server (API + UI)
+# 2) Prefect Server  (private service)
 ##################################################
 services:
   - name: prefect-server
     type: pserv
     runtime: docker
     plan: starter
-    rootDir: backend                # build context for this service
-    dockerfilePath: Dockerfile.prefect-server
+    rootDir: backend
+    dockerfilePath: Dockerfile.prefect-server   # relative to rootDir
     dockerCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     disk:
@@ -61,7 +54,7 @@ services:
       - fromGroup: app-secrets
 
 ##################################################
-# 3) Prefect Worker
+# 3) Prefect Worker  (background worker)
 ##################################################
   - name: prefect-worker
     type: worker
@@ -74,10 +67,7 @@ services:
         until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
         prefect worker start --pool default-agent-pool
       '
-    scaling:
-      minInstances: 1               # schema requires ≥ 1
-      maxInstances: 2
-      targetCPUPercent: 60
+    numInstances: 1            # autoscaling unavailable on Hobby
     envVars:
       - key: PREFECT_API_URL
         value: "http://prefect-server:4200/api"
@@ -90,7 +80,7 @@ services:
       - fromGroup: app-secrets
 
 ##################################################
-# 4) Phoenix LiveView web
+# 4) Phoenix LiveView Web  (Docker web service)
 ##################################################
   - name: phoenix-web
     type: web
