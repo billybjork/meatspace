@@ -38,23 +38,41 @@ services:
   type: pserv
   env: docker
   plan: starter
-  rootDir: backend                     # build context = ./backend
+  rootDir: backend
   dockerfilePath: Dockerfile.prefect-server
+
+  # Build async URL, then launch Prefect
   dockerCommand: >
-    prefect server start --host 0.0.0.0 --port 4200
+    bash -c '
+      export PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require" &&
+      prefect server start --host 0.0.0.0 --port 4200
+    '
+
   disk:
     name: prefect-home
     mountPath: /.prefect
     sizeGB: 5
+
   envVars:
+    # Credentials & host pulled from the Render DB object
+    - key: DB_HOST
+      fromDatabase: { name: prefect-db, property: host }
+    - key: DB_PORT
+      fromDatabase: { name: prefect-db, property: port }
+    - key: DB_USER
+      fromDatabase: { name: prefect-db, property: user }
+    - key: DB_PASSWORD
+      fromDatabase: { name: prefect-db, property: password }
+    - key: DB_NAME
+      fromDatabase: { name: prefect-db, property: database }
+
+    # Prefect settings
     - key: PREFECT_SERVER_API_HOST
       value: "0.0.0.0"
     - key: PREFECT_UI_API_URL
       value: "http://prefect-server:4200/api"
-    - key: PREFECT_API_DATABASE_CONNECTION_URL
-      fromDatabase:
-        name: prefect-db
-        property: connectionString
+
+    # S3 / other shared secrets
     - fromGroup: app-secrets
 
 # ── Prefect Worker (background) ────────────────
