@@ -59,7 +59,7 @@ services:
       - key: DB_PASSWORD
         fromDatabase: { name: prefect-db, property: password }
       - key: DB_NAME
-        fromDatabase: { name: prefect-db, property: databaseName }
+        fromDatabase: { name: prefect-db, property: database }
 
       # Prefect settings
       - key: PREFECT_SERVER_API_HOST
