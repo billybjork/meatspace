@@ -1,0 +1,100 @@
+# ─────────────── render.yaml ───────────────
+# One file, five services, two databases.
+# Remove comments after you’re happy.
+
+##################################################
+# 0) Shared secrets
+##################################################
+envVarGroups:
+- name: app-secrets
+  envVars:
+    # ↳ keep real values in the Render UI after first sync
+    - key: S3_BUCKET_NAME          ; sync: false
+    - key: AWS_REGION             ; value: us-west-1
+    - key: AWS_ACCESS_KEY_ID      ; sync: false
+    - key: AWS_SECRET_ACCESS_KEY  ; sync: false
+    - key: CLOUDFRONT_DOMAIN      ; sync: false
+
+##################################################
+# 1) Databases
+##################################################
+databases:
+- name: app-db                    # pgvector / “vector” extension
+  plan: starter
+  postgresMajorVersion: 16
+  ipAllowList: []                 # private network only
+
+- name: prefect-db
+  plan: starter
+  postgresMajorVersion: 16
+  ipAllowList: []
+
+##################################################
+# 2) Prefect API & UI
+##################################################
+services:
+- name: prefect-server
+  type: pserv
+  runtime: docker
+  plan: starter
+  dockerfilePath: backend/Dockerfile.prefect-server
+  dockerContext: ./backend
+  startCommand: >
+    prefect server start --host 0.0.0.0 --port 4200
+  healthCheckPath: /api/health
+  ports: [4200]
+  disk:
+    name: prefect-home
+    mountPath: /.prefect
+    sizeGB: 5
+  envVars:
+    - key: PREFECT_SERVER_API_HOST        ; value: 0.0.0.0
+    - key: PREFECT_UI_API_URL             ; value: http://prefect-server:4200/api
+    # Prefect auto-migrates the DB on boot; plain postgres URL is fine.
+    - key: PREFECT_API_DATABASE_CONNECTION_URL
+      fromDatabase: { name: prefect-db, property: connectionString }
+
+##################################################
+# 3) Prefect worker
+##################################################
+- name: prefect-worker
+  type: worker
+  runtime: docker
+  plan: starter           # bump to standard when videos get heavy
+  dockerfilePath: backend/Dockerfile
+  dockerContext: ./backend
+  startCommand: >
+    bash -c '
+      until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done;
+      prefect worker start --pool default-agent-pool
+    '
+  scaling: { minInstances: 0, maxInstances: 2, targetCPUPercent: 60 }
+  envVars:
+    - key: PREFECT_API_URL                 ; value: http://prefect-server:4200/api
+    - key: PREFECT_WORKER_CONCURRENCY_LIMIT; value: "3"
+    - key: DATABASE_URL
+      fromDatabase: { name: app-db, property: connectionString }
+    - fromGroup: app-secrets               # S3 creds, etc.
+
+##################################################
+# 4) Phoenix LiveView web
+##################################################
+- name: phoenix-web
+  type: web
+  runtime: docker
+  plan: starter
+  dockerfilePath: frontend/Dockerfile
+  dockerContext: ./frontend
+  healthCheckPath: /
+  # Start: run Ecto migrations once, then launch the release
+  startCommand: >
+    bash -c '
+      /app/_build/prod/rel/frontend/bin/frontend eval "Frontend.Release.migrate" &&
+      exec /app/_build/prod/rel/frontend/bin/frontend start
+    '
+  envVars:
+    - key: DATABASE_URL
+      fromDatabase: { name: app-db, property: connectionString }
+    - key: PHX_SERVER           ; value: "true"
+    - key: SECRET_KEY_BASE      ; generateValue: true
+    - fromGroup: app-secrets
