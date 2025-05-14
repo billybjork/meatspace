@@ -39,15 +39,14 @@ databases:
 ##################################################
 services:
   - name: prefect-server
-    type: private_service
+    type: pserv                     # private service
     runtime: docker
     plan: starter
+    dockerContext: ./backend
     dockerfilePath: backend/Dockerfile.prefect-server
-    buildContext: ./backend
     startCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     healthCheckPath: /api/health
-    ports: [4200]
     disk:
       name: prefect-home
       mountPath: /.prefect
@@ -69,8 +68,8 @@ services:
     type: worker
     runtime: docker
     plan: starter           # bump to standard when videos get heavy
+    dockerContext: ./backend
     dockerfilePath: backend/Dockerfile
-    buildContext: ./backend
     startCommand: >
       bash -c '
         until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done;
@@ -99,8 +98,8 @@ services:
     type: web
     runtime: docker
     plan: starter
+    dockerContext: ./frontend
     dockerfilePath: frontend/Dockerfile
-    buildContext: ./frontend
     healthCheckPath: /
     # Start: run Ecto migrations once, then launch the release
     startCommand: >
