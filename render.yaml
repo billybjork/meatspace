@@ -39,11 +39,11 @@ databases:
 ##################################################
 services:
   - name: prefect-server
-    type: pserv
+    type: private                   # was “pserv”
     runtime: docker
     plan: starter
     dockerfilePath: backend/Dockerfile.prefect-server
-    dockerContext: ./backend
+    buildContext: ./backend         # correct key is buildContext, not dockerContext
     startCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     healthCheckPath: /api/health
@@ -57,7 +57,6 @@ services:
         value: "0.0.0.0"
       - key: PREFECT_UI_API_URL
         value: "http://prefect-server:4200/api"
-      # Prefect auto-migrates the DB on boot; plain postgres URL is fine.
       - key: PREFECT_API_DATABASE_CONNECTION_URL
         fromDatabase:
           name: prefect-db
@@ -71,16 +70,16 @@ services:
     runtime: docker
     plan: starter           # bump to standard when videos get heavy
     dockerfilePath: backend/Dockerfile
-    dockerContext: ./backend
+    buildContext: ./backend
     startCommand: >
       bash -c '
         until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done;
         prefect worker start --pool default-agent-pool
       '
-    scaling:
+    autoscale:
       minInstances: 0
       maxInstances: 2
-      targetCPUPercent: 60
+      cpuThresholdPercent: 60
     envVars:
       - key: PREFECT_API_URL
         value: "http://prefect-server:4200/api"
@@ -101,7 +100,7 @@ services:
     runtime: docker
     plan: starter
     dockerfilePath: frontend/Dockerfile
-    dockerContext: ./frontend
+    buildContext: ./frontend
     healthCheckPath: /
     # Start: run Ecto migrations once, then launch the release
     startCommand: >
