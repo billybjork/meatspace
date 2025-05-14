@@ -12,7 +12,10 @@ RUN apt-get update \
     \
     # ensure the Prefect home can be created
     && mkdir -p /.prefect \
-    && chmod a+rwx /.prefect
+    && chmod a+rwx /.prefect \
+    \
+    # install sync Postgres driver
+    && pip install --no-cache-dir psycopg2-binary
 
 # drop back to the Prefect user
 USER 1000
