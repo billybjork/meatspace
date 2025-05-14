@@ -1,6 +1,5 @@
 # ─────────────── render.yaml ───────────────
 # Four Docker services, two Postgres DBs, one env-group
-# (drop-in replacement)
 
 ##################################################
 # 0) Shared env vars (non-secret defaults only)
@@ -41,11 +40,11 @@ services:
   rootDir: backend
   dockerfilePath: Dockerfile.prefect-server
 
-  dockerCommand: >
-    bash -c "
-      PREFECT_API_DATABASE_CONNECTION_URL=\"postgresql+asyncpg://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require\" \
+  dockerCommand: |
+    bash -c '
+      export PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://$DB_USER:$DB_PASSWORD@$DB_HOST:$DB_PORT/$DB_NAME?sslmode=require
       exec prefect server start --host 0.0.0.0 --port 4200
-    "
+    '
 
   disk:
     name: prefect-home
@@ -53,23 +52,17 @@ services:
     sizeGB: 5
 
   envVars:
-    - key: DB_HOST
-      fromDatabase: { name: prefect-db, property: host }
-    - key: DB_PORT
-      fromDatabase: { name: prefect-db, property: port }
-    - key: DB_USER
-      fromDatabase: { name: prefect-db, property: user }
-    - key: DB_PASSWORD
-      fromDatabase: { name: prefect-db, property: password }
-    - key: DB_NAME
-      fromDatabase: { name: prefect-db, property: database }
+    - key: DB_HOST       ; fromDatabase: { name: prefect-db, property: host }
+    - key: DB_PORT       ; fromDatabase: { name: prefect-db, property: port }
+    - key: DB_USER       ; fromDatabase: { name: prefect-db, property: user }
+    - key: DB_PASSWORD   ; fromDatabase: { name: prefect-db, property: password }
+    - key: DB_NAME       ; fromDatabase: { name: prefect-db, property: database }
 
-    - key: PREFECT_SERVER_API_HOST
-      value: "0.0.0.0"
-    - key: PREFECT_UI_API_URL
-      value: "http://prefect-server:4200/api"
+    - key: PREFECT_SERVER_API_HOST ; value: "0.0.0.0"
+    - key: PREFECT_UI_API_URL      ; value: "http://prefect-server:4200/api"
 
     - fromGroup: app-secrets
+
 
 # ── Prefect Worker (background) ────────────────
 - name: prefect-worker
@@ -78,22 +71,21 @@ services:
   plan: starter
   rootDir: backend
   dockerfilePath: Dockerfile
-  dockerCommand: >
+
+  dockerCommand: |
     bash -c '
-      until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
-      prefect worker start --pool default-agent-pool
+      until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done
+      exec prefect worker start --pool default-agent-pool
     '
+
   numInstances: 1
   envVars:
-    - key: PREFECT_API_URL
-      value: "http://prefect-server:4200/api"
-    - key: PREFECT_WORKER_CONCURRENCY_LIMIT
-      value: "3"
+    - key: PREFECT_API_URL                ; value: "http://prefect-server:4200/api"
+    - key: PREFECT_WORKER_CONCURRENCY_LIMIT; value: "3"
     - key: DATABASE_URL
-      fromDatabase:
-        name: app-db
-        property: connectionString
+      fromDatabase: { name: app-db, property: connectionString }
     - fromGroup: app-secrets
+
 
 # ── Phoenix LiveView Web ───────────────────────
 - name: phoenix-web
@@ -103,15 +95,13 @@ services:
   rootDir: frontend
   dockerfilePath: Dockerfile
   healthCheckPath: /
-  dockerCommand: >
+
+  dockerCommand: |
     /app/_build/prod/rel/frontend/bin/frontend start
+
   envVars:
     - key: DATABASE_URL
-      fromDatabase:
-        name: app-db
-        property: connectionString
-    - key: PHX_SERVER
-      value: "true"
-    - key: SECRET_KEY_BASE
-      generateValue: true
+      fromDatabase: { name: app-db, property: connectionString }
+    - key: PHX_SERVER      ; value: "true"
+    - key: SECRET_KEY_BASE ; generateValue: true
     - fromGroup: app-secrets
