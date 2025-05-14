@@ -38,7 +38,7 @@ services:
   env: docker
   plan: starter
   rootDir: backend                   # build context = ./backend
-  dockerfilePath: Dockerfile.prefect-server
+  dockerfilePath: backend/Dockerfile.prefect-server
   dockerCommand: >
     prefect server start --host 0.0.0.0 --port 4200
   disk:
@@ -62,7 +62,7 @@ services:
   env: docker
   plan: starter
   rootDir: backend
-  dockerfilePath: Dockerfile
+  dockerfilePath: backend/Dockerfile
   dockerCommand: >
     bash -c '
       until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
@@ -86,7 +86,7 @@ services:
   env: docker
   plan: starter
   rootDir: frontend
-  dockerfilePath: Dockerfile
+  dockerfilePath: frontend/Dockerfile
   healthCheckPath: /
   dockerCommand: >
     /app/_build/prod/rel/frontend/bin/frontend start
