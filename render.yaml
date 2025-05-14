@@ -1,8 +1,9 @@
 # ─────────────── render.yaml ───────────────
 # Four Docker services, two Postgres DBs, one env-group
+# (drop-in replacement)
 
 ##################################################
-# 0) Shared env vars
+# 0) Shared env vars (non-secret defaults only)
 ##################################################
 envVarGroups:
 - name: app-secrets
@@ -11,7 +12,7 @@ envVarGroups:
       value: "us-west-1"
     # Add S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
     # AWS_SECRET_ACCESS_KEY, CLOUDFRONT_DOMAIN
-    # later via the dashboard UI
+    # later in the Render dashboard UI
 
 ##################################################
 # 1) Databases
@@ -20,7 +21,7 @@ databases:
 - name: app-db
   plan: basic-1gb
   postgresMajorVersion: 16
-  ipAllowList: []
+  ipAllowList: []          # internal only
 
 - name: prefect-db
   plan: basic-1gb
@@ -32,13 +33,13 @@ databases:
 ##################################################
 services:
 
-# ── Prefect server (private service) ────────────
+# ── Prefect Server (API + UI) ───────────────────
 - name: prefect-server
   type: pserv
   env: docker
   plan: starter
-  rootDir: backend                   # build context = ./backend
-  dockerfilePath: backend/Dockerfile.prefect-server
+  rootDir: backend                     # build context = ./backend
+  dockerfilePath: Dockerfile.prefect-server
   dockerCommand: >
     prefect server start --host 0.0.0.0 --port 4200
   disk:
@@ -56,19 +57,19 @@ services:
         property: connectionString
     - fromGroup: app-secrets
 
-# ── Prefect worker (background) ────────────────
+# ── Prefect Worker (background) ────────────────
 - name: prefect-worker
   type: worker
   env: docker
   plan: starter
   rootDir: backend
-  dockerfilePath: backend/Dockerfile
+  dockerfilePath: Dockerfile
   dockerCommand: >
     bash -c '
       until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
       prefect worker start --pool default-agent-pool
     '
-  numInstances: 1                   # autoscaling not in Hobby
+  numInstances: 1                      # autoscaling not in Hobby
   envVars:
     - key: PREFECT_API_URL
       value: "http://prefect-server:4200/api"
@@ -80,13 +81,13 @@ services:
         property: connectionString
     - fromGroup: app-secrets
 
-# ── Phoenix LiveView web ────────────────────────
+# ── Phoenix LiveView Web ───────────────────────
 - name: phoenix-web
   type: web
   env: docker
   plan: starter
   rootDir: frontend
-  dockerfilePath: frontend/Dockerfile
+  dockerfilePath: Dockerfile
   healthCheckPath: /
   dockerCommand: >
     /app/_build/prod/rel/frontend/bin/frontend start
