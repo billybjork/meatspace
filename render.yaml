@@ -1,6 +1,6 @@
 # ─────────────── render.yaml ───────────────
 # Four Docker services, two Postgres DBs, one env-group
-# (copy/paste as-is)
+# (drop-in replacement)
 
 ##################################################
 # 0) Shared env vars (non-secret defaults only)
@@ -10,9 +10,9 @@ envVarGroups:
     envVars:
       - key: AWS_REGION
         value: "us-west-1"
-      # Add S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
+      # add S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
       # AWS_SECRET_ACCESS_KEY, CLOUDFRONT_DOMAIN
-      # in the Render UI (they stay out of source control)
+      # directly in Render UI
 
 ##################################################
 # 1) Databases
@@ -21,7 +21,7 @@ databases:
   - name: app-db
     plan: basic-1gb
     postgresMajorVersion: 16
-    ipAllowList: []        # internal-only
+    ipAllowList: []
 
   - name: prefect-db
     plan: basic-1gb
@@ -41,10 +41,7 @@ services:
     rootDir: backend
     dockerfilePath: Dockerfile.prefect-server
 
-    # Build async SQL-Alchemy URL, then start Prefect
-    dockerCommand: >-
-      sh -c "export PREFECT_API_DATABASE_CONNECTION_URL='postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require' &&
-             prefect server start --host 0.0.0.0 --port 4200"
+    dockerCommand: "sh -c 'export PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require && exec prefect server start --host 0.0.0.0 --port 4200'"
 
     disk:
       name: prefect-home
@@ -52,58 +49,41 @@ services:
       sizeGB: 5
 
     envVars:
-      # pieces pulled from the Render DB object
       - key: DB_HOST
-        fromDatabase:
-          name: prefect-db
-          property: host
+        fromDatabase: { name: prefect-db, property: host }
       - key: DB_PORT
-        fromDatabase:
-          name: prefect-db
-          property: port
+        fromDatabase: { name: prefect-db, property: port }
       - key: DB_USER
-        fromDatabase:
-          name: prefect-db
-          property: user
+        fromDatabase: { name: prefect-db, property: user }
       - key: DB_PASSWORD
-        fromDatabase:
-          name: prefect-db
-          property: password
+        fromDatabase: { name: prefect-db, property: password }
       - key: DB_NAME
-        fromDatabase:
-          name: prefect-db
-          property: database
+        fromDatabase: { name: prefect-db, property: database }
 
-      # Prefect settings
       - key: PREFECT_SERVER_API_HOST
         value: "0.0.0.0"
       - key: PREFECT_UI_API_URL
         value: "http://prefect-server:4200/api"
 
-      # Shared secrets (S3, CloudFront, etc.)
       - fromGroup: app-secrets
 
-# ── Prefect Worker (background) ────────────────
+# ── Prefect Worker ─────────────────────────────
   - name: prefect-worker
     type: worker
     env: docker
     plan: starter
     rootDir: backend
     dockerfilePath: Dockerfile
-    dockerCommand: >-
-      sh -c "until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
-             prefect worker start --pool default-agent-pool"
+    dockerCommand: "sh -c 'until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done && prefect worker start --pool default-agent-pool'"
 
-    numInstances: 1        # autoscaling not on Hobby
+    numInstances: 1
     envVars:
       - key: PREFECT_API_URL
         value: "http://prefect-server:4200/api"
       - key: PREFECT_WORKER_CONCURRENCY_LIMIT
         value: "3"
       - key: DATABASE_URL
-        fromDatabase:
-          name: app-db
-          property: connectionString
+        fromDatabase: { name: app-db, property: connectionString }
       - fromGroup: app-secrets
 
 # ── Phoenix LiveView Web ───────────────────────
@@ -114,14 +94,11 @@ services:
     rootDir: frontend
     dockerfilePath: Dockerfile
     healthCheckPath: /
-    dockerCommand: >-
-      /app/_build/prod/rel/frontend/bin/frontend start
+    dockerCommand: "/app/_build/prod/rel/frontend/bin/frontend start"
 
     envVars:
       - key: DATABASE_URL
-        fromDatabase:
-          name: app-db
-          property: connectionString
+        fromDatabase: { name: app-db, property: connectionString }
       - key: PHX_SERVER
         value: "true"
       - key: SECRET_KEY_BASE
