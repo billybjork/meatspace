@@ -1,5 +1,5 @@
 # ─────────────── render.yaml ───────────────
-# Four services, two Postgres DBs, one env-group
+# Four Docker services, two Postgres DBs, one env-group
 
 ##################################################
 # 0) Shared env vars
@@ -14,7 +14,7 @@ envVarGroups:
     # later via the dashboard UI
 
 ##################################################
-# 1) Databases  (ROOT-LEVEL)
+# 1) Databases
 ##################################################
 databases:
 - name: app-db
@@ -28,16 +28,16 @@ databases:
   ipAllowList: []
 
 ##################################################
-# 2) Services  (ROOT-LEVEL, sibling of databases)
+# 2) Services
 ##################################################
 services:
 
-# ── Prefect server ──────────────────────────────
+# ── Prefect server (private service) ────────────
 - name: prefect-server
   type: pserv
-  env: docker              # ← Use “env” for Docker services
+  env: docker
   plan: starter
-  dockerContext: backend
+  rootDir: backend                   # build context = ./backend
   dockerfilePath: Dockerfile.prefect-server
   dockerCommand: >
     prefect server start --host 0.0.0.0 --port 4200
@@ -56,19 +56,19 @@ services:
         property: connectionString
     - fromGroup: app-secrets
 
-# ── Prefect worker ──────────────────────────────
+# ── Prefect worker (background) ────────────────
 - name: prefect-worker
   type: worker
   env: docker
   plan: starter
-  dockerContext: backend
+  rootDir: backend
   dockerfilePath: Dockerfile
   dockerCommand: >
     bash -c '
       until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
       prefect worker start --pool default-agent-pool
     '
-  numInstances: 1
+  numInstances: 1                   # autoscaling not in Hobby
   envVars:
     - key: PREFECT_API_URL
       value: "http://prefect-server:4200/api"
@@ -80,12 +80,12 @@ services:
         property: connectionString
     - fromGroup: app-secrets
 
-# ── Phoenix web ────────────────────────────────
+# ── Phoenix LiveView web ────────────────────────
 - name: phoenix-web
   type: web
   env: docker
   plan: starter
-  dockerContext: frontend
+  rootDir: frontend
   dockerfilePath: Dockerfile
   healthCheckPath: /
   dockerCommand: >
