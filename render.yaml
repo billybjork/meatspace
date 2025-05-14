@@ -39,11 +39,11 @@ databases:
 ##################################################
 services:
   - name: prefect-server
-    type: private                   # was “pserv”
+    type: private_service
     runtime: docker
     plan: starter
     dockerfilePath: backend/Dockerfile.prefect-server
-    buildContext: ./backend         # correct key is buildContext, not dockerContext
+    buildContext: ./backend
     startCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     healthCheckPath: /api/health
@@ -79,7 +79,7 @@ services:
     autoscale:
       minInstances: 0
       maxInstances: 2
-      cpuThresholdPercent: 60
+      targetCPUPercent: 60
     envVars:
       - key: PREFECT_API_URL
         value: "http://prefect-server:4200/api"
