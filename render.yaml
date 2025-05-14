@@ -1,5 +1,5 @@
 # ─────────────── render.yaml ───────────────
-# One file, five services, two databases.
+# One file, four services, two databases.
 # Remove comments after you’re happy.
 
 ##################################################
@@ -42,11 +42,12 @@ services:
     type: pserv                     # private service
     runtime: docker
     plan: starter
-    dockerContext: ./backend
+    rootDir: ./backend
     dockerfilePath: backend/Dockerfile.prefect-server
     startCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     healthCheckPath: /api/health
+    port: 4200                      # exposes the service internally
     disk:
       name: prefect-home
       mountPath: /.prefect
@@ -68,11 +69,11 @@ services:
     type: worker
     runtime: docker
     plan: starter           # bump to standard when videos get heavy
-    dockerContext: ./backend
+    rootDir: ./backend
     dockerfilePath: backend/Dockerfile
     startCommand: >
       bash -c '
-        until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done;
+        until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
         prefect worker start --pool default-agent-pool
       '
     autoscale:
@@ -88,8 +89,7 @@ services:
         fromDatabase:
           name: app-db
           property: connectionString
-    envVarGroups:
-      - name: app-secrets               # S3 creds, etc.
+      - fromGroup: app-secrets       # S3 creds, etc.
 
 ##################################################
 # 4) Phoenix LiveView web
@@ -98,15 +98,16 @@ services:
     type: web
     runtime: docker
     plan: starter
-    dockerContext: ./frontend
+    rootDir: ./frontend
     dockerfilePath: frontend/Dockerfile
-    healthCheckPath: /
     # Start: run Ecto migrations once, then launch the release
     startCommand: >
       bash -c '
         /app/_build/prod/rel/frontend/bin/frontend eval "Frontend.Release.migrate" &&
         exec /app/_build/prod/rel/frontend/bin/frontend start
       '
+    healthCheckPath: /
+    port: 4000
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -116,5 +117,4 @@ services:
         value: "true"
       - key: SECRET_KEY_BASE
         generateValue: true
-    envVarGroups:
-      - name: app-secrets
+      - fromGroup: app-secrets       # shared secrets
