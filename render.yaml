@@ -8,7 +8,7 @@
 envVarGroups:
   - name: app-secrets
     envVars:
-      # ↳ keep real values in the Render UI after first sync
+      # ↳ put real values in the Render UI after first sync
       - key: S3_BUCKET_NAME
         sync: false
       - key: AWS_REGION
@@ -42,12 +42,11 @@ services:
     type: pserv                     # private service
     runtime: docker
     plan: starter
-    rootDir: ./backend
+    dockerContext: ./backend
     dockerfilePath: backend/Dockerfile.prefect-server
     startCommand: >
       prefect server start --host 0.0.0.0 --port 4200
     healthCheckPath: /api/health
-    port: 4200                      # exposes the service internally
     disk:
       name: prefect-home
       mountPath: /.prefect
@@ -61,6 +60,7 @@ services:
         fromDatabase:
           name: prefect-db
           property: connectionString
+      - fromGroup: app-secrets
 
 ##################################################
 # 3) Prefect worker
@@ -68,15 +68,15 @@ services:
   - name: prefect-worker
     type: worker
     runtime: docker
-    plan: starter           # bump to standard when videos get heavy
-    rootDir: ./backend
+    plan: starter           # bump when video batches get heavy
+    dockerContext: ./backend
     dockerfilePath: backend/Dockerfile
     startCommand: >
       bash -c '
         until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
         prefect worker start --pool default-agent-pool
       '
-    autoscale:
+    scaling:
       minInstances: 0
       maxInstances: 2
       targetCPUPercent: 60
@@ -89,7 +89,7 @@ services:
         fromDatabase:
           name: app-db
           property: connectionString
-      - fromGroup: app-secrets       # S3 creds, etc.
+      - fromGroup: app-secrets
 
 ##################################################
 # 4) Phoenix LiveView web
@@ -98,16 +98,14 @@ services:
     type: web
     runtime: docker
     plan: starter
-    rootDir: ./frontend
+    dockerContext: ./frontend
     dockerfilePath: frontend/Dockerfile
-    # Start: run Ecto migrations once, then launch the release
+    healthCheckPath: /
     startCommand: >
       bash -c '
         /app/_build/prod/rel/frontend/bin/frontend eval "Frontend.Release.migrate" &&
         exec /app/_build/prod/rel/frontend/bin/frontend start
       '
-    healthCheckPath: /
-    port: 4000
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -117,4 +115,4 @@ services:
         value: "true"
       - key: SECRET_KEY_BASE
         generateValue: true
-      - fromGroup: app-secrets       # shared secrets
+      - fromGroup: app-secrets
