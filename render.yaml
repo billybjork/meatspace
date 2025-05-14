@@ -42,11 +42,11 @@ services:
   dockerfilePath: Dockerfile.prefect-server
 
   # Build async URL, then launch Prefect
-  dockerCommand: >
-    bash -c '
-      export PREFECT_API_DATABASE_CONNECTION_URL="postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require" &&
+  dockerCommand: |-
+    bash -c "
+      export PREFECT_API_DATABASE_CONNECTION_URL=postgresql+asyncpg://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}?sslmode=require
       prefect server start --host 0.0.0.0 --port 4200
-    '
+    "
 
   disk:
     name: prefect-home
