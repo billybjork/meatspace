@@ -40,3 +40,12 @@ deployments:
       work_queue_name: default
     parameters: {}
     tags: ["ingest", "processing", "post-review", "triggered"]
+    
+  - name: intake-default
+      description: "On‐demand intake from the Phoenix toolbar"
+      entrypoint: flows/ingest_flows.py:intake_source_flow
+      work_pool:
+        name: default-agent-pool
+        work_queue_name: default
+      parameters: {}
+      tags: ["ingest","on‐demand"]

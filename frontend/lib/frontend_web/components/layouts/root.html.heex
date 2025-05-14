@@ -13,6 +13,20 @@
   <body class="bg-white antialiased">
     <!-- ▸ global toolbar -->
     <FrontendWeb.NavComponent.nav current_path={@conn.request_path} />
+
+    <!-- ▸ flash messages -->
+    <%= if info = Phoenix.Flash.get(@flash, :info) do %>
+      <div class="flash flash--approve">
+        <%= info %>
+      </div>
+    <% end %>
+
+    <%= if error = Phoenix.Flash.get(@flash, :error) do %>
+      <div class="flash flash--archive">
+        <%= error %>
+      </div>
+    <% end %>
+
     <%= @inner_content %>
   </body>
 </html>

@@ -779,3 +779,18 @@ async def cleanup_reviewed_clips_flow(
         f"DB Artifacts Deleted: {db_artifact_deleted_count}, DB Clips Updated: {db_clip_updated_count}, "
         f"Errors: {error_count}"
     )
+
+@flow(name="Intake Source Video")
+def intake_source_flow(
+    source_video_id: int,
+    input_source: str,
+    re_encode_for_qt: bool = True,
+    overwrite_existing: bool = False,
+):
+    # simply invoke the existing task
+    return intake_task(
+      source_video_id=source_video_id,
+      input_source=input_source,
+      re_encode_for_qt=re_encode_for_qt,
+      overwrite_existing=overwrite_existing,
+)
