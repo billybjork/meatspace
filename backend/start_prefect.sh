@@ -29,9 +29,18 @@ if [[ -n "${RENDER_IMAGE:-}" ]]; then
 fi
 
 ##############################################################################
+# 2b. Ensure the work-pool exists (idempotent)  🆕
+##############################################################################
+POOL="default-agent-pool"
+if ! prefect work-pool inspect "$POOL" &>/dev/null; then
+  echo "→ Creating work pool '$POOL' (type=process)…"
+  prefect work-pool create -t process "$POOL" --pause false
+fi
+
+##############################################################################
 # 3. Register / update all deployments
 ##############################################################################
-prefect deploy --all --pool default-agent-pool "${EXTRA_ARGS[@]}"
+prefect deploy --all "${EXTRA_ARGS[@]}"
 
 ##############################################################################
 # 4. Start the Prefect API / UI
