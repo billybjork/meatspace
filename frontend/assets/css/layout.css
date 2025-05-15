@@ -51,9 +51,9 @@ html {
    Global toolbar
 -------------------------------------------------- */
 .site-nav .container {
-  display: flex;              /* you already have this via Tailwind */
-  justify-content: center;    /* center children horizontally */
-  align-items: center;        /* keep the vertical centering */
+  display: flex;
+  justify-content: center;
+  align-items: center;
 }
 
 .site-nav {
@@ -88,7 +88,7 @@ html {
 .nav-link.relative { position: relative; }
 
 /* Submit form ---------------------------------------------------------- */
-.submit-form { margin-left: auto; }          /* pushes form to the right */
+.submit-form { margin-left: auto; }
 .submit-input {
   width: 16rem;
   max-width: 60vw;

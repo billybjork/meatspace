@@ -1,15 +1,12 @@
-# Generic project metadata
 name: meatspace-ingest
 prefect-version: 3
 
-# Define how deployments are built (using `prefect deploy --all`)
 build: null
 
-# Define deployments
 deployments:
   - name: scheduled-ingest-dispatcher
     description: Periodically checks DB for new ingest work and triggers tasks/flows.
-    entrypoint: flows/ingest_flows.py:scheduled_ingest_initiator # Relative to /app inside container
+    entrypoint: flows/ingest_flows.py:scheduled_ingest_initiator
     work_pool:
       name: default-agent-pool
       work_queue_name: default
@@ -21,7 +18,7 @@ deployments:
 
   - name: scheduled-clip-cleanup
     description: Periodically cleans up sprites for approved/archived clips after a delay.
-    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow # Relative to /app
+    entrypoint: flows/ingest_flows.py:cleanup_reviewed_clips_flow
     work_pool:
       name: default-agent-pool
       work_queue_name: default
@@ -34,7 +31,7 @@ deployments:
   - name: process-clip-post-review-default
     flow_name: process-clip-post-review
     description: Processes a single clip after review (keyframing, embedding). Triggered by ingest dispatcher.
-    entrypoint: flows/ingest_flows.py:process_clip_post_review # Relative to /app
+    entrypoint: flows/ingest_flows.py:process_clip_post_review
     work_pool:
       name: default-agent-pool
       work_queue_name: default

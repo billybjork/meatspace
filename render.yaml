@@ -1,15 +1,11 @@
-# ───────────── render.yaml (drop-in) ─────────────
 envVarGroups:
   - name: app-secrets
     envVars:
       - key: AWS_REGION
         value: "us-west-1"
-      # add S3_BUCKET_NAME, AWS_ACCESS_KEY_ID,
-      # AWS_SECRET_ACCESS_KEY, CLOUDFRONT_DOMAIN
-      # in the Render UI
 
 # ───────────── Databases ─────────────
-databases:
+databases: 
   - name: app-db
     plan: basic-1gb
     postgresMajorVersion: 16
@@ -29,14 +25,14 @@ services:
     env: docker
     plan: starter
     rootDir: backend
-    dockerfilePath: Dockerfile.prefect-server    # uses the new CMD
+    dockerfilePath: Dockerfile.prefect-server
     dockerCommand: /app/start_prefect.sh
     disk:
       name: prefect-home
       mountPath: /.prefect
       sizeGB: 5
     envVars:
-      - key: PREFECT_CONNECTION_STRING          # raw URL from Render
+      - key: PREFECT_CONNECTION_STRING
         fromDatabase:
           name: prefect-db
           property: connectionString
@@ -50,7 +46,7 @@ services:
   - name: prefect-worker
     type: worker
     env: docker
-    plan: starter
+    plan: standard
     rootDir: backend
     dockerfilePath: Dockerfile
     dockerCommand: /start_worker.sh
