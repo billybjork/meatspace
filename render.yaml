@@ -30,6 +30,7 @@ services:
     plan: starter
     rootDir: backend
     dockerfilePath: Dockerfile.prefect-server    # uses the new CMD
+    dockerCommand: /app/start_prefect.sh
     disk:
       name: prefect-home
       mountPath: /.prefect
@@ -53,10 +54,7 @@ services:
     rootDir: backend
     dockerfilePath: Dockerfile
     dockerCommand: >
-      sh -c '
-        until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done &&
-        exec prefect worker start --pool default-agent-pool
-      '
+      sh -c 'until curl -fsS http://prefect-server:4200/api/health; do sleep 5; done && exec prefect worker start --pool default-agent-pool'
     numInstances: 1
     envVars:
       - key: PREFECT_API_URL
