@@ -17,5 +17,9 @@ RUN apt-get update \
     # install sync Postgres driver
     && pip install --no-cache-dir psycopg2-binary
 
+WORKDIR /app
+COPY start_prefect.sh .
+RUN chmod +x start_prefect.sh
+
 # drop back to the Prefect user
 USER 1000
