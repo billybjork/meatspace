@@ -12,12 +12,14 @@ export PREFECT_API_DATABASE_CONNECTION_URL="${ASYNC}${sep}ssl=require"
 echo "→ Using DB URL: $PREFECT_API_DATABASE_CONNECTION_URL"
 
 ##############################################################################
-# 2. Register (or update) every deployment declared in prefect.yaml
-#    --apply   = “yes, go ahead and create/update it”   (replaces --yes)
+# 2. (Re)register every deployment declared in prefect.yaml
+#    ────────────  NO --apply, --yes, or --skip-upload  ────────────
 ##############################################################################
-prefect deploy --all --apply        # no --skip-upload in 3.4+
+prefect deploy --all                       \
+               --pool default-agent-pool   \
+               --override work_pool.job_variables.image="$RENDER_IMAGE"
 
 ##############################################################################
-# 3. Launch the Prefect API / UI
+# 3. Start Prefect Server
 ##############################################################################
 exec prefect server start --host 0.0.0.0 --port 4200
