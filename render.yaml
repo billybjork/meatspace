@@ -29,28 +29,20 @@ services:
     env: docker
     plan: starter
     rootDir: backend
-    dockerfilePath: Dockerfile.prefect-server
-
-    dockerCommand: >
-      sh -c "export PREFECT_API_DATABASE_CONNECTION_URL=\$(echo \"$PREFECT_CONNECTION_STRING\" | sed 's/^postgres/postgresql+asyncpg/')'?sslmode=require' &&
-      exec python -m prefect server start --host 0.0.0.0 --port 4200"
-
+    dockerfilePath: Dockerfile.prefect-server    # uses the new CMD
     disk:
       name: prefect-home
       mountPath: /.prefect
       sizeGB: 5
-
     envVars:
-      - key: PREFECT_CONNECTION_STRING
+      - key: PREFECT_CONNECTION_STRING          # raw URL from Render
         fromDatabase:
           name: prefect-db
           property: connectionString
-
       - key: PREFECT_SERVER_API_HOST
         value: "0.0.0.0"
       - key: PREFECT_UI_API_URL
         value: "http://prefect-server:4200/api"
-
       - fromGroup: app-secrets
 
 # --- Prefect Worker --------------------------------------------------
