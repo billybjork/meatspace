@@ -7,8 +7,11 @@ shopt -s expand_aliases
 ##############################################################################
 RAW="${PREFECT_CONNECTION_STRING:?PREFECT_CONNECTION_STRING not set}"
 
-if [[ $RAW == postgres://* ]]; then                  # only fix *once*
+# convert *both* postgres://… and postgresql://… only once
+if [[ $RAW == postgres://* ]]; then
   ASYNC="${RAW/postgres/postgresql+asyncpg}"
+elif [[ $RAW == postgresql://* && $RAW != postgresql+asyncpg://* ]]; then
+  ASYNC="${RAW/postgresql/postgresql+asyncpg}"
 else
   ASYNC="$RAW"
 fi

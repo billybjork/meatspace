@@ -7,9 +7,8 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && mkdir -p /usr/local/lib/python3.11/site-packages/prefect/server/ui_build \
  && chmod -R a+rwx /usr/local/lib/python3.11/site-packages/prefect/server/ui_build \
- && mkdir -p /.prefect \
- && chmod a+rwx /.prefect \
- && pip install --no-cache-dir psycopg2-binary
+ && mkdir -p /.prefect && chmod a+rwx /.prefect \
+ && pip install --no-cache-dir asyncpg
 
 WORKDIR /app
 
