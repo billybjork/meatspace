@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -e
 
-# Wait for Prefect API to come up
-until curl -fsS http://prefect-server:4200/api/health; do
+# wait for the API to come up (use the shared PREFECT_API_URL)
+until curl -fsS "${PREFECT_API_URL}/health"; do
   sleep 5
 done
 

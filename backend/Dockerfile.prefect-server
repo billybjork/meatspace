@@ -1,7 +1,7 @@
 FROM prefecthq/prefect:3-python3.11
 USER root
 
-# OS + Python bits (unchanged)
+# OS + Python bits
 RUN apt-get update \
  && apt-get install -y --no-install-recommends curl \
  && rm -rf /var/lib/apt/lists/* \
@@ -12,12 +12,12 @@ RUN apt-get update \
 
 WORKDIR /app
 
-# 🔑 NEW — copy the **rest of the backend** into the image
+# Copy the **rest of the backend** into the image
 COPY . .
 
-# keep your entry-point script
+# Run the entry-point script
 COPY start_prefect.sh .
 RUN chmod +x start_prefect.sh
 
-# run as non-root
+# Run as non-root
 USER 1000

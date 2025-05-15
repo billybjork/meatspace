@@ -43,7 +43,7 @@ services:
       - key: PREFECT_SERVER_API_HOST
         value: "0.0.0.0"
       - key: PREFECT_UI_API_URL
-        value: "http://prefect-server:4200/api"
+        value: "http://meatspace:4200/api"
       - fromGroup: app-secrets
 
 # --- Prefect Worker --------------------------------------------------
@@ -57,7 +57,7 @@ services:
     numInstances: 1
     envVars:
       - key: PREFECT_API_URL
-        value: "http://prefect-server:4200/api"
+        value: "http://meatspace:4200/api"
       - key: PREFECT_WORKER_CONCURRENCY_LIMIT
         value: "3"
       - key: INTAKE_DEPLOYMENT_SLUG

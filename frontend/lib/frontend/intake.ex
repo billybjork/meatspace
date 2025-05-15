@@ -3,10 +3,6 @@ defmodule Frontend.Intake do
   Inserts a row into `source_videos` **and** kicks off the *Intake Source Video*
   deployment on your Prefect server.
 
-  ## Required env-vars
-
-    * `PREFECT_API_URL`          – e.g. http://meatspace:4200/api
-    * `INTAKE_DEPLOYMENT_SLUG`   – e.g. "meatspace-ingest/intake-default"
   """
 
   alias Frontend.Repo

@@ -1,6 +1,5 @@
 import Config
 
-# Enable the server if PHX_SERVER=true
 if System.get_env("PHX_SERVER") do
   config :frontend, FrontendWeb.Endpoint, server: true
 end
