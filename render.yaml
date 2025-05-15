@@ -78,7 +78,7 @@ services:
       /app/_build/prod/rel/frontend/bin/frontend start
     envVars:
       - key: PREFECT_API_URL
-        value: http://prefect-server:4200/api
+        value: http://meatspace:4200/api
       - key: INTAKE_DEPLOYMENT_ID
         value: 28e9a4bc-0d70-4873-96f4-6bab7877073d
       - key: DATABASE_URL
