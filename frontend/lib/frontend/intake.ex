@@ -1,19 +1,16 @@
 defmodule Frontend.Intake do
   @moduledoc """
-  Pure-Elixir helper that
+  Inserts a row into `source_videos` **and** kicks off the *Intake Source Video*
+  deployment on your Prefect server.
 
-    1. Inserts a **new** row into `source_videos`.
-    2. Triggers your Prefect deployment (`intake_task`).
+  ## Required env-vars
 
-  Expects:
-
-    * `PREFECT_API_URL`         – defaults to http://localhost:4200/api
-    * `INTAKE_DEPLOYMENT_ID`    – deployment id/slug for *intake_task*
+    * `PREFECT_API_URL`          – e.g. http://meatspace:4200/api
+    * `INTAKE_DEPLOYMENT_SLUG`   – e.g. "meatspace-ingest/intake-default"
   """
 
   alias Frontend.Repo
 
-  # now used in insert_source_video/1
   @source_videos "source_videos"
 
   @spec submit(String.t()) :: :ok | {:error, String.t()}
@@ -24,20 +21,17 @@ defmodule Frontend.Intake do
     end
   end
 
-    # -- step 1: insert into source_videos -------------------------------
-
-    defp insert_source_video(url) do
+  # ────────────────────────────────────────────────────────────────────
+  # step 1 · create DB row
+  # ────────────────────────────────────────────────────────────────────
+  defp insert_source_video(url) do
     is_http? = String.starts_with?(url, ["http://", "https://"])
 
-    # For URLs give a tiny placeholder that satisfies NOT-NULL
-    # For local files keep the derived filename
     title =
       if is_http? do
-        "?"                  # will be overwritten by intake_task
+        "?"                                     # overwritten later
       else
-        url
-        |> Path.basename(".mp4")
-        |> String.slice(0, 250)
+        url |> Path.basename(".mp4") |> String.slice(0, 250)
       end
 
     fields = %{
@@ -57,15 +51,18 @@ defmodule Frontend.Intake do
     e -> {:error, "DB error: #{Exception.message(e)}"}
   end
 
-  # -- step 2: call Prefect API ----------------------------------------
-
+  # ────────────────────────────────────────────────────────────────────
+  # step 2 · call Prefect API
+  # ────────────────────────────────────────────────────────────────────
   defp create_prefect_run(id, url) do
-    api        = System.get_env("PREFECT_API_URL") || "http://localhost:4200/api"
-    deployment =
-      System.get_env("INTAKE_DEPLOYMENT_ID") ||
+    api =
+      System.get_env("PREFECT_API_URL") ||
+        "http://localhost:4200/api"
+
+    slug =
+      System.get_env("INTAKE_DEPLOYMENT_SLUG") ||
         raise """
-        Missing INTAKE_DEPLOYMENT_ID. \
-        Please export the ID of your Intake Source Video deployment.
+        Missing INTAKE_DEPLOYMENT_SLUG (e.g. "meatspace-ingest/intake-default")
         """
 
     body = %{
@@ -78,21 +75,21 @@ defmodule Frontend.Intake do
       idempotency_key: "frontend_submit_#{id}"
     }
 
-    case Req.post(
-           url: "#{api}/deployments/#{deployment}/create_flow_run",
-           json: body
-         ) do
-      {:ok, %{status: 201}} ->
-        :ok
-
-      {:ok, %{status: status, body: resp}} ->
-        {:error, "Prefect API #{status}: #{inspect(resp)}"}
-
-      {:error, %Mint.TransportError{reason: reason}} ->
-        {:error, "Prefect connection failed: #{reason}"}
-
-      {:error, other} ->
-        {:error, "Prefect call failed: #{inspect(other)}"}
-    end
+    Req.post(
+      url: "#{api}/deployments/name/#{slug}/create_flow_run",
+      json: body
+    )
+    |> handle_response()
   end
+
+  defp handle_response({:ok, %{status: 201}}), do: :ok
+
+  defp handle_response({:ok, %{status: status, body: resp}}),
+    do: {:error, "Prefect API #{status}: #{inspect(resp)}"}
+
+  defp handle_response({:error, %Mint.TransportError{reason: reason}}),
+    do: {:error, "Prefect connection failed: #{reason}"}
+
+  defp handle_response({:error, other}),
+    do: {:error, "Prefect call failed: #{inspect(other)}"}
 end
