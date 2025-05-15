@@ -83,6 +83,13 @@ services:
           property: connectionString
       - key: PHX_SERVER
         value: "true"
+      - key: PHX_HOST
+        value: phoenix-web-yupe.onrender.com
+      - key: PORT
+        value: "4000"
+      - key: SECRET_KEY_BASE
+        generateValue: true
+      - fromGroup: app-secrets
       - key: SECRET_KEY_BASE
         generateValue: true
       - fromGroup: app-secrets

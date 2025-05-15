@@ -44,7 +44,7 @@ if config_env() == :prod do
 
   # Render will inject PORT (dynamic) and you should set PHX_HOST to e.g.
   #   your-service-name.onrender.com
-  host = System.get_env("PHX_HOST") || "example.com"
+  host = System.get_env("PHX_HOST") || "phoenix-web-yupe.onrender.com"
   port = String.to_integer(System.get_env("PORT") || "4000")
 
   # Optional: DNS cluster query if you’re using multiple nodes
@@ -56,7 +56,12 @@ if config_env() == :prod do
       ip: {0, 0, 0, 0, 0, 0, 0, 0},
       port: port
     ],
-    secret_key_base: secret_key_base
+    check_origin: [
+      "//" <> host,        # primary Render URL
+      "//localhost"       # optional – dev convenience
+    ],
+    secret_key_base: secret_key_base,
+    server: true
 
   # If you want to enforce SSL redirects (recommended in prod)
   # uncomment the following:
