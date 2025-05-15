@@ -53,14 +53,7 @@ services:
     plan: starter
     rootDir: backend
     dockerfilePath: Dockerfile
-    dockerCommand:
-      - /bin/sh
-      - -c
-      - |
-          until curl -fsS http://prefect-server:4200/api/health; do
-            sleep 5
-          done
-          exec prefect worker start --pool default-agent-pool
+    dockerCommand: /start_worker.sh
     numInstances: 1
     envVars:
       - key: PREFECT_API_URL

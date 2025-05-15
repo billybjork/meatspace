@@ -64,5 +64,8 @@ COPY . .
 # Prefect stores state under this directory by default
 ENV PREFECT_HOME=/root/.prefect
 
+COPY start_worker.sh /start_worker.sh
+RUN chmod +x /start_worker.sh
+
 # Default shell entrypoint – your docker-compose overrides this with `prefect worker start`
 CMD ["bash"]
