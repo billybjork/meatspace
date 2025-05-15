@@ -55,15 +55,8 @@ defmodule Frontend.Intake do
   # step 2 · call Prefect API
   # ────────────────────────────────────────────────────────────────────
   defp create_prefect_run(id, url) do
-    api =
-      System.get_env("PREFECT_API_URL") ||
-        "http://localhost:4200/api"
-
-    slug =
-      System.get_env("INTAKE_DEPLOYMENT_SLUG") ||
-        raise """
-        Missing INTAKE_DEPLOYMENT_SLUG (e.g. "meatspace-ingest/intake-default")
-        """
+    api  = System.fetch_env!("PREFECT_API_URL")
+    uuid = System.fetch_env!("INTAKE_DEPLOYMENT_ID")
 
     body = %{
       parameters: %{
@@ -76,7 +69,7 @@ defmodule Frontend.Intake do
     }
 
     Req.post(
-      url: "#{api}/deployments/name/#{slug}/create_flow_run",
+      url: "#{api}/deployments/#{uuid}/create_flow_run",
       json: body
     )
     |> handle_response()
