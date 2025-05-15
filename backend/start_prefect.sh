@@ -29,12 +29,13 @@ if [[ -n "${RENDER_IMAGE:-}" ]]; then
 fi
 
 ##############################################################################
-# 2b. Ensure the work-pool exists (idempotent)  🆕
+# 2b. Ensure the work-pool exists (idempotent)
 ##############################################################################
 POOL="default-agent-pool"
 if ! prefect work-pool inspect "$POOL" &>/dev/null; then
   echo "→ Creating work pool '$POOL' (type=process)…"
-  prefect work-pool create -t process "$POOL" --pause false
+  # ↓↓↓ REMOVE the old --pause flag ↓↓↓
+  prefect work-pool create --type process "$POOL"
 fi
 
 ##############################################################################
